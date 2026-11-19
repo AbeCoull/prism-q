@@ -37,7 +37,7 @@ pub(super) fn mps_pauli_factors(observable: &[PauliTerm]) -> Vec<(usize, MpsPaul
 
 /// Replace each `[j, α']` pair of rows in `tmp`, laid out `[β, j, α']` with
 /// rows of `br`, by `Σ_j tmp[β, j, α'] · M[j, k]` for the Pauli matrix `M`.
-pub(super) fn fold_pauli_into_rows(tmp: &mut [Complex64], br: usize, axis: Option<MpsPauliAxis>) {
+fn fold_pauli_into_rows(tmp: &mut [Complex64], br: usize, axis: Option<MpsPauliAxis>) {
     let Some(axis) = axis else {
         return;
     };
@@ -61,7 +61,7 @@ pub(super) fn fold_pauli_into_rows(tmp: &mut [Complex64], br: usize, axis: Optio
     }
 }
 
-pub(super) fn identity_env(dim: usize) -> Vec<Complex64> {
+fn identity_env(dim: usize) -> Vec<Complex64> {
     let mut env = vec![ZERO; dim * dim];
     for i in 0..dim {
         env[i * dim + i] = ONE;

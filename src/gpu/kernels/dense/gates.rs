@@ -4,10 +4,10 @@ use cudarc::driver::PushKernelArg;
 use num_complex::Complex64;
 
 use crate::error::{PrismError, Result};
+use crate::gpu::{GpuContext, GpuState};
 
 use super::super::{check_pair, check_qubit, grid_for, launch_counted, linear_cfg, stream_and_fn};
 use super::{BLOCK_SIZE, FusedMatArg, qubit_list};
-use crate::gpu::{GpuContext, GpuState};
 
 /// Write amplitude 0 = 1; assumes the buffer is already zeroed.
 pub(crate) fn launch_set_initial_state(ctx: &GpuContext, state: &mut GpuState) -> Result<()> {
@@ -141,7 +141,7 @@ pub(crate) fn launch_apply_swap(
 
 /// `same` multiplies amplitudes whose two target bits agree, `diff` those
 /// whose bits differ.
-pub(crate) fn launch_apply_parity_phase(
+pub(super) fn launch_apply_parity_phase(
     ctx: &GpuContext,
     state: &mut GpuState,
     q0: usize,

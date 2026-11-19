@@ -292,7 +292,7 @@ pub(crate) fn count_vec_key_masked<S>(
 #[derive(Debug, Clone)]
 pub struct PackedShots {
     data: Vec<u64>,
-    pub(super) num_shots: usize,
+    num_shots: usize,
     num_measurements: usize,
     m_words: usize,
     s_words: usize,

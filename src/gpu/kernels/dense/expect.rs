@@ -4,11 +4,14 @@ use cudarc::driver::{CudaViewMut, LaunchConfig, PushKernelArg};
 use num_complex::Complex64;
 
 use crate::error::Result;
+use crate::gpu::{GpuBuffer, GpuContext, GpuState};
 
-use super::super::{launch_counted, linear_cfg};
+use super::super::{
+    ensure_capacity, ensure_exact, ensure_scratch, finalize_pauli_sums, grid_y_tiles,
+    launch_counted, linear_cfg, require_u32,
+};
 use super::BLOCK_SIZE;
 use super::tiles::launch_apply_multi_fused_nondiag;
-use crate::gpu::{GpuBuffer, GpuContext, GpuState};
 
 /// `sum_j conj(psi[j ^ xmask]) psi[j] (-1)^{popcount(j & zmask)}` per
 /// `(xmask, zmask)` pair with `pending_norm²` applied: the complex accumulator
@@ -26,7 +29,7 @@ pub(crate) fn pauli_sums(
     let dim: u64 = 1u64 << state.num_qubits();
     let elems_per_block = (PAULI_AMPS_PER_THREAD * BLOCK_SIZE as usize) as u64;
     let blocks_per_mask = dim.div_ceil(elems_per_block).max(1) as u32;
-    let num_masks = super::super::require_u32("sv_pauli_expect", "masks", masks.len())?;
+    let num_masks = require_u32("sv_pauli_expect", "masks", masks.len())?;
     let device = ctx.device();
     let stream = device.stream()?;
     let stage1 = device.function("sv_pauli_expect")?;
@@ -48,7 +51,7 @@ pub(crate) fn pauli_sums(
             group_start.push(position as u64);
         }
     }
-    let num_groups = super::super::require_u32("sv_pauli_expect", "groups", group_x.len())?;
+    let num_groups = require_u32("sv_pauli_expect", "groups", group_x.len())?;
     let mut groups = group_x;
     groups.extend(group_start);
     groups.push(masks.len() as u64);
@@ -61,11 +64,11 @@ pub(crate) fn pauli_sums(
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
     let partial_len = 2 * masks.len() * blocks_per_mask as usize;
-    super::super::ensure_capacity(&mut scratch.measure_partials, device, partial_len)?;
-    super::super::ensure_scratch(&mut scratch.u64_a, device, &groups)?;
-    super::super::ensure_scratch(&mut scratch.u64_b, device, &members)?;
+    ensure_capacity(&mut scratch.measure_partials, device, partial_len)?;
+    ensure_scratch(&mut scratch.u64_a, device, &groups)?;
+    ensure_scratch(&mut scratch.u64_b, device, &members)?;
     let partials = scratch.measure_partials.as_mut().unwrap();
-    for (group_base, launch_groups) in super::super::grid_y_tiles(num_groups) {
+    for (group_base, launch_groups) in grid_y_tiles(num_groups) {
         let cfg = LaunchConfig {
             grid_dim: (blocks_per_mask, launch_groups, 1),
             block_dim: (BLOCK_SIZE, 1, 1),
@@ -100,7 +103,7 @@ pub(crate) fn pauli_sums(
         }?;
     }
     let norm_sq = state.pending_norm() * state.pending_norm();
-    super::super::finalize_pauli_sums(
+    finalize_pauli_sums(
         device,
         scratch,
         num_masks,
@@ -164,11 +167,7 @@ pub(crate) fn group_moments(
         };
         let mut scratch = ctx.launcher_scratch();
         let scratch = &mut *scratch;
-        let result = super::super::ensure_exact(
-            &mut scratch.moment_partials,
-            device,
-            stride * groups.len(),
-        )?;
+        let result = ensure_exact(&mut scratch.moment_partials, device, stride * groups.len())?;
         let mut slice = result.raw_mut().slice_mut(g * stride..(g + 1) * stride);
         launch_group_moments(
             ctx,
@@ -226,9 +225,9 @@ fn launch_group_moments(
     let stream = device.stream()?;
     let func = device.function("sv_group_moments")?;
     let dim: u64 = 1u64 << state.num_qubits();
-    let num_terms = super::super::require_u32("sv_group_moments", "terms", zmasks.len())?;
-    super::super::ensure_scratch(masks_slot, device, zmasks)?;
-    super::super::ensure_scratch(coefficients_slot, device, coefficients)?;
+    let num_terms = require_u32("sv_group_moments", "terms", zmasks.len())?;
+    ensure_scratch(masks_slot, device, zmasks)?;
+    ensure_scratch(coefficients_slot, device, coefficients)?;
     let mut builder = stream.launch_builder(&func);
     builder
         .arg(state.buffer().raw())
@@ -265,12 +264,12 @@ pub(crate) fn operator_moments(
     let stream = device.stream()?;
     let func = device.function("sv_operator_moments")?;
     let dim: u64 = 1u64 << state.num_qubits();
-    let num_groups = super::super::require_u32("sv_operator_moments", "groups", table.xs.len())?;
+    let num_groups = require_u32("sv_operator_moments", "groups", table.xs.len())?;
     let xs: Vec<u64> = table.xs.iter().map(|&x| x as u64).collect();
     let offsets = table
         .offsets
         .iter()
-        .map(|&o| super::super::require_u32("sv_operator_moments", "offset", o))
+        .map(|&o| require_u32("sv_operator_moments", "offset", o))
         .collect::<Result<Vec<u32>>>()?;
     let zs: Vec<u64> = table.zs.iter().map(|&z| z as u64).collect();
     let coefficients: Vec<f64> = table

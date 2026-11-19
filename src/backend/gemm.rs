@@ -8,7 +8,7 @@ const ZERO: Complex64 = Complex64::new(0.0, 0.0);
 const ONE: Complex64 = Complex64::new(1.0, 0.0);
 
 /// `m * k * n` at or above which a product multiplies through faer rather than
-/// the scalar loops: the floor `tensornetwork.rs` measured for the same call,
+/// the scalar loops: the floor `tensornetwork/tensor.rs` measured for the same call,
 /// which one pass of an MPS environment step clears at bond 64 and not at 32.
 #[cfg(feature = "parallel")]
 const MIN_FAER_GEMM_WORK: usize = 1 << 18;

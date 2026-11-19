@@ -3,10 +3,10 @@
 use cudarc::driver::{DevicePtr, LaunchConfig, PushKernelArg};
 
 use crate::error::Result;
-
-use super::super::{check_qubit, grid_for, launch_counted, linear_cfg};
-use super::{BLOCK_SIZE, KrausSetArg, NOISE_MAX_KRAUS};
 use crate::gpu::{GpuContext, GpuState};
+
+use super::super::{check_qubit, ensure_capacity, grid_for, launch_counted, linear_cfg};
+use super::{BLOCK_SIZE, KrausSetArg, NOISE_MAX_KRAUS};
 
 /// The decide kernel of one trajectory noise site and its arguments.
 enum NoiseDecide<'a> {
@@ -124,13 +124,13 @@ fn noise_site(
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
-    super::super::ensure_capacity(
+    ensure_capacity(
         &mut scratch.measure_partials,
         device,
         (columns * num_blocks) as usize,
     )?;
-    super::super::ensure_capacity(&mut scratch.noise_decision, device, 9)?;
-    super::super::ensure_capacity(&mut scratch.noise_ticket, device, 1)?;
+    ensure_capacity(&mut scratch.noise_decision, device, 9)?;
+    ensure_capacity(&mut scratch.noise_ticket, device, 1)?;
     let partials = scratch.measure_partials.as_mut().unwrap();
     let decision = scratch.noise_decision.as_mut().unwrap();
     let ticket = scratch.noise_ticket.as_mut().unwrap();

@@ -444,7 +444,7 @@ rather than `cmp`.
 Linked code is the real hazard: a change that adds or removes it can move rows that
 never execute it, and controls that compare each binary with itself cannot see that. A
 change to a hot loop's arithmetic is unaffected; a change to linked code can invert its
-result. Adding a faer matmul call to `tensornetwork.rs` measured -10.3% to -13.2% on the
+result. Adding a faer matmul call to `tensornetwork/tensor.rs` measured -10.3% to -13.2% on the
 four `tn/scalar_hea_l2` rows under this script. Rebuilt with both commits compiled from
 one directory, the same rows read +11.3% to +13.2%, so the change cost 13% and the
 script had reported a 13% gain. A build with the crossover raised past every reachable

@@ -5,14 +5,14 @@ use num_complex::Complex64;
 
 use crate::backend::statevector::kernels as cpu_k;
 use crate::error::{PrismError, Result};
+use crate::gpu::{GpuContext, GpuState};
 
-use super::super::{check_qubit, grid_for, launch_counted, linear_cfg, stream_and_fn};
+use super::super::{check_qubit, grid_for, launch_counted, linear_cfg, stage_blob, stream_and_fn};
 use super::gates::{launch_apply_cu_phase, launch_apply_diagonal_1q, launch_apply_parity_phase};
 use super::{
     BATCH_PHASE_META_LEN, BATCH_RZZ_META_LEN, BLOCK_SIZE, DIAG_BATCH_META_LEN, DiagListArg,
     MAX_PARAM_QUBITS,
 };
-use crate::gpu::{GpuContext, GpuState};
 
 pub(crate) fn launch_apply_multi_fused_diagonal(
     ctx: &GpuContext,
@@ -110,7 +110,7 @@ pub(crate) fn launch_apply_batch_phase(
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
-    let staged = super::super::stage_blob(
+    let staged = stage_blob(
         &mut scratch.blob,
         device,
         meta.iter().copied(),
@@ -192,7 +192,7 @@ pub(crate) fn launch_apply_batch_rzz(
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
-    let staged = super::super::stage_blob(
+    let staged = stage_blob(
         &mut scratch.blob,
         device,
         meta.iter().copied(),
@@ -283,7 +283,7 @@ pub(crate) fn launch_apply_diagonal_batch(
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
-    let staged = super::super::stage_blob(
+    let staged = stage_blob(
         &mut scratch.blob,
         device,
         meta.iter().copied(),

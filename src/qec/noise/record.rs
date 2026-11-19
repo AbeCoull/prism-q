@@ -99,8 +99,8 @@ pub(in crate::qec) struct QecRecordEvent {
 
 impl QecCompiledNoiseSampler {
     /// Packed reference records the sampler starts from.
-    pub(in crate::qec) fn reference_records(&self) -> Option<&[u64]> {
-        Some(&self.reference)
+    pub(in crate::qec) fn reference_records(&self) -> &[u64] {
+        &self.reference
     }
 
     /// Restart every stream as a sampler compiled with `seed` starts it.

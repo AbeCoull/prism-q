@@ -774,7 +774,12 @@ fn pick_branch(probs: impl Iterator<Item = f64>, rng: &mut ChaCha8Rng) -> Option
     } else {
         cumulative[chosen] - cumulative[chosen - 1]
     };
-    (pk > JUMP_EPSILON).then_some((chosen, pk))
+    // Compared with `<=` so a NaN `pk` still applies the branch.
+    if pk <= JUMP_EPSILON {
+        None
+    } else {
+        Some((chosen, pk))
+    }
 }
 
 /// Sample and apply one of a set of 1-qubit Kraus operators.

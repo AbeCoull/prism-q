@@ -35,7 +35,7 @@ flowchart TD
     API --> DP --> R
     R --> F --> B["Nine CPU backends (src/backend/)"]
     R --> CT["Clifford+T engines: stabilizer rank, SPP, SPD, Pauli path (src/sim/)"]
-    R --> CS["Compiled samplers and noisy engines (src/sim/compiled/, noise.rs)"]
+    R --> CS["Compiled samplers and noisy engines (src/sim/compiled/, src/sim/noise/)"]
     F --> G["GPU statevector, stabilizer, density matrix (src/gpu/, feature gpu)"]
     F --> D["Distributed statevector (src/distributed/, feature distributed)"]
     API --> QP --> QS["QEC samplers, estimators, decoders (src/qec/)"]

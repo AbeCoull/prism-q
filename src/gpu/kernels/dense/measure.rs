@@ -4,12 +4,13 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 use num_complex::Complex64;
 
 use crate::error::Result;
+use crate::gpu::{GpuBuffer, GpuContext, GpuState};
 
 use super::super::{
-    check_qubit, driver_err, grid_for, launch_counted, linear_cfg, require_i32, stream_and_fn,
+    check_qubit, driver_err, ensure_capacity, grid_for, launch_counted, linear_cfg, require_i32,
+    stream_and_fn,
 };
 use super::BLOCK_SIZE;
-use crate::gpu::{GpuBuffer, GpuContext, GpuState};
 
 pub(crate) fn launch_compute_probabilities(ctx: &GpuContext, state: &GpuState) -> Result<Vec<f64>> {
     let n = state.num_qubits();
@@ -63,8 +64,7 @@ pub(crate) fn measure_prob_one(ctx: &GpuContext, state: &GpuState, qubit: usize)
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
-    let partials =
-        super::super::ensure_capacity(&mut scratch.measure_partials, device, num_blocks as usize)?;
+    let partials = ensure_capacity(&mut scratch.measure_partials, device, num_blocks as usize)?;
 
     let qubit_i = qubit as i32;
     {
@@ -79,7 +79,7 @@ pub(crate) fn measure_prob_one(ctx: &GpuContext, state: &GpuState, qubit: usize)
         unsafe { launch_counted(builder, stage1_cfg, "measure_prob_one", device, 1) }?;
     }
 
-    let result = super::super::ensure_capacity(&mut scratch.measure_result, device, 1)?;
+    let result = ensure_capacity(&mut scratch.measure_result, device, 1)?;
     let count_u32 = num_blocks;
     {
         let mut builder = stream.launch_builder(&stage2);
@@ -135,7 +135,7 @@ pub(crate) fn reduced_density_matrix_1q(
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
-    let partials = super::super::ensure_capacity(
+    let partials = ensure_capacity(
         &mut scratch.measure_partials,
         device,
         4 * num_blocks as usize,
@@ -155,7 +155,7 @@ pub(crate) fn reduced_density_matrix_1q(
         unsafe { launch_counted(builder, stage1_cfg, "rdm_qubit", device, 1) }?;
     }
 
-    let result = super::super::ensure_capacity(&mut scratch.rdm_result, device, 4)?;
+    let result = ensure_capacity(&mut scratch.rdm_result, device, 4)?;
     let count_u32 = num_blocks;
     {
         let mut builder = stream.launch_builder(&stage2);
@@ -261,8 +261,7 @@ pub(crate) fn measure_logged(
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
-    let partials =
-        super::super::ensure_capacity(&mut scratch.measure_partials, device, num_blocks as usize)?;
+    let partials = ensure_capacity(&mut scratch.measure_partials, device, num_blocks as usize)?;
     {
         let func = device.function("measure_prob_one")?;
         let mut builder = stream.launch_builder(&func);

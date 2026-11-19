@@ -1075,19 +1075,19 @@ macro_rules! simd_dispatch {
     ($avx512:ident: $a:expr, $avx2:ident: $b:expr, $neon:ident: $c:expr $(,)?) => {
         #[cfg(target_arch = "x86_64")]
         if $avx512 {
-            // SAFETY: AVX-512F detected, slices are valid with m_words elements
+            // SAFETY: AVX-512F detected, slices are disjoint and valid with m_words elements
             unsafe { $a };
             return;
         }
         #[cfg(target_arch = "x86_64")]
         if $avx2 {
-            // SAFETY: AVX2 detected, slices are valid with m_words elements
+            // SAFETY: AVX2 detected, slices are disjoint and valid with m_words elements
             unsafe { $b };
             return;
         }
         #[cfg(target_arch = "aarch64")]
         if $neon {
-            // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
+            // SAFETY: NEON is baseline on aarch64, slices are disjoint and valid with m_words elements
             unsafe { $c };
             return;
         }

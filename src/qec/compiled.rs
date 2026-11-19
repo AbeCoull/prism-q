@@ -158,9 +158,7 @@ impl QecProgram {
         }
         if has_noise || has_feedforward {
             let records = compile_qec_noisy_sampler(self)?;
-            let uncorrected = records
-                .reference_records()
-                .expect("the shipping records sampler starts from the reference run");
+            let uncorrected = records.reference_records();
             sampler.reference =
                 sampler.tableau_reference(self, uncorrected, has_feedforward, referenced)?;
             sampler.route = QecSamplerRoute::Records(Box::new(records));

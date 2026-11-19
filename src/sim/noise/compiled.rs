@@ -127,7 +127,7 @@ fn xor_pair_branch(events: &FlatNoiseSensitivity, idx: usize, u: f64, shot: &mut
 /// The identity product is not a branch: a firing shot picks one of the 15
 /// others, so the index runs 1 through 15 and every firing shot moves.
 #[inline(always)]
-pub(crate) fn pair_branch(u: f64) -> (usize, usize) {
+pub(in crate::sim) fn pair_branch(u: f64) -> (usize, usize) {
     let idx = 1 + ((u * 15.0) as usize).min(14);
     (idx >> 2, idx & 3)
 }

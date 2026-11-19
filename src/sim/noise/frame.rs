@@ -32,7 +32,7 @@ const WIDE_FRAME_DEPTH_RATIO: f64 = 5.0;
 /// sampler rather than the compiled one. Both answer from the same distribution
 /// and stamp the same resolved backend, so a result carries nothing that
 /// separates them.
-pub(crate) fn use_frame_sampler(circuit: &Circuit) -> bool {
+pub(in crate::sim) fn use_frame_sampler(circuit: &Circuit) -> bool {
     let n = circuit.num_qubits;
     let gate_count = circuit
         .instructions

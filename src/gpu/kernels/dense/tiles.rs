@@ -4,14 +4,15 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 use num_complex::Complex64;
 
 use crate::error::{PrismError, Result};
+use crate::gpu::tiles::{Geometry, TileOp};
+use crate::gpu::{GpuContext, GpuState};
 
 use super::super::{
-    check_qubit, grid_for, launch_counted, launch_limit_err, linear_cfg, stream_and_fn,
+    check_qubit, grid_for, launch_counted, launch_limit_err, linear_cfg, require_u32, stage_blob,
+    stream_and_fn,
 };
 use super::gates::launch_apply_gate_1q;
 use super::{BLOCK_SIZE, TileGatesArg};
-use crate::gpu::tiles::{Geometry, TileOp};
-use crate::gpu::{GpuContext, GpuState};
 
 /// Most DIF stages one `qft_dif_pass` block runs: its shared-memory tile holds
 /// `2^QFT_TILE_Q` amplitudes, 32 KB.
@@ -102,7 +103,7 @@ pub(crate) fn launch_apply_qft_block(
     let device = ctx.device();
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
-    let staged = super::super::stage_blob(
+    let staged = stage_blob(
         &mut scratch.blob,
         device,
         std::iter::empty(),
@@ -147,7 +148,7 @@ pub(crate) fn launch_apply_qft_block(
     for (&pass, &offset) in plan.iter().zip(&phase_offsets) {
         let abs_lo = start + pass.lo;
         let row_log = abs_lo.min(QFT_TILE_Q - pass.bits);
-        let groups = super::super::require_u32(
+        let groups = require_u32(
             "qft_dif_pass",
             "groups",
             (dim >> (pass.bits + row_log)) as usize,
@@ -205,8 +206,7 @@ fn launch_qft_bit_reverse(
     let num_i = num as i32;
     if start == 0 && num >= 10 {
         let (stream, func) = stream_and_fn(ctx, "qft_bit_reverse_tiled")?;
-        let blocks =
-            super::super::require_u32("qft_bit_reverse_tiled", "blocks", (dim >> 10) as usize)?;
+        let blocks = require_u32("qft_bit_reverse_tiled", "blocks", (dim >> 10) as usize)?;
         let cfg = LaunchConfig {
             grid_dim: (blocks, 1, 1),
             block_dim: (32, 8, 1),

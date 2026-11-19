@@ -257,7 +257,7 @@ pub(crate) fn swap_all(
 /// Apply `gate` to every row `rows` yields, returning false for a non-Clifford gate.
 ///
 /// `rows` runs only for a gate that changes the tableau, so `Id` and a rejected gate
-/// never call it; the factored sub-tableau marks its destabilizers stale there.
+/// never call it. The factored sub-tableau marks its destabilizers stale inside `rows`.
 #[inline(always)]
 pub(crate) fn apply_clifford_all<'a>(
     gate: &Gate,

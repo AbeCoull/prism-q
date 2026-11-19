@@ -297,7 +297,7 @@ are in
 ## SPP and SPD
 
 Both propagate an observable backward through a unitary circuit of Clifford gates and
-Pauli rotations (`src/sim/unified_pauli.rs`). Neither holds a state or is a `Backend`, and
+Pauli rotations (`src/sim/unified_pauli/`). Neither holds a state or is a `Backend`, and
 the dispatcher reaches them directly. A rotation at a non-Clifford angle splits each
 anticommuting string into two.
 

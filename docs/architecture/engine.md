@@ -28,7 +28,7 @@ destructive. Results are deterministic for a given RNG seed.
 
 ## Entry points
 
-The orchestration layer is `src/sim/mod.rs`. `simulate(&circuit)` returns a `Simulate`
+The orchestration layer is `src/sim/`, with the builder in `src/sim/simulate.rs`. `simulate(&circuit)` returns a `Simulate`
 builder; `.backend(kind)`, `.noise(&model)`, `.limits(limits)`, `.initial_state(..)` and
 `.require_exact()` configure it, `.seed(seed)` arms it, and one terminal runs it.
 

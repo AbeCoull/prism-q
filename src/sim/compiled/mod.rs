@@ -1029,12 +1029,7 @@ impl CompiledSampler {
         let mut result = Vec::with_capacity(self.num_measurements);
         for m in 0..self.num_measurements {
             let w = m / 64;
-            let ref_word = if w < self.ref_bits_packed.len() {
-                self.ref_bits_packed[w]
-            } else {
-                0
-            };
-            let bit = ((accum[w] ^ ref_word) >> (m % 64)) & 1 != 0;
+            let bit = ((accum[w] ^ self.ref_bits_packed[w]) >> (m % 64)) & 1 != 0;
             result.push(bit);
         }
         result
@@ -1620,8 +1615,7 @@ impl CompiledSampler {
             for (m, p) in probs.iter_mut().enumerate() {
                 let mut depends_on_random = false;
                 for row in &self.flip_rows {
-                    let w = m / 64;
-                    if w < row.len() && (row[w] >> (m % 64)) & 1 != 0 {
+                    if (row[m / 64] >> (m % 64)) & 1 != 0 {
                         depends_on_random = true;
                         break;
                     }

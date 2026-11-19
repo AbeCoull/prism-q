@@ -273,11 +273,7 @@ pub(crate) fn count_vec_key_masked<S>(
     scratch.extend_from_slice(key);
     let last = scratch.len() - 1;
     scratch[last] &= tail_mask;
-    if let Some(count) = counts.get_mut(scratch.as_slice()) {
-        *count += 1;
-    } else {
-        counts.insert(scratch.clone(), 1);
-    }
+    count_vec_key(counts, scratch);
 }
 
 /// Bit-packed measurement outcomes for a batch of shots.
@@ -707,7 +703,7 @@ impl PackedShots {
                         rows.len(),
                         self.s_words,
                     );
-                    return Ok(PackedShots::from_meas_major(
+                    return Ok(PackedShots::from_meas_major_clear_padding(
                         data,
                         self.num_shots,
                         rows.len(),
@@ -722,7 +718,7 @@ impl PackedShots {
                     }
                 }
                 clear_meas_major_shot_padding(&mut data, self.num_shots, rows.len(), self.s_words);
-                Ok(PackedShots::from_meas_major(
+                Ok(PackedShots::from_meas_major_clear_padding(
                     data,
                     self.num_shots,
                     rows.len(),
@@ -743,10 +739,11 @@ impl PackedShots {
                         }
                     }
                 }
-                Ok(PackedShots::from_shot_major(
+                Ok(PackedShots::from_parts(
                     data,
                     self.num_shots,
                     rows.len(),
+                    ShotLayout::ShotMajor,
                 ))
             }
         }

@@ -858,6 +858,22 @@ pub enum Instruction {
     },
 }
 
+impl Instruction {
+    /// Qubits the instruction touches: a barrier's and a save's included, a
+    /// region's body union.
+    #[inline]
+    pub(crate) fn qubits(&self) -> &[usize] {
+        match self {
+            Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } => targets,
+            Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
+                std::slice::from_ref(qubit)
+            }
+            Instruction::Barrier { qubits } | Instruction::Save { qubits, .. } => qubits,
+            Instruction::Region(region) => region.qubits(),
+        }
+    }
+}
+
 /// What a [`Instruction::Save`] point records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]

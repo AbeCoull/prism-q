@@ -96,17 +96,6 @@ pub(super) fn push_unique(qubits: &mut SmallVec<[usize; 4]>, q: usize) {
     }
 }
 
-fn inst_qubits(inst: &Instruction) -> &[usize] {
-    match inst {
-        Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } => targets,
-        Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
-            std::slice::from_ref(qubit)
-        }
-        Instruction::Barrier { qubits } | Instruction::Save { qubits, .. } => qubits,
-        Instruction::Region(region) => region.qubits(),
-    }
-}
-
 /// Clear the pending entry for qubit `q` and its partner.
 fn clear_pending(q: usize, instructions: &[Instruction], pending: &mut [Option<usize>]) {
     if let Some(pi) = pending[q]
@@ -199,7 +188,7 @@ pub(crate) fn cancel_self_inverse_pairs<'a>(
                 }
             }
             _ => {
-                for &q in inst_qubits(inst) {
+                for &q in inst.qubits() {
                     if q < n {
                         clear_pending(q, &circuit.instructions, &mut pending);
                     }
@@ -324,7 +313,7 @@ pub(crate) fn fuse_single_qubit_gates<'a>(
                 }
             }
             _ => {
-                for &q in inst_qubits(inst) {
+                for &q in inst.qubits() {
                     flush(&mut pending[q], &mut output, t);
                 }
                 output.push(inst.clone());
@@ -422,7 +411,7 @@ pub(crate) fn reorder_1q_gates<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) ->
                         }
                     },
                     _ => {
-                        for &q in inst_qubits(inst) {
+                        for &q in inst.qubits() {
                             block_all[q] = idx;
                             block_diag[q] = idx;
                         }
@@ -491,7 +480,7 @@ pub(crate) fn fuse_multi_1q_gates<'a>(
                 t.note(&mut srcs[q], i, Place::Plain);
             }
             _ => {
-                for &q in inst_qubits(inst) {
+                for &q in inst.qubits() {
                     flush_1q_pending(
                         q,
                         &mut pending,
@@ -683,7 +672,7 @@ fn fuse_2q_gates_where<'a>(
                 }
             }
             _ => {
-                for &q in inst_qubits(inst) {
+                for &q in inst.qubits() {
                     changed |=
                         settle_trailing_1q(q, &mut pending_1q, &last_2q, &mut output, &mut srcs, t);
                     last_2q[q] = None;

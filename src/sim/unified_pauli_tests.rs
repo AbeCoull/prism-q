@@ -583,7 +583,7 @@ fn coalesced_op_stays_at_the_one_qubit_variant_size() {
 }
 
 fn u3(theta: f64, phi: f64, lam: f64) -> Gate {
-    Gate::Fused(Box::new(crate::circuit::openqasm::Parser::u_matrix(
+    Gate::Fused(Box::new(crate::circuit::gate_library::u_matrix(
         theta, phi, lam,
     )))
 }

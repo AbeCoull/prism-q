@@ -951,7 +951,7 @@ fn off_grid_rotations_are_rejected_by_gate_form() {
 
     let mut c = Circuit::new(1, 0);
     c.add_gate(
-        Gate::Fused(Box::new(crate::circuit::openqasm::Parser::u_matrix(
+        Gate::Fused(Box::new(crate::circuit::gate_library::u_matrix(
             0.3, 0.7, -1.1,
         ))),
         &[0],

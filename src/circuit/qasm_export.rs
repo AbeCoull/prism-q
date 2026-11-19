@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 use std::fmt::Write;
 
-use super::openqasm::Parser;
+use super::gate_library;
 use super::{Circuit, ClassicalCondition, Instruction, expand_qft_blocks};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
@@ -229,7 +229,7 @@ fn spell_1q(mat: &[[Complex64; 2]; 2]) -> Option<String> {
         return Some(format!("rz({theta})"));
     }
     let (theta, phi, lam, gamma) = zyz(mat);
-    if gamma.abs() < EPS && close_2x2(&Parser::u_matrix(theta, phi, lam), mat) {
+    if gamma.abs() < EPS && close_2x2(&gate_library::u_matrix(theta, phi, lam), mat) {
         return Some(format!("u({theta}, {phi}, {lam})"));
     }
     [Gate::SX, Gate::SXdg]
@@ -242,13 +242,13 @@ fn spell_1q(mat: &[[Complex64; 2]; 2]) -> Option<String> {
 /// cannot express.
 fn spell_cu(mat: &[[Complex64; 2]; 2]) -> Option<String> {
     let (theta, phi, lam, gamma) = zyz(mat);
-    close_2x2(&Parser::cu_target_matrix(theta, phi, lam, gamma), mat)
+    close_2x2(&gate_library::cu_target_matrix(theta, phi, lam, gamma), mat)
         .then(|| format!("cu({theta}, {phi}, {lam}, {gamma})"))
 }
 
 /// A two-qubit matrix as one of the named families the parser builds.
 fn spell_2q(mat: &[[Complex64; 4]; 4]) -> Option<String> {
-    if close_4x4(&Parser::ecr_matrix(), mat) {
+    if close_4x4(&gate_library::ecr_matrix(), mat) {
         return Some("ecr".to_string());
     }
     for (index, name) in [
@@ -257,37 +257,37 @@ fn spell_2q(mat: &[[Complex64; 4]; 4]) -> Option<String> {
         (2, "cphaseshift10"),
     ] {
         let theta = mat[index][index].arg();
-        if close_4x4(&Parser::cphaseshift_matrix(index, theta), mat) {
+        if close_4x4(&gate_library::cphaseshift_matrix(index, theta), mat) {
             return Some(format!("{name}({theta})"));
         }
     }
     let theta = mat[1][2].arg();
-    if close_4x4(&Parser::pswap_matrix(theta), mat) {
+    if close_4x4(&gate_library::pswap_matrix(theta), mat) {
         return Some(format!("pswap({theta})"));
     }
     let theta = 2.0 * mat[1][2].im.atan2(mat[1][1].re);
-    if close_4x4(&Parser::xy_matrix(theta), mat) {
+    if close_4x4(&gate_library::xy_matrix(theta), mat) {
         return Some(format!("xy({theta})"));
     }
-    if close_4x4(&Parser::syc_matrix(), mat) {
+    if close_4x4(&gate_library::syc_matrix(), mat) {
         return Some("syc".to_string());
     }
-    if close_4x4(&Parser::sqrt_iswap_matrix(1.0), mat) {
+    if close_4x4(&gate_library::sqrt_iswap_matrix(1.0), mat) {
         return Some("sqrt_iswap".to_string());
     }
-    if close_4x4(&Parser::sqrt_iswap_matrix(-1.0), mat) {
+    if close_4x4(&gate_library::sqrt_iswap_matrix(-1.0), mat) {
         return Some("sqrt_iswap_inv".to_string());
     }
     let (theta, beta) = xy_params(mat[1][1], mat[1][2]);
-    if close_4x4(&Parser::xx_plus_yy_matrix(theta, beta), mat) {
+    if close_4x4(&gate_library::xx_plus_yy_matrix(theta, beta), mat) {
         return Some(format!("xx_plus_yy({theta}, {beta})"));
     }
     let (theta, beta) = xy_params(mat[0][0], mat[0][3]);
-    if close_4x4(&Parser::xx_minus_yy_matrix(theta, beta), mat) {
+    if close_4x4(&gate_library::xx_minus_yy_matrix(theta, beta), mat) {
         return Some(format!("xx_minus_yy({theta}, {beta})"));
     }
     let (theta, phi0, phi1) = ms_params(mat);
-    if close_4x4(&Parser::ms_matrix(phi0, phi1, theta), mat) {
+    if close_4x4(&gate_library::ms_matrix(phi0, phi1, theta), mat) {
         return Some(format!("ms({phi0}, {phi1}, {theta})"));
     }
     None

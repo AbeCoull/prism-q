@@ -3215,7 +3215,7 @@ fn gate_names_round_trip_through_resolve_gate() {
                     .collect();
                 super::pauli_rotation_gate(params[0], &factors).0
             }
-            None => Parser::resolve_gate(gate.name(), &params, Dialect::Native, 0)
+            None => gate_library::resolve_gate(gate.name(), &params, Dialect::Native, 0)
                 .unwrap_or_else(|e| panic!("`{}` did not resolve: {e}", gate.name())),
         };
         assert_eq!(

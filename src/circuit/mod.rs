@@ -16,6 +16,7 @@ pub mod fusion;
 mod fusion_phase;
 mod fusion_rzz;
 pub(crate) mod fusion_stage;
+pub(crate) mod gate_library;
 pub mod openqasm;
 pub mod parameter;
 pub(crate) mod parity_ancilla;

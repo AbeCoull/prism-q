@@ -14,7 +14,7 @@
 
 use num_complex::Complex64;
 
-use super::openqasm::Parser;
+use super::gate_library;
 use super::parameter::Parameters;
 use super::{
     Circuit, ClassicalCondition, Instruction, SmallVec, TrotterOrder, append_axis_to_z_rotation,
@@ -178,7 +178,7 @@ impl CircuitBuilder {
     /// Append the general single-qubit rotation `U(theta, phi, lambda)` of OpenQASM's
     /// `u`/`u3`, as one fused matrix.
     pub fn u(&mut self, theta: f64, phi: f64, lambda: f64, q: usize) -> &mut Self {
-        let mat = Parser::u_matrix(theta, phi, lambda);
+        let mat = gate_library::u_matrix(theta, phi, lambda);
         self.circuit.add_gate(Gate::Fused(Box::new(mat)), &[q]);
         self
     }
@@ -229,13 +229,13 @@ impl CircuitBuilder {
 
     /// Append iSWAP, lowered to the six Clifford gates the OpenQASM parser emits.
     pub fn iswap(&mut self, q0: usize, q1: usize) -> &mut Self {
-        self.push_expansion(Parser::iswap_expansion(q0, q1))
+        self.push_expansion(gate_library::iswap_expansion(q0, q1))
     }
 
     /// Append a controlled swap of `q0` and `q1`, lowered to a Toffoli between two
     /// CNOTs as the OpenQASM parser does.
     pub fn cswap(&mut self, control: usize, q0: usize, q1: usize) -> &mut Self {
-        self.push_expansion(Parser::cswap_expansion(control, q0, q1))
+        self.push_expansion(gate_library::cswap_expansion(control, q0, q1))
     }
 
     /// Append a controlled unitary applying `mat` to `target` when `control` is |1⟩.

@@ -2,23 +2,6 @@ use super::*;
 
 const TEST_SEED: u64 = 0xDEAD_BEEF;
 
-struct AutoHookGuard;
-
-impl AutoHookGuard {
-    fn force_spd_nonexact_and_camps_failure() -> Self {
-        super::auto_test_hooks::set_force_spd_nonexact(true);
-        super::auto_test_hooks::set_force_camps_failure(true);
-        Self
-    }
-}
-
-impl Drop for AutoHookGuard {
-    fn drop(&mut self) {
-        super::auto_test_hooks::set_force_spd_nonexact(false);
-        super::auto_test_hooks::set_force_camps_failure(false);
-    }
-}
-
 fn options(shots: usize) -> QecOptions {
     QecOptions {
         shots,
@@ -209,7 +192,27 @@ fn tensor_network_fallback_refuses_an_over_cap_observable_without_slicing() {
 fn auto_uses_tensor_network_when_spd_nonexact_and_camps_fails() {
     let program = h_t_h_program(256);
     let expected = run_qec_program_tensor_network_observable(&program).unwrap();
-    let _guard = AutoHookGuard::force_spd_nonexact_and_camps_failure();
-    let actual = run_qec_program_auto(&program).unwrap();
+    let spd_nonexact = |program: &QecProgram| {
+        let mut result = run_qec_program_spd(program)?;
+        for estimates in [
+            result.observable_expectations.as_mut(),
+            result.expectation_values.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for estimate in estimates {
+                estimate.variance = estimate.variance.max(1.0);
+            }
+        }
+        Ok(result)
+    };
+    let camps_failure = |_: &QecProgram| {
+        Err(PrismError::BackendUnsupported {
+            backend: "QEC CAMPS".to_string(),
+            operation: "forced CAMPS failure for auto-dispatch test".to_string(),
+        })
+    };
+    let actual = run_qec_program_auto_with(&program, spd_nonexact, camps_failure).unwrap();
     assert_estimates_close(&actual, &expected);
 }

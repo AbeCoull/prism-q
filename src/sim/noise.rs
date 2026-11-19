@@ -4051,38 +4051,6 @@ fn settle_measured_qubits<'a>(
     }))
 }
 
-/// Exact per-classical-bit measurement marginals under a noise model, evolved
-/// on the density-matrix backend. Measurements are read as `Tr(P_1 rho)` on the
-/// final state without collapse, so this assumes terminal (non-feedback)
-/// measurement, matching the domain of `noisy_marginals_analytical`.
-#[cfg(test)]
-pub(crate) fn dm_noisy_marginals(
-    circuit: &Circuit,
-    noise: &NoiseModel,
-    seed: u64,
-) -> Result<Vec<f64>> {
-    let dm = evolve_density_matrix(
-        &BackendKind::DensityMatrix,
-        circuit,
-        Some(noise),
-        None,
-        seed,
-        &ResolvedLimits::process_default(),
-    )?;
-    let mut result = vec![0.5f64; circuit.num_classical_bits];
-    for inst in &circuit.instructions {
-        if let Instruction::Measure {
-            qubit,
-            classical_bit,
-        } = inst
-            && *classical_bit < result.len()
-        {
-            result[*classical_bit] = dm.qubit_probability(*qubit)?;
-        }
-    }
-    Ok(result)
-}
-
 /// Exact `Tr(rho P_k)` for each joint Pauli `P_k`, evolving the density-matrix
 /// backend through `circuit` and (optionally) `noise`: the exact (zero-variance)
 /// analogue of trajectory-averaged expectation values. The circuit must fit the

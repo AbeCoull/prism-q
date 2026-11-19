@@ -55,10 +55,10 @@ fn scalar_runtime_type(kind: ClassicalType, line: usize) -> Result<RuntimeType> 
         ClassicalType::Angle(None) => RuntimeType::Angle,
         ClassicalType::Complex(_) => return Err(runtime_complex(line)),
         ClassicalType::Angle(Some(_)) | ClassicalType::Duration | ClassicalType::Stretch => {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: "a runtime duration or fixed-width angle in a subroutine".to_string(),
+            return Err(unsupported(
                 line,
-            });
+                "a runtime duration or fixed-width angle in a subroutine",
+            ));
         }
     })
 }
@@ -275,19 +275,19 @@ fn register_read(offset: usize, size: usize, line: usize) -> Result<ClassicalExp
     match size {
         1 => Ok(ClassicalExpr::Bit(offset)),
         2..=64 => Ok(ClassicalExpr::Register { offset, size }),
-        _ => Err(PrismError::UnsupportedConstruct {
-            construct: format!("a {size}-bit register read as a value, past the 64 a value holds"),
+        _ => Err(unsupported(
             line,
-        }),
+            format!("a {size}-bit register read as a value, past the 64 a value holds"),
+        )),
     }
 }
 
 pub(super) fn bits_value(bits: &[usize], line: usize) -> Result<ClassicalExpr> {
     if bits.is_empty() || bits.len() > 64 {
-        return Err(PrismError::UnsupportedConstruct {
-            construct: "a subroutine bit value wider than 64 bits".to_string(),
+        return Err(unsupported(
             line,
-        });
+            "a subroutine bit value wider than 64 bits",
+        ));
     }
     if bits.windows(2).all(|pair| pair[1] == pair[0] + 1) {
         return register_read(bits[0], bits.len(), line);
@@ -360,10 +360,10 @@ fn lower(
             Expr::Ident(_) | Expr::Element(_) | Expr::Runtime(_) => match leaf(expr)? {
                 Some(lowered) => lowered,
                 None => {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: format!("`{expr}`, an array indexed by a runtime value"),
+                    return Err(unsupported(
                         line,
-                    });
+                        format!("`{expr}`, an array indexed by a runtime value"),
+                    ));
                 }
             },
             Expr::Negate(inner) => ClassicalExpr::unary(UnaryOp::Neg, recurse(inner)?),
@@ -377,14 +377,14 @@ fn lower(
                     if let ("popcount", [arg]) = (call.name, call.args.as_slice()) {
                         return Ok(ClassicalExpr::unary(UnaryOp::Popcount, recurse(arg)?));
                     }
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: format!(
+                    return Err(unsupported(
+                        line,
+                        format!(
                             "builtin `{}` over a runtime value; only operators, `popcount` \
                              and `extern` calls run at runtime",
                             call.name
                         ),
-                        line,
-                    });
+                    ));
                 };
                 Parser::check_extern_arity(&function, call.args.len(), line)?;
                 let args = call.args.iter().map(recurse).collect::<Result<_>>()?;
@@ -399,18 +399,15 @@ fn lower(
                     None => None,
                 };
                 if cast.ty == syntax_expr::CastType::Angle && width.is_some() {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: "a fixed-width runtime angle cast".to_string(),
-                        line,
-                    });
+                    return Err(unsupported(line, "a fixed-width runtime angle cast"));
                 }
                 ClassicalExpr::cast(cast.ty.runtime(width), recurse(&cast.value)?)
             }
             Expr::Range(_) | Expr::Concat(_) | Expr::Set(_) => {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!("`{expr}`, a slice or array join over a runtime value"),
+                return Err(unsupported(
                     line,
-                });
+                    format!("`{expr}`, a slice or array join over a runtime value"),
+                ));
             }
             Expr::Number(_) | Expr::Complex(_) | Expr::Duration(_) | Expr::DurationOf(_) => {
                 unreachable!("a literal reads no runtime leaf")
@@ -422,10 +419,10 @@ fn lower(
 /// The decline for a complex value a measurement or a loop decides, which the
 /// runtime value set has no type for.
 pub(super) fn runtime_complex(line: usize) -> PrismError {
-    PrismError::UnsupportedConstruct {
-        construct: "a `complex` value that a measurement or a loop decides".to_string(),
+    unsupported(
         line,
-    }
+        "a `complex` value that a measurement or a loop decides",
+    )
 }
 
 /// The expression a static condition form spells, for a condition over
@@ -483,10 +480,10 @@ pub(super) fn operand_expr<'a>(operand: &Operand<'a>) -> Result<Expr<'a>> {
             indices: vec![index.clone()],
         })),
         Some(_) => {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!("`{}`, a slice read as a runtime value", operand.describe()),
-                line: operand.line,
-            });
+            return Err(unsupported(
+                operand.line,
+                format!("`{}`, a slice read as a runtime value", operand.describe()),
+            ));
         }
     })
 }
@@ -584,10 +581,10 @@ impl<'a> Parser<'a> {
                 self.write_classical_bits(&bits, value, line)?;
             }
             (Some(ast::ReturnValue::Measure(_)), Some(_)) => {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: "a measurement returned as a classical scalar".to_string(),
+                return Err(unsupported(
                     line,
-                });
+                    "a measurement returned as a classical scalar",
+                ));
             }
             _ => {}
         }
@@ -717,10 +714,10 @@ impl<'a> Parser<'a> {
         };
         let picks = self.pick_indices(width, index, ast::RegisterKind::Classical, &operand)?;
         if picks.is_empty() || picks.len() > 64 {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: "a subroutine bit value wider than 64 bits".to_string(),
+            return Err(unsupported(
                 line,
-            });
+                "a subroutine bit value wider than 64 bits",
+            ));
         }
         let bit = |index: usize| {
             ClassicalExpr::binary(
@@ -909,13 +906,13 @@ impl<'a> Parser<'a> {
         if self.streaming() {
             return Ok(());
         }
-        Err(PrismError::UnsupportedConstruct {
-            construct: format!(
+        Err(unsupported(
+            line,
+            format!(
                 "{what} inside a guarded region, which lowers to one instruction; \
                  give the region a condition over a runtime value to make it a branch"
             ),
-            line,
-        })
+        ))
     }
 
     /// `target = value` or `target op= value` where `target` names classical
@@ -928,14 +925,14 @@ impl<'a> Parser<'a> {
         line: usize,
     ) -> Result<()> {
         if self.dynamic.is_none() {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!(
+            return Err(unsupported(
+                line,
+                format!(
                     "a write to classical bits `{}`; the instruction list has no classical \
                      write, and `openqasm::parse_dynamic` carries one",
                     target.describe()
                 ),
-                line,
-            });
+            ));
         }
         let bits = self.bits_of(target)?;
         let mut lowered = self.lower_expr(value, line)?;
@@ -977,13 +974,13 @@ impl<'a> Parser<'a> {
     ) -> Result<()> {
         self.require_streaming("a write to a classical bit", line)?;
         if bits.len() > 64 {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!(
+            return Err(unsupported(
+                line,
+                format!(
                     "a write of {} bits from a runtime value, past the 64 a value holds",
                     bits.len()
                 ),
-                line,
-            });
+            ));
         }
         self.charge(1, line)?;
         self.state().builder.write_bits(bits, value);
@@ -1133,12 +1130,10 @@ impl<'a> Parser<'a> {
             Some(alias) if alias.kind == ast::RegisterKind::Classical => {
                 let contiguous = alias.indices.windows(2).all(|pair| pair[1] == pair[0] + 1);
                 if !contiguous {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: format!(
-                            "alias `{name}` read as a value; its bits do not run in order"
-                        ),
+                    return Err(unsupported(
                         line,
-                    });
+                        format!("alias `{name}` read as a value; its bits do not run in order"),
+                    ));
                 }
                 register_read(alias.indices[0], alias.indices.len(), line).map(Some)
             }
@@ -1217,12 +1212,10 @@ impl<'a> Parser<'a> {
     /// Reject a runtime value where a parse-time constant belongs.
     pub(super) fn reject_runtime(&self, expr: &Expr, line: usize) -> Result<()> {
         if self.reads_runtime(expr) {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!(
-                    "`{expr}` reads a runtime value where a parse-time constant belongs"
-                ),
+            return Err(unsupported(
                 line,
-            });
+                format!("`{expr}` reads a runtime value where a parse-time constant belongs"),
+            ));
         }
         Ok(())
     }
@@ -1303,10 +1296,7 @@ impl<'a> Parser<'a> {
             return Ok(match self.real_type(ty, width, line)? {
                 ClassicalType::Float(width) => RuntimeType::Float { width },
                 ClassicalType::Angle(Some(_)) => {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: "a fixed-width runtime angle".to_string(),
-                        line,
-                    });
+                    return Err(unsupported(line, "a fixed-width runtime angle"));
                 }
                 _ => RuntimeType::Angle,
             });
@@ -1328,10 +1318,10 @@ impl<'a> Parser<'a> {
             "uint" => RuntimeType::Uint { width: bits },
             "bool" => RuntimeType::Bool,
             other => {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!("a `{other}` whose value a measurement or a loop decides"),
+                return Err(unsupported(
                     line,
-                });
+                    format!("a `{other}` whose value a measurement or a loop decides"),
+                ));
             }
         })
     }
@@ -1347,10 +1337,10 @@ impl<'a> Parser<'a> {
         line: usize,
     ) -> Result<()> {
         if constant {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!("`const {name}` initializer needs a parse-time constant"),
+            return Err(unsupported(
                 line,
-            });
+                format!("`const {name}` initializer needs a parse-time constant"),
+            ));
         }
         let runtime_type = self.runtime_type(ty, width, line)?;
         self.reject_redeclaration(name, line)?;
@@ -1439,21 +1429,21 @@ impl<'a> Parser<'a> {
             _ => None,
         };
         if self.def_defs.contains_key(name) {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!("a runtime value as an argument to def `{name}`"),
+            return Err(unsupported(
                 line,
-            });
+                format!("a runtime value as an argument to def `{name}`"),
+            ));
         }
         let kind = match kind {
             Some(kind) if modifiers.is_empty() && !self.gate_defs.contains_key(name) => kind,
             _ => {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!(
+                return Err(unsupported(
+                    line,
+                    format!(
                         "a runtime angle on `{name}`; one drives an unmodified `rx`, `ry`, \
                          `rz`, `p` or `rzz`"
                     ),
-                    line,
-                });
+                ));
             }
         };
         let [param] = params else {
@@ -1621,10 +1611,10 @@ impl<'a> Parser<'a> {
         } else {
             "give the branch a condition over a runtime value to make it a branch"
         };
-        PrismError::UnsupportedConstruct {
-            construct: format!("`{word}` under a measurement-dependent branch; {remedy}"),
+        unsupported(
             line,
-        }
+            format!("`{word}` under a measurement-dependent branch; {remedy}"),
+        )
     }
 
     /// An `if` under dynamic lowering: folded when it reads nothing measured, a

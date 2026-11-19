@@ -72,13 +72,13 @@ impl<'a> Parser<'a> {
                 .then_some(ClassicalExpr::Const(ClassicalValue::Bool(false))))
         };
         if super::dynamic::reads_leaf(expr, &bit_leaf)? {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!(
+            return Err(unsupported(
+                line,
+                format!(
                     "`{expr}` reads a classical bit as a value, which only a guard reads under \
                      `parse`; `openqasm::parse_dynamic` evaluates it at runtime"
                 ),
-                line,
-            });
+            ));
         }
         Ok(())
     }

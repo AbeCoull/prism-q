@@ -171,6 +171,13 @@ fn parse_error(line: usize, message: impl Into<String>) -> PrismError {
     }
 }
 
+pub(crate) fn unsupported(line: usize, construct: impl Into<String>) -> PrismError {
+    PrismError::UnsupportedConstruct {
+        construct: construct.into(),
+        line,
+    }
+}
+
 /// Angle convention a program is read under.
 ///
 /// Vendors disagree on the units of the hardware-native family (`gpi`, `gpi2`,
@@ -941,12 +948,10 @@ impl<'a> Parser<'a> {
     /// into a register, so a program using both has two meanings for `0`.
     fn reject_mixed_addressing(&self, line_num: usize) -> Result<()> {
         if self.physical {
-            return Err(PrismError::UnsupportedConstruct {
-                construct:
-                    "a qubit register beside physical qubits (`$0`), which address the same hardware two ways"
-                        .to_string(),
-                line: line_num,
-            });
+            return Err(unsupported(
+                line_num,
+                "a qubit register beside physical qubits (`$0`), which address the same hardware two ways",
+            ));
         }
         Ok(())
     }
@@ -1102,12 +1107,10 @@ impl<'a> Parser<'a> {
                 *angle_mut(instr) = params[at];
                 Ok(())
             }
-            _ => Err(PrismError::UnsupportedConstruct {
-                construct: format!(
-                    "`input` on `{gate_name}`, which carries no rotation angle to bind"
-                ),
-                line: line_num,
-            }),
+            _ => Err(unsupported(
+                line_num,
+                format!("`input` on `{gate_name}`, which carries no rotation angle to bind"),
+            )),
         }
     }
 
@@ -1180,10 +1183,10 @@ impl<'a> Parser<'a> {
             // A lowering folds the angle into its own arithmetic, so binding a
             // slot afterwards would write the raw value over a derived one.
             if has_input {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!("`input` on `{gate_name}`, which lowers to a gate sequence"),
-                    line: line_num,
-                });
+                return Err(unsupported(
+                    line_num,
+                    format!("`input` on `{gate_name}`, which lowers to a gate sequence"),
+                ));
             }
             out.extend(Self::modify_expansion(
                 instrs, modifiers, gate_name, line_num,
@@ -1286,10 +1289,10 @@ impl<'a> Parser<'a> {
             .trim();
         match major.parse::<u32>() {
             Ok(2) | Ok(3) => Ok(()),
-            Ok(_) => Err(PrismError::UnsupportedConstruct {
-                construct: format!("OPENQASM {version}, where this parser reads 2 and 3"),
-                line: line_num,
-            }),
+            Ok(_) => Err(unsupported(
+                line_num,
+                format!("OPENQASM {version}, where this parser reads 2 and 3"),
+            )),
             Err(_) => Err(parse_error(
                 line_num,
                 format!("`{version}` is not an OpenQASM version"),
@@ -1298,12 +1301,12 @@ impl<'a> Parser<'a> {
     }
 
     fn ctrl_on_expansion_error(name: &str, line_num: usize) -> PrismError {
-        PrismError::UnsupportedConstruct {
-            construct: format!(
+        unsupported(
+            line_num,
+            format!(
                 "ctrl @ `{name}`, a subroutine rather than a gate, so it has no controlled form"
             ),
-            line: line_num,
-        }
+        )
     }
 
     /// Repeat an expansion `k` times, inverting it first for a negative `k`.
@@ -1321,14 +1324,14 @@ impl<'a> Parser<'a> {
             // whole expansion is composed into one matrix first, whether it
             // is a single gate or a lowering of several.
             let Some((span, matrix)) = synthesis::expansion_matrix(&instrs) else {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!(
+                return Err(unsupported(
+                    line_num,
+                    format!(
                         "pow({k}) @ `{name}`, whose lowering spans more than {} qubits or \
                          carries an instruction with no matrix",
                         synthesis::MAX_COMPOSED_QUBITS
                     ),
-                    line: line_num,
-                });
+                ));
             };
             let dim = 1usize << span.len();
             let powered = spectral::unitary_power(&synthesis::transpose(&matrix, dim), dim, k);
@@ -1389,10 +1392,10 @@ impl<'a> Parser<'a> {
         line_num: usize,
     ) -> Result<Vec<Instruction>> {
         let Instruction::Gate { gate, targets } = instr else {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: "ctrl @ a body that measures, resets, or branches".to_string(),
-                line: line_num,
-            });
+            return Err(unsupported(
+                line_num,
+                "ctrl @ a body that measures, resets, or branches",
+            ));
         };
         let extra = controls.len();
         let prefixed = |rest: &[usize]| -> SmallVec<[usize; 4]> {
@@ -1406,9 +1409,8 @@ impl<'a> Parser<'a> {
             num_controls
                 .checked_add(extra)
                 .and_then(|total| u8::try_from(total).ok())
-                .ok_or_else(|| PrismError::UnsupportedConstruct {
-                    construct: format!("ctrl @ chain past {} controls", u8::MAX),
-                    line: line_num,
+                .ok_or_else(|| {
+                    unsupported(line_num, format!("ctrl @ chain past {} controls", u8::MAX))
                 })
         };
         let controlled = match &gate {
@@ -1499,13 +1501,13 @@ impl<'a> Parser<'a> {
                 Self::control_expansion(ladder, controls, line_num)?
             }
             other => {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!(
+                return Err(unsupported(
+                    line_num,
+                    format!(
                         "ctrl @ {}, which has no controlled form and no lowering to control",
                         other.name()
                     ),
-                    line: line_num,
-                });
+                ));
             }
         };
         Ok(controlled)
@@ -1573,10 +1575,10 @@ impl<'a> Parser<'a> {
                     gate: gate.inverse(),
                     targets,
                 }),
-                _ => Err(PrismError::UnsupportedConstruct {
-                    construct: format!("inv @ `{name}`, whose body is not a gate sequence"),
-                    line: line_num,
-                }),
+                _ => Err(unsupported(
+                    line_num,
+                    format!("inv @ `{name}`, whose body is not a gate sequence"),
+                )),
             })
             .collect()
     }

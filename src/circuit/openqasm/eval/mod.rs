@@ -577,10 +577,10 @@ fn return_line(block: &[Stmt]) -> Option<usize> {
 }
 
 fn non_affine(expr: &Expr, line: usize) -> PrismError {
-    PrismError::UnsupportedConstruct {
-        construct: format!("the angle `{expr}`, which is not affine in the `input` it reads"),
+    unsupported(
         line,
-    }
+        format!("the angle `{expr}`, which is not affine in the `input` it reads"),
+    )
 }
 
 impl<'a> Parser<'a> {
@@ -679,19 +679,19 @@ impl<'a> Parser<'a> {
         }
         self.reject_redeclaration(name, line)?;
         let Some(registry) = self.registry.as_ref() else {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!(
+            return Err(unsupported(
+                line,
+                format!(
                     "extern `{name}`, which needs a function from a `_with_externs` entry point"
                 ),
-                line,
-            });
+            ));
         };
         let registry = Rc::clone(registry);
         let Some(result) = result else {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!("extern `{name}` with no result type"),
+            return Err(unsupported(
                 line,
-            });
+                format!("extern `{name}` with no result type"),
+            ));
         };
         let params = params
             .iter()
@@ -722,24 +722,24 @@ impl<'a> Parser<'a> {
             ("bit", Some(width)) => match self.integer_of(width, line)? {
                 bits @ 1..=64 => Ok(RuntimeType::Uint { width: bits as u32 }),
                 bits if bits < 1 => Err(parse_error(line, format!("`bit[{bits}]` has no bits"))),
-                bits => Err(PrismError::UnsupportedConstruct {
-                    construct: format!(
+                bits => Err(unsupported(
+                    line,
+                    format!(
                         "extern `{name}` over a `bit[{bits}]` value, past the 64 bits a value \
                          holds"
                     ),
-                    line,
-                }),
+                )),
             },
             ("bool" | "int" | "uint" | "float", _) | ("angle", None) => {
                 self.runtime_type(ty.ty, ty.width.as_ref(), line)
             }
-            (spelled, width) => Err(PrismError::UnsupportedConstruct {
-                construct: match width {
+            (spelled, width) => Err(unsupported(
+                line,
+                match width {
                     Some(width) => format!("extern `{name}` over a `{spelled}[{width}]` value"),
                     None => format!("extern `{name}` over a `{spelled}` value"),
                 },
-                line,
-            }),
+            )),
         }
     }
 
@@ -829,10 +829,7 @@ impl<'a> Parser<'a> {
         } else {
             format!("`{name}`, which an `input` reaches,")
         };
-        PrismError::UnsupportedConstruct {
-            construct: format!("{what} {place}"),
-            line,
-        }
+        unsupported(line, format!("{what} {place}"))
     }
 
     /// Decline `expr` when it reads a tagged name, which only a gate angle may.
@@ -954,14 +951,14 @@ impl<'a> Parser<'a> {
                     let runtime = result.runtime;
                     let bits = result.bits.clone();
                     if init.is_some() && !runtime {
-                        return Err(PrismError::UnsupportedConstruct {
-                            construct: format!(
+                        return Err(unsupported(
+                            line,
+                            format!(
                                 "an initializer on `{name}`, the bit def returns; the \
                                  caller's bits hold it and the instruction list has no \
                                  classical write"
                             ),
-                            line,
-                        });
+                        ));
                     }
                     // The returned bit is the caller's target, bound before the
                     // body ran, so its declaration allocates nothing.
@@ -994,13 +991,13 @@ impl<'a> Parser<'a> {
                     return Ok(());
                 }
                 if self.in_while() {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: format!(
+                    return Err(unsupported(
+                        line,
+                        format!(
                             "register `{name}` declared inside a `while` loop; declare it \
                              before the loop"
                         ),
-                        line,
-                    });
+                    ));
                 }
                 if *kind == ast::RegisterKind::Classical
                     && self.def_result.is_some()
@@ -1019,10 +1016,10 @@ impl<'a> Parser<'a> {
             }
             StmtKind::OutputDecl { ty, name, size } => {
                 if *ty != "bit" {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: format!("`output {ty}` (only bit outputs are reported)"),
+                    return Err(unsupported(
                         line,
-                    });
+                        format!("`output {ty}` (only bit outputs are reported)"),
+                    ));
                 }
                 self.declare_register(ast::RegisterKind::Classical, name, size.as_ref(), line)?;
                 Ok(())
@@ -1085,13 +1082,13 @@ impl<'a> Parser<'a> {
                     .register()
                     .filter(|name| self.dynamic.is_some() && self.classical.contains_key(name))
                 {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: format!(
+                    return Err(unsupported(
+                        line,
+                        format!(
                             "a measurement into variable `{name}`; measure into a bit and \
                              assign the bit"
                         ),
-                        line,
-                    });
+                    ));
                 }
                 let qubits = self.qubits_of(&measure.source)?;
                 let bits = self.bits_of(&measure.target)?;
@@ -1159,10 +1156,7 @@ impl<'a> Parser<'a> {
             StmtKind::While { condition, body } if self.dynamic.is_some() => {
                 self.exec_while(condition, body, line)
             }
-            StmtKind::While { .. } => Err(PrismError::UnsupportedConstruct {
-                construct: "while".to_string(),
-                line,
-            }),
+            StmtKind::While { .. } => Err(unsupported(line, "while")),
             StmtKind::Break => self.exec_loop_exit(Exit::Break, line),
             StmtKind::Continue => self.exec_loop_exit(Exit::Continue, line),
             StmtKind::End => self.exec_end(line),
@@ -1199,15 +1193,13 @@ impl<'a> Parser<'a> {
             } => self.declare_extern(name, params, result.as_ref(), line),
             StmtKind::Return(value) => self.exec_return(value.as_ref(), line, out),
             StmtKind::CallAssign(assign) => with_stack(|| self.exec_call_assign(assign, line, out)),
-            StmtKind::ArrayDecl(decl) if self.is_runtime_decl(stmt) => {
-                Err(PrismError::UnsupportedConstruct {
-                    construct: format!(
-                        "array `{}`, written where a loop or a measurement decides the value",
-                        decl.name
-                    ),
-                    line,
-                })
-            }
+            StmtKind::ArrayDecl(decl) if self.is_runtime_decl(stmt) => Err(unsupported(
+                line,
+                format!(
+                    "array `{}`, written where a loop or a measurement decides the value",
+                    decl.name
+                ),
+            )),
             StmtKind::ArrayDecl(decl) => self.declare_array(decl, line),
             StmtKind::ElementAssign(assign) if self.is_bit_name(assign.array) => {
                 let value = self.resolve_calls(&assign.value, line, out)?;

@@ -68,13 +68,13 @@ impl<'a> Parser<'a> {
         line: usize,
     ) -> Result<()> {
         if self.dynamic.is_none() && self.in_outer_while {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!(
+            return Err(unsupported(
+                line,
+                format!(
                     "`bit {name}` inside a def inlined into a `while` loop, whose passes would \
                      share it; declare it in the caller before the loop"
                 ),
-                line,
-            });
+            ));
         }
         let width = match size {
             None => 1usize,
@@ -94,12 +94,10 @@ impl<'a> Parser<'a> {
         );
         if self.dynamic.is_none() {
             if init.is_some() {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!(
-                        "an initializer on `{name}`, a bit an inlined def keeps to itself"
-                    ),
+                return Err(unsupported(
                     line,
-                });
+                    format!("an initializer on `{name}`, a bit an inlined def keeps to itself"),
+                ));
             }
             return Ok(());
         }
@@ -166,12 +164,12 @@ impl<'a> Parser<'a> {
             });
         }
         if self.dynamic.is_some() {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!(
+            return Err(unsupported(
+                line,
+                format!(
                     "unsupplied input `{name}` in a dynamic program, which has no slot to bind"
                 ),
-                line,
-            });
+            ));
         }
         let slot = self.input_names.len();
         self.inputs.insert(name, slot);
@@ -205,10 +203,7 @@ impl<'a> Parser<'a> {
             "duration" => ClassicalType::Duration,
             "stretch" => ClassicalType::Stretch,
             other => {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!("`{other}` declarations"),
-                    line,
-                });
+                return Err(unsupported(line, format!("`{other}` declarations")));
             }
         })
     }
@@ -461,13 +456,13 @@ impl<'a> Parser<'a> {
     ) -> Result<ClassicalType> {
         match ty {
             "int" | "uint" | "bool" | "float" | "angle" => self.classical_type(ty, width, line),
-            other => Err(PrismError::UnsupportedConstruct {
-                construct: format!(
+            other => Err(unsupported(
+                line,
+                format!(
                     "`array[{other}, ...]`; an array holds `int`, `uint`, `float`, \
                      `angle` or `bool`, and bits belong in a `bit[n]` register"
                 ),
-                line,
-            }),
+            )),
         }
     }
 
@@ -699,10 +694,10 @@ impl<'a> Parser<'a> {
             .to_string()
         };
         if assign.op.is_some() {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!("a compound assignment to the array slice `{target}`"),
+            return Err(unsupported(
                 line,
-            });
+                format!("a compound assignment to the array slice `{target}`"),
+            ));
         }
         let Some(source) = self.array_value(&assign.value, line)? else {
             return Err(parse_error(
@@ -1019,16 +1014,13 @@ impl<'a> Parser<'a> {
         out: &mut Vec<Instruction>,
     ) -> Result<()> {
         let Some(frame) = &self.def_result else {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: "`return` outside a def".to_string(),
-                line,
-            });
+            return Err(unsupported(line, "`return` outside a def"));
         };
         if self.guard.is_some() {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: "a measurement-dependent return from a def".to_string(),
+            return Err(unsupported(
                 line,
-            });
+                "a measurement-dependent return from a def",
+            ));
         }
         if frame.runtime {
             return self.exec_runtime_return(value, line, out);
@@ -1037,10 +1029,10 @@ impl<'a> Parser<'a> {
         let returned = match (value, ty) {
             (Some(ast::ReturnValue::Measure(source)), ty) => {
                 if ty.is_some() {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: "a measurement returned as a classical scalar".to_string(),
+                    return Err(unsupported(
                         line,
-                    });
+                        "a measurement returned as a classical scalar",
+                    ));
                 }
                 let qubits = self.qubits_of(source)?;
                 out.extend(Self::build_measurements(qubits, frame.bits.clone(), line)?);
@@ -1070,19 +1062,16 @@ impl<'a> Parser<'a> {
                         .lower_expr(&value, line)
                         .is_ok_and(|value| !matches!(value, ClassicalExpr::Const(_)))
                 {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: "a measurement-dependent scalar returned from a def".to_string(),
+                    return Err(unsupported(
                         line,
-                    });
+                        "a measurement-dependent scalar returned from a def",
+                    ));
                 }
                 Some(if ty == ClassicalType::Duration {
                     match self.duration_of(&value, line)? {
                         Timed::Duration(duration) => Expr::Duration(duration),
                         Timed::Stretch(_) => {
-                            return Err(PrismError::UnsupportedConstruct {
-                                construct: "a stretch returned as a duration".to_string(),
-                                line,
-                            });
+                            return Err(unsupported(line, "a stretch returned as a duration"));
                         }
                         Timed::Number(_) => unreachable!("duration_of rejects numbers"),
                     }
@@ -1091,10 +1080,10 @@ impl<'a> Parser<'a> {
                 })
             }
             (Some(ast::ReturnValue::Value(value)), None) if frame.local.is_none() => {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!("return of `{value}` as a bit without a classical move"),
+                return Err(unsupported(
                     line,
-                });
+                    format!("return of `{value}` as a bit without a classical move"),
+                ));
             }
             _ => None,
         };
@@ -1296,21 +1285,21 @@ impl<'a> Parser<'a> {
             })
         };
         match expr.as_ident() {
-            Some(local) if is_bit_param(args, local) => Err(PrismError::UnsupportedConstruct {
-                construct: format!(
+            Some(local) if is_bit_param(args, local) => Err(unsupported(
+                last.line,
+                format!(
                     "def `{name}` returning its bit parameter `{local}`, a copy the \
                      instruction list has no classical move for"
                 ),
-                line: last.line,
-            }),
+            )),
             Some(local) if declared(local) => Ok(Some(local)),
-            _ => Err(PrismError::UnsupportedConstruct {
-                construct: format!(
+            _ => Err(unsupported(
+                last.line,
+                format!(
                     "return of `{expr}` from def `{name}`; a def returns a measurement or a \
                      bit it declares"
                 ),
-                line: last.line,
-            }),
+            )),
         }
     }
 
@@ -1344,13 +1333,13 @@ impl<'a> Parser<'a> {
                         name: declared,
                         ..
                     } if !(top && local == Some(*declared)) => {
-                        return Err(PrismError::UnsupportedConstruct {
-                            construct: format!(
+                        return Err(unsupported(
+                            stmt.line,
+                            format!(
                                 "`bit {declared}` inside def `{name}`, which does not return it; \
                                  holding it would need a classical bit the program never declared"
                             ),
-                            line: stmt.line,
-                        });
+                        ));
                     }
                     StmtKind::Measure(measure) => {
                         let target = measure.target.register();
@@ -1374,10 +1363,7 @@ impl<'a> Parser<'a> {
                                 measure.target.describe()
                             ),
                         };
-                        return Err(PrismError::UnsupportedConstruct {
-                            construct,
-                            line: stmt.line,
-                        });
+                        return Err(unsupported(stmt.line, construct));
                     }
                     StmtKind::If(conditional) => {
                         locals = Self::check_def_writes(

@@ -28,10 +28,10 @@ impl<'a> Parser<'a> {
         if self.def_defs.contains_key(name) {
             if !modifiers.is_empty() && self.def_is_runtime(name, &self.def_defs[name].args, params)
             {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!("a modifier on runtime subroutine `{name}`"),
+                return Err(unsupported(
                     line,
-                });
+                    format!("a modifier on runtime subroutine `{name}`"),
+                ));
             }
             if self.streaming() {
                 self.flush(std::mem::take(out));
@@ -42,10 +42,10 @@ impl<'a> Parser<'a> {
                     .iter()
                     .any(|instr| gate_angle(instr).and_then(tag_id).is_some())
             {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!("modifier on `{name}` reading an `input`"),
+                return Err(unsupported(
                     line,
-                });
+                    format!("modifier on `{name}` reading an `input`"),
+                ));
             }
             out.extend(Self::modify_expansion(instrs, &modifiers, name, line)?);
             return Ok(());
@@ -59,10 +59,7 @@ impl<'a> Parser<'a> {
             } else {
                 format!("modifier on `{name}`")
             };
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!("{what} reading an `input`"),
-                line,
-            });
+            return Err(unsupported(line, format!("{what} reading an `input`")));
         }
         if name == "gphase" {
             let qubits = operands
@@ -125,10 +122,10 @@ impl<'a> Parser<'a> {
                     // a long run of `ctrl(255) @` costs nothing to refuse.
                     controls += count;
                     if controls > usize::from(u8::MAX) {
-                        return Err(PrismError::UnsupportedConstruct {
-                            construct: format!("ctrl @ chain past {} controls", u8::MAX),
+                        return Err(unsupported(
                             line,
-                        });
+                            format!("ctrl @ chain past {} controls", u8::MAX),
+                        ));
                     }
                     out.extend((0..count).map(|_| super::Modifier::Ctrl { negated: *negated }));
                 }
@@ -161,10 +158,10 @@ impl<'a> Parser<'a> {
             ));
         }
         if count > i64::from(u8::MAX) {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!("ctrl @ chain past {} controls", u8::MAX),
+            return Err(unsupported(
                 line,
-            });
+                format!("ctrl @ chain past {} controls", u8::MAX),
+            ));
         }
         Ok(count as usize)
     }
@@ -234,13 +231,13 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
         if self.dynamic.is_none() {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!(
+            return Err(unsupported(
+                line,
+                format!(
                     "`{name}` initialized with a set bit; the instruction list has no classical \
                      write, and `openqasm::parse_dynamic` carries one"
                 ),
-                line,
-            });
+            ));
         }
         self.write_constant_bits(&bits, &values, line)
     }
@@ -265,10 +262,7 @@ impl<'a> Parser<'a> {
             let value = self.fold_angle(expr, line)?;
             if tag_id(value).is_some() {
                 if tagged {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: "two `input` parameters on one gate".to_string(),
-                        line,
-                    });
+                    return Err(unsupported(line, "two `input` parameters on one gate"));
                 }
                 tagged = true;
             }
@@ -355,10 +349,10 @@ impl<'a> Parser<'a> {
                     _ => return Err(non_affine(expr, line)),
                 };
                 if left.slot.is_some() && right.slot.is_some() && left.slot != right.slot {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: format!("the angle `{expr}`, which reads two `input`s"),
+                    return Err(unsupported(
                         line,
-                    });
+                        format!("the angle `{expr}`, which reads two `input`s"),
+                    ));
                 }
                 Ok(Linear {
                     slot: left.slot.or(right.slot),
@@ -905,13 +899,13 @@ impl<'a> Parser<'a> {
                         ));
                     }
                     if *mutable && runtime {
-                        return Err(PrismError::UnsupportedConstruct {
-                            construct: format!(
+                        return Err(unsupported(
+                            line,
+                            format!(
                                 "a `mutable` array argument to def `{name}`, whose call runs \
                                  at runtime"
                             ),
-                            line,
-                        });
+                        ));
                     }
                     self.charge(view.offsets.len(), line)?;
                     let bound = ClassicalArray {
@@ -965,13 +959,13 @@ impl<'a> Parser<'a> {
                 result_var: None,
             },
             (Some(_), None) => {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!(
+                return Err(unsupported(
+                    line,
+                    format!(
                         "a call to def `{name}` that drops its `bit` result, which would need \
                          a classical bit the program never declared"
                     ),
-                    line,
-                });
+                ));
             }
             (Some(declared), Some(bits)) => {
                 let wanted = match &declared.width {
@@ -994,13 +988,13 @@ impl<'a> Parser<'a> {
                         .iter()
                         .any(|(_, param)| param.iter().any(|bit| bits.contains(bit)));
                 if aliased {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: format!(
+                    return Err(unsupported(
+                        line,
+                        format!(
                             "a call to def `{name}` passing a bit it also assigns, which the \
                              body would read after writing its result"
                         ),
-                        line,
-                    });
+                    ));
                 }
                 DefResult {
                     bits: bits.iter().copied().collect(),
@@ -1105,12 +1099,12 @@ impl<'a> Parser<'a> {
             if self.returned_bits_need_initialization(&instructions, &mut initialized, line)?
                 || initialized.values().any(|initialized| !initialized)
             {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!(
+                return Err(unsupported(
+                    line,
+                    format!(
                         "an initializer on the bit returned by def `{name}`; use `parse_dynamic`"
                     ),
-                    line,
-                });
+                ));
             }
         }
         if def.result.is_some() && !frame.returned {

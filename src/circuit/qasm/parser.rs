@@ -11,6 +11,7 @@ use super::ast::{
 use super::expr::{self, Expr};
 use super::lexer::{Kind, Token};
 use super::stream::Stream;
+use crate::circuit::openqasm::unsupported;
 use crate::error::{PrismError, Result};
 use smallvec::SmallVec;
 
@@ -88,10 +89,7 @@ fn statement_kind<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         .iter()
         .find(|(keyword, _)| *keyword == word && !reads_loops)
     {
-        return Err(PrismError::UnsupportedConstruct {
-            construct: (*construct).to_string(),
-            line: stream.line(),
-        });
+        return Err(unsupported(stream.line(), (*construct).to_string()));
     }
 
     match word {
@@ -752,14 +750,14 @@ fn for_range<'a>(stream: &mut Stream<'_, 'a>) -> Result<ForRange<'a>> {
         return Ok(ForRange::Set(entries));
     }
     if !stream.eat(Kind::LBracket) {
-        return Err(PrismError::UnsupportedConstruct {
-            construct: format!(
+        return Err(unsupported(
+            stream.line(),
+            format!(
                 "for loop range starting with {} (only `[start:stop]`, `[start:step:stop]`, \
                  or `{{a,b,c}}` supported)",
                 stream.peek().describe()
             ),
-            line: stream.line(),
-        });
+        ));
     }
     let start = expr::parse(stream)?;
     stream.expect(Kind::Colon)?;
@@ -900,10 +898,7 @@ fn def_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
                 width,
             },
             other => {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!("def parameter type `{other}`"),
-                    line,
-                });
+                return Err(unsupported(line, format!("def parameter type `{other}`")));
             }
         });
         if !stream.eat(Kind::Comma) {
@@ -917,10 +912,7 @@ fn def_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
             ty,
             "bit" | "int" | "uint" | "bool" | "float" | "angle" | "complex" | "duration"
         ) {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!("def `{name}` returning `{ty}`"),
-                line,
-            });
+            return Err(unsupported(line, format!("def `{name}` returning `{ty}`")));
         }
         Some(DefType { ty, width })
     } else {
@@ -946,10 +938,10 @@ fn extern_decl<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
             .iter()
             .any(|word| stream.is_keyword(word))
         {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!("extern `{name}` taking a `{}` argument", stream.peek().text),
+            return Err(unsupported(
                 line,
-            });
+                format!("extern `{name}` taking a `{}` argument", stream.peek().text),
+            ));
         }
         let (ty, width) = typename(stream)?;
         params.push(DefType { ty, width });
@@ -1201,10 +1193,7 @@ fn modifier_chain<'a>(stream: &mut Stream<'_, 'a>) -> Result<Vec<Modifier<'a>>> 
             // A name nobody modifies with is still a modifier when `@` follows
             // it, and a gate otherwise.
             if stream.peek_at(1).kind == Kind::At {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: word.to_string(),
-                    line: stream.line(),
-                });
+                return Err(unsupported(stream.line(), word.to_string()));
             }
             return Ok(out);
         }
@@ -1238,10 +1227,7 @@ fn modifier_chain<'a>(stream: &mut Stream<'_, 'a>) -> Result<Vec<Modifier<'a>>> 
             },
             ("pow", Some(exponent)) => Modifier::Pow(exponent),
             _ => {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: word.to_string(),
-                    line: stream.line(),
-                });
+                return Err(unsupported(stream.line(), word.to_string()));
             }
         });
     }

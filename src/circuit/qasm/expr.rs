@@ -13,6 +13,7 @@ use super::ast::Range;
 use super::lexer::{Kind, TIME_UNITS, Token};
 use super::stream::{MAX_NESTING, Stream, with_stack};
 use crate::circuit::dynamic::{self, ClassicalValue, UnaryOp};
+use crate::circuit::openqasm::unsupported;
 use crate::error::{PrismError, Result};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -207,12 +208,10 @@ impl Stretched {
                     out.len += 1;
                 }
                 None => {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: format!(
-                            "a timing value over more than {MAX_STRETCH_TERMS} stretches"
-                        ),
+                    return Err(unsupported(
                         line,
-                    });
+                        format!("a timing value over more than {MAX_STRETCH_TERMS} stretches"),
+                    ));
                 }
             }
         }
@@ -1139,10 +1138,10 @@ fn evaluate(
     vars: Option<&HashMap<&str, ClassicalValue>>,
 ) -> Result<ClassicalValue> {
     with_stack(|| match expr {
-        Expr::Runtime(_) => Err(PrismError::UnsupportedConstruct {
-            construct: "a runtime subroutine value where a constant belongs".to_string(),
+        Expr::Runtime(_) => Err(unsupported(
             line,
-        }),
+            "a runtime subroutine value where a constant belongs",
+        )),
         Expr::Number(value) => Ok(*value),
         Expr::Complex(_) => Err(complex_where_real(expr, line)),
         Expr::Range(_) => Err(PrismError::Parse {
@@ -1491,10 +1490,10 @@ pub(crate) fn eval_timed(
             line,
             message: format!("`{expr}` stands where a duration belongs"),
         }),
-        Expr::Runtime(_) => Err(PrismError::UnsupportedConstruct {
-            construct: "a runtime value in a duration expression".to_string(),
+        Expr::Runtime(_) => Err(unsupported(
             line,
-        }),
+            "a runtime value in a duration expression",
+        )),
     }
 }
 
@@ -1505,19 +1504,23 @@ pub(crate) fn combine_timed(op: BinaryOp, left: Timed, right: Timed, line: usize
         line,
         message: "division by zero in a duration expression".into(),
     };
-    let unresolved = |what: &str| PrismError::UnsupportedConstruct {
-        construct: format!(
-            "{what} a stretch that no fixed-length `box` has resolved, whose length only a \
-             scheduler fixes"
-        ),
-        line,
+    let unresolved = |what: &str| {
+        unsupported(
+            line,
+            format!(
+                "{what} a stretch that no fixed-length `box` has resolved, whose length only a \
+                 scheduler fixes"
+            ),
+        )
     };
-    let mixed = |what: &str| PrismError::UnsupportedConstruct {
-        construct: format!(
-            "{what} mixing `dt` with SI units, whose value depends on the backend's sample \
-             period"
-        ),
-        line,
+    let mixed = |what: &str| {
+        unsupported(
+            line,
+            format!(
+                "{what} mixing `dt` with SI units, whose value depends on the backend's sample \
+                 period"
+            ),
+        )
     };
     if let (Timed::Number(a), Timed::Number(b)) = (left, right) {
         return Ok(Timed::Number(
@@ -1589,10 +1592,10 @@ pub(crate) fn combine_timed(op: BinaryOp, left: Timed, right: Timed, line: usize
 }
 
 fn unscheduled_durationof(line: usize) -> PrismError {
-    PrismError::UnsupportedConstruct {
-        construct: "`durationof` where no length is folded, such as a gate argument".into(),
+    unsupported(
         line,
-    }
+        "`durationof` where no length is folded, such as a gate argument",
+    )
 }
 
 fn resolve(

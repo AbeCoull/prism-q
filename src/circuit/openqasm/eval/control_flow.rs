@@ -16,10 +16,10 @@ impl<'a> Parser<'a> {
         {
             let value = self.resolve_calls(&expr, line, out)?;
             let ClassicalExpr::Const(value) = self.lower_expr(&value, line)? else {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: "a def call in a measurement-dependent condition".to_string(),
+                return Err(unsupported(
                     line,
-                });
+                    "a def call in a measurement-dependent condition",
+                ));
             };
             let body = if value.truthy() {
                 Some(&conditional.then_body)
@@ -137,10 +137,10 @@ impl<'a> Parser<'a> {
                 .iter()
                 .any(|instr| gate_angle(instr).and_then(tag_id).is_some())
             {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: "an angle reading an `input` inside a guarded region".to_string(),
-                    line: block.first().map_or(1, |stmt| stmt.line),
-                });
+                return Err(unsupported(
+                    block.first().map_or(1, |stmt| stmt.line),
+                    "an angle reading an `input` inside a guarded region",
+                ));
             }
             Ok(body)
         });
@@ -158,14 +158,14 @@ impl<'a> Parser<'a> {
         };
         let outer = self.classical.contains_key(name) || self.arrays.contains_key(name);
         if outer && !self.declared[guard..].contains(&name) {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!(
+            return Err(unsupported(
+                line,
+                format!(
                     "a write to `{name}` under a runtime `if` or `switch`; the variable is \
                      folded at parse time and cannot depend on a measurement, so parse the \
                      program with `openqasm::parse_dynamic` to evaluate it at runtime"
                 ),
-                line,
-            });
+            ));
         }
         Ok(())
     }
@@ -423,14 +423,15 @@ impl<'a> Parser<'a> {
         if let ClassicalExpr::Const(value) = lowered {
             return self.exec_switch_constant(value, arms, line);
         }
-        let (offset, size) =
-            register_value(&lowered).ok_or_else(|| PrismError::UnsupportedConstruct {
-                construct: format!(
+        let (offset, size) = register_value(&lowered).ok_or_else(|| {
+            unsupported(
+                line,
+                format!(
                     "a `switch` on `{target}`, which no guard on classical bits spells; \
                      `openqasm::parse_dynamic` evaluates it at runtime"
                 ),
-                line,
-            })?;
+            )
+        })?;
         let mut labels: Vec<u64> = Vec::new();
         let mut cases: Vec<(Vec<u64>, Vec<Instruction>)> = Vec::new();
         let mut default: Option<Vec<Instruction>> = None;
@@ -639,13 +640,13 @@ impl<'a> Parser<'a> {
             }
             Condition::Expr(expr) => {
                 guard_condition(&self.lower_expr(expr, line)?).ok_or_else(|| {
-                    PrismError::UnsupportedConstruct {
-                        construct: format!(
+                    unsupported(
+                        line,
+                        format!(
                             "condition `{expr}`, which no guard on classical bits spells; \
                              `openqasm::parse_dynamic` evaluates it at runtime"
                         ),
-                        line,
-                    }
+                    )
                 })
             }
             Condition::Compare { lhs, op, rhs } => {

@@ -21,16 +21,13 @@ impl<'a> Parser<'a> {
             return Ok(Vec::new());
         };
         if self.dialect != Dialect::Braket {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: "`#pragma braket`, which needs `Dialect::Braket`".to_string(),
+            return Err(unsupported(
                 line,
-            });
+                "`#pragma braket`, which needs `Dialect::Braket`",
+            ));
         }
         if self.nested {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: "`#pragma braket` inside a block body".to_string(),
-                line,
-            });
+            return Err(unsupported(line, "`#pragma braket` inside a block body"));
         }
         let braket_body = braket_body.trim();
         let (kind, rest) = match braket_body.split_once(char::is_whitespace) {
@@ -60,10 +57,7 @@ impl<'a> Parser<'a> {
                 Ok(Vec::new())
             }
             _ if braket_body.starts_with("unitary") => self.exec_unitary_pragma(braket_body, line),
-            other => Err(PrismError::UnsupportedConstruct {
-                construct: format!("`#pragma braket {other}`"),
-                line,
-            }),
+            other => Err(unsupported(line, format!("`#pragma braket {other}`"))),
         }
     }
 

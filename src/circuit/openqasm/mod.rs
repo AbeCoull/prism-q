@@ -2161,18 +2161,12 @@ impl<'a> Parser<'a> {
     }
 }
 
-#[path = "openqasm_eval.rs"]
-mod eval;
-
-#[path = "openqasm_dynamic.rs"]
 mod dynamic;
-
-#[path = "openqasm_timing.rs"]
+mod eval;
 mod timing;
 
 pub(crate) use dynamic::builder_expr;
 pub use dynamic::{parse_dynamic, parse_dynamic_with_externs, parse_dynamic_with_inputs};
 
 #[cfg(test)]
-#[path = "openqasm_tests.rs"]
 mod tests;

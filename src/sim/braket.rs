@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use num_complex::Complex64;
 
+use crate::backend::statevector::kernels::reverse_low_bits;
 use crate::circuit::Instruction;
 use crate::circuit::braket::{MeasuredFactor, ObservableFactor, ResultSpec, Targets};
 use crate::error::{PrismError, Result};
@@ -564,48 +565,16 @@ fn reduced_of(amplitudes: &[Complex64], targets: &[usize], num_qubits: usize) ->
     reduced
 }
 
-/// Width of one table-driven reversal step. A table of this many bits costs
-/// 4 KiB and covers a 33-qubit index in three lookups.
-const CHUNK_BITS: usize = 11;
-
-/// Reversal of every `CHUNK_BITS`-bit value, so reversing a whole index costs
-/// one lookup per chunk rather than one pass per bit.
-fn chunk_table() -> Vec<u16> {
-    (0..1u32 << CHUNK_BITS)
-        .map(|value| {
-            (0..CHUNK_BITS).fold(0u16, |acc, bit| {
-                acc | ((value as u16 >> bit) & 1) << (CHUNK_BITS - 1 - bit)
-            })
-        })
-        .collect()
-}
-
-fn reverse_bits_with(table: &[u16], index: usize, width: usize) -> usize {
-    let mut reversed = 0usize;
-    let mut remaining = width;
-    let mut rest = index;
-    while remaining > 0 {
-        let take = remaining.min(CHUNK_BITS);
-        let chunk = rest & ((1usize << take) - 1);
-        reversed |= ((table[chunk] >> (CHUNK_BITS - take)) as usize) << (remaining - take);
-        rest >>= take;
-        remaining -= take;
-    }
-    reversed
-}
-
 fn reverse_state<T: Copy>(values: &[T], width: usize) -> Vec<T> {
-    let table = chunk_table();
     (0..values.len())
-        .map(|index| values[reverse_bits_with(&table, index, width)])
+        .map(|index| values[reverse_low_bits(index, width)])
         .collect()
 }
 
 fn reverse_matrix(data: &[Complex64], width: usize) -> Vec<Vec<Complex64>> {
     let side = 1usize << width;
-    let table = chunk_table();
     let reversed: Vec<usize> = (0..side)
-        .map(|index| reverse_bits_with(&table, index, width))
+        .map(|index| reverse_low_bits(index, width))
         .collect();
     reversed
         .iter()

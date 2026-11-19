@@ -74,7 +74,7 @@ fn dense_iter_size_hint_exact() {
 }
 
 #[test]
-fn extract_block_bits_scalar_via_get() {
+fn factored_get_packs_block_bits() {
     let blocks = vec![FactoredBlock {
         probs: vec![0.0, 0.0, 0.0, 1.0],
         mask: 0b1010,

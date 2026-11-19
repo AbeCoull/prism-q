@@ -732,12 +732,12 @@ fn avx512_slice_ops_match_avx2() {
             assert_state_close(&got, &want, &format!("norm_sqr_sum_scale n={n}"));
 
             let (mut want, mut got) = (vec![0.0; n], vec![0.0; n]);
-            norm_sqr_to_slice_avx2(&a0, &mut want);
+            norm_sqr_to_slice_avx2::<false>(&a0, &mut want, 1.0);
             norm_sqr_to_slice_avx512::<false>(&a0, &mut got, 1.0);
             for (g, w) in got.iter().zip(&want) {
                 assert!((g - w).abs() < EPS, "norm_sqr_to_slice n={n}");
             }
-            norm_sqr_to_slice_scaled_avx2(&a0, &mut want, 0.3);
+            norm_sqr_to_slice_avx2::<true>(&a0, &mut want, 0.3);
             norm_sqr_to_slice_avx512::<true>(&a0, &mut got, 0.3);
             for (g, w) in got.iter().zip(&want) {
                 assert!((g - w).abs() < EPS, "norm_sqr_to_slice_scaled n={n}");
@@ -939,7 +939,7 @@ fn target_feature_kernel_count_is_pinned() {
     let root = env!("CARGO_MANIFEST_DIR");
     // Per-file expected counts; the breakdown makes a drift easy to localise.
     let expected: [(&str, usize); 8] = [
-        ("src/backend/simd.rs", 52),
+        ("src/backend/simd.rs", 51),
         ("src/backend/word_ops.rs", 3),
         ("src/backend/stabilizer/kernels/simd.rs", 5),
         ("src/backend/statevector/kernels.rs", 19),

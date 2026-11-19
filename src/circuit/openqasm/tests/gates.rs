@@ -1,6 +1,7 @@
 //! Gate resolution, modifiers, broadcasting, registers and source syntax.
 
 use super::*;
+use crate::test_support::assert_mat_close;
 
 #[test]
 fn test_oq3_minimal_circuit() {
@@ -603,7 +604,7 @@ fn test_uppercase_u_gate() {
     let c = parse(qasm).unwrap();
     if let Instruction::Gate { gate, .. } = &c.instructions[0] {
         if let Gate::Fused(mat) = gate {
-            assert_mat2_close(mat, Gate::H.matrix_2x2());
+            assert_mat_close(mat, &Gate::H.matrix_2x2(), 1e-12);
         } else {
             panic!("expected Fused");
         }
@@ -647,7 +648,7 @@ fn test_r_gate_matrix() {
     ];
     if let Instruction::Gate { gate, .. } = &c.instructions[0] {
         if let Gate::Fused(mat) = gate {
-            assert_mat2_close(mat, expected);
+            assert_mat_close(mat, &expected, 1e-12);
         } else {
             panic!("expected Fused");
         }
@@ -687,7 +688,7 @@ fn test_cs_and_csdg_gates() {
         if let Instruction::Gate { gate, targets } = inst {
             assert_eq!(targets.as_slice(), &[0, 1]);
             if let Gate::Cu(mat) = gate {
-                assert_mat2_close(mat, expected_mat);
+                assert_mat_close(mat, &expected_mat, 1e-12);
             } else {
                 panic!("expected Cu");
             }
@@ -721,7 +722,7 @@ fn test_cu_gate_matrix() {
     if let Instruction::Gate { gate, targets } = &c.instructions[0] {
         assert_eq!(targets.as_slice(), &[0, 1]);
         if let Gate::Cu(mat) = gate {
-            assert_mat2_close(mat, expected);
+            assert_mat_close(mat, &expected, 1e-12);
         } else {
             panic!("expected Cu");
         }
@@ -810,7 +811,7 @@ fn test_multi_controlled_x_aliases() {
         if let Instruction::Gate { gate, .. } = inst {
             if let Gate::Mcu(data) = gate {
                 assert_eq!(data.num_controls, expected);
-                assert_mat2_close(&data.mat, Gate::X.matrix_2x2());
+                assert_mat_close(&data.mat, &Gate::X.matrix_2x2(), 1e-12);
             } else {
                 panic!("expected Mcu");
             }
@@ -1010,7 +1011,7 @@ fn test_xx_plus_minus_yy_matrices() {
     if let Instruction::Gate { gate, targets } = &c.instructions[0] {
         assert_eq!(targets.as_slice(), &[0, 1]);
         if let Gate::Fused2q(mat) = gate {
-            assert_mat4_close(mat, expected_plus);
+            assert_mat_close(mat, &expected_plus, 1e-12);
         } else {
             panic!("expected Fused2q");
         }
@@ -1020,7 +1021,7 @@ fn test_xx_plus_minus_yy_matrices() {
     if let Instruction::Gate { gate, targets } = &c.instructions[1] {
         assert_eq!(targets.as_slice(), &[0, 1]);
         if let Gate::Fused2q(mat) = gate {
-            assert_mat4_close(mat, expected_minus);
+            assert_mat_close(mat, &expected_minus, 1e-12);
         } else {
             panic!("expected Fused2q");
         }
@@ -1082,7 +1083,7 @@ fn test_google_cirq_native_matrices() {
         if let Instruction::Gate { gate, targets } = inst {
             assert_eq!(targets.as_slice(), &[0, 1]);
             if let Gate::Fused2q(mat) = gate {
-                assert_mat4_close(mat, expected_mat);
+                assert_mat_close(mat, &expected_mat, 1e-12);
             } else {
                 panic!("expected Fused2q");
             }
@@ -1114,7 +1115,7 @@ ms(0.0, 0.0) q[0], q[1];";
     else {
         panic!("expected a Fused gpi");
     };
-    assert_mat2_close(gpi, [[zero, -i], [i, zero]]);
+    assert_mat_close(gpi, &[[zero, -i], [i, zero]], 1e-12);
 
     let Instruction::Gate {
         gate: Gate::Fused2q(ms),
@@ -1125,14 +1126,15 @@ ms(0.0, 0.0) q[0], q[1];";
     };
     let h = num_complex::Complex64::new(std::f64::consts::FRAC_1_SQRT_2, 0.0);
     let o = num_complex::Complex64::new(0.0, -std::f64::consts::FRAC_1_SQRT_2);
-    assert_mat4_close(
+    assert_mat_close(
         ms,
-        [
+        &[
             [h, zero, zero, o],
             [zero, h, o, zero],
             [zero, o, h, zero],
             [o, zero, zero, h],
         ],
+        1e-12,
     );
 }
 

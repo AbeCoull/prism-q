@@ -25,35 +25,6 @@ fn eval_expr(source: &str, line: usize, vars: Option<&HashMap<&str, f64>>) -> Re
     Ok(qasm_expr::eval(&expr, line, vars.as_ref())?.to_float())
 }
 
-fn assert_complex_close(actual: num_complex::Complex64, expected: num_complex::Complex64) {
-    assert!(
-        (actual - expected).norm() < 1e-12,
-        "expected {expected:?}, got {actual:?}"
-    );
-}
-
-fn assert_mat2_close(
-    actual: &[[num_complex::Complex64; 2]; 2],
-    expected: [[num_complex::Complex64; 2]; 2],
-) {
-    for i in 0..2 {
-        for j in 0..2 {
-            assert_complex_close(actual[i][j], expected[i][j]);
-        }
-    }
-}
-
-fn assert_mat4_close(
-    actual: &[[num_complex::Complex64; 4]; 4],
-    expected: [[num_complex::Complex64; 4]; 4],
-) {
-    for i in 0..4 {
-        for j in 0..4 {
-            assert_complex_close(actual[i][j], expected[i][j]);
-        }
-    }
-}
-
 fn angle_of(source: &str) -> f64 {
     let circuit = parse(source).unwrap_or_else(|e| panic!("`{source}`: {e}"));
     match &circuit.instructions[0] {

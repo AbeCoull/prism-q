@@ -312,6 +312,9 @@ pub struct GpuState {
     /// Measurements decided on the device: the pending norm at index 0, then one outcome
     /// per slot, read back once per run of deferred measurements.
     measure_log: Option<GpuBuffer<f64>>,
+    /// Whether `measure_log[0]` holds the pending norm, from the first logged measurement
+    /// until its readback; `pending_norm` is stale meanwhile.
+    norm_in_log: bool,
 }
 
 impl GpuState {
@@ -335,6 +338,7 @@ impl GpuState {
             pending_norm: 1.0,
             probs_scratch: std::cell::RefCell::new(None),
             measure_log: None,
+            norm_in_log: false,
         };
         kernels::dense::launch_set_initial_state(&context, &mut state)?;
         Ok(state)
@@ -354,6 +358,7 @@ impl GpuState {
             pending_norm: 1.0,
             probs_scratch: std::cell::RefCell::new(None),
             measure_log: None,
+            norm_in_log: false,
         })
     }
 
@@ -366,9 +371,10 @@ impl GpuState {
             context: self.context.clone(),
             buffer,
             num_qubits: self.num_qubits,
-            pending_norm: self.pending_norm,
+            pending_norm: self.pending_norm(),
             probs_scratch: std::cell::RefCell::new(None),
             measure_log: None,
+            norm_in_log: false,
         })
     }
 
@@ -378,6 +384,10 @@ impl GpuState {
 
     /// Multiplicative norm correction deferred from measurement collapse.
     pub fn pending_norm(&self) -> f64 {
+        debug_assert!(
+            !self.norm_in_log,
+            "pending norm read while the measure log holds it"
+        );
         self.pending_norm
     }
 
@@ -387,8 +397,9 @@ impl GpuState {
         let mut raw = vec![0.0_f64; self.buffer.len()];
         self.buffer.copy_to_host(self.context.device(), &mut raw)?;
         let mut out = interleaved_into_complex(raw);
-        if self.pending_norm != 1.0 {
-            scale_in_place(&mut out, self.pending_norm, self.num_qubits);
+        let norm = self.pending_norm();
+        if norm != 1.0 {
+            scale_in_place(&mut out, norm, self.num_qubits);
         }
         Ok(out)
     }

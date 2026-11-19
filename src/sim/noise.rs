@@ -3466,7 +3466,8 @@ pub(crate) fn run_shots_noisy_with_gpu(
 /// One shot's pass over a circuit and its noise slots, driven by
 /// [`walk_noise_slots`].
 pub(crate) trait SlotWalk {
-    fn classical(&self) -> &[bool];
+    /// The classical bits, current for a guard to read.
+    fn classical(&mut self) -> Result<&[bool]>;
     /// Apply an instruction other than a region, whose body the walk descends
     /// into itself.
     fn apply(&mut self, instruction: &Instruction) -> Result<()>;
@@ -3495,13 +3496,13 @@ fn walk_slot_list(
     for (offset, instruction) in list.iter().enumerate() {
         match instruction {
             Instruction::Region(region) => {
-                if region.condition().evaluate(walk.classical()) {
+                if region.condition().evaluate(walk.classical()?) {
                     walk_region_body(region, nested, walk)?;
                 }
                 nested += region.noise_slots();
             }
             Instruction::Conditional { condition, .. } => {
-                let taken = condition.evaluate(walk.classical());
+                let taken = condition.evaluate(walk.classical()?);
                 walk.apply(instruction)?;
                 if taken {
                     walk.fire(nested)?;
@@ -3532,8 +3533,8 @@ struct FrameWalk<'a> {
 }
 
 impl SlotWalk for FrameWalk<'_> {
-    fn classical(&self) -> &[bool] {
-        self.backend.classical_results()
+    fn classical(&mut self) -> Result<&[bool]> {
+        Ok(self.backend.classical_results())
     }
 
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {

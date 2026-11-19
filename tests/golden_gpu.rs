@@ -4241,3 +4241,134 @@ fn device_kraus_decisions_match_host_decisions() {
     ];
     assert_device_noise_matches_host_decisions(&[prism_q::NoiseChannel::Custom { kraus }]);
 }
+
+// Three rounds of rotations and a CX chain, each with a mid-circuit measurement, a reset,
+// a gate conditioned on that measurement, a region measuring in its body when the
+// measurement read zero, and a second measurement; then every qubit is measured.
+#[cfg(feature = "bench-internal")]
+fn feed_forward_circuit(n: usize) -> prism_q::Circuit {
+    use prism_q::circuit::{ClassicalCondition, GuardedRegion};
+    let mut circuit = prism_q::Circuit::new(n, 2 * n);
+    for round in 0..3 {
+        for q in 0..n {
+            let theta = 0.3 + 0.17 * q as f64 + 0.11 * round as f64;
+            circuit.add_gate(Gate::Rx(theta), &[q]);
+            circuit.add_gate(Gate::Rz(0.7 * theta), &[q]);
+        }
+        for q in 0..n - 1 {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        circuit.add_measure(round, n + round);
+        circuit.add_reset(round + 3);
+        circuit.instructions.push(Instruction::Conditional {
+            condition: ClassicalCondition::BitIsOne(n + round),
+            gate: Gate::H,
+            targets: smallvec![round + 6],
+        });
+        circuit
+            .instructions
+            .push(Instruction::Region(Box::new(GuardedRegion::new(
+                ClassicalCondition::BitIsZero(n + round),
+                vec![
+                    g(Gate::Rx(0.4), &[7]),
+                    Instruction::Measure {
+                        qubit: 8,
+                        classical_bit: n + 3 + round,
+                    },
+                    g(Gate::Cx, &[7, 8]),
+                ],
+            ))));
+        circuit.add_measure(9, n + 6 + round);
+    }
+    circuit.measure_all();
+    circuit
+}
+
+// One device noise channel after each gate, cycling through every channel a device
+// statevector decides on the device, a Kraus channel it hands back to the host, and a
+// Pauli channel.
+#[cfg(feature = "bench-internal")]
+fn feed_forward_noise(circuit: &prism_q::Circuit, readout: bool) -> prism_q::NoiseModel {
+    use prism_q::{NoiseChannel, NoiseEvent, NoiseModel, ReadoutError};
+    let c = |re: f64| Complex64::new(re, 0.0);
+    let zero = c(0.0);
+    let gamma: f64 = 0.1;
+    let damping = vec![
+        [[c(1.0), zero], [zero, c((1.0 - gamma).sqrt())]],
+        [[zero, c(gamma.sqrt())], [zero, zero]],
+    ];
+    let host_kraus = (0..17)
+        .map(|k| {
+            let w = if k == 0 { 0.92_f64 } else { 0.005 };
+            [[c(w.sqrt()), zero], [zero, c(w.sqrt())]]
+        })
+        .collect::<Vec<_>>();
+    let channels = [
+        NoiseChannel::AmplitudeDamping { gamma: 0.08 },
+        NoiseChannel::ThermalRelaxation {
+            t1: 50.0,
+            t2: 40.0,
+            gate_time: 8.0,
+            excited_population: 0.1,
+        },
+        NoiseChannel::Custom { kraus: damping },
+        NoiseChannel::PhaseDamping { gamma: 0.1 },
+        NoiseChannel::Custom { kraus: host_kraus },
+        NoiseChannel::Depolarizing { p: 0.05 },
+    ];
+    let after_gate = circuit
+        .instructions
+        .iter()
+        .enumerate()
+        .map(|(i, inst)| match inst {
+            Instruction::Gate { targets, .. } => vec![NoiseEvent {
+                channel: channels[i % channels.len()].clone(),
+                qubits: std::iter::once(targets[0]).collect(),
+            }],
+            _ => Vec::new(),
+        })
+        .collect();
+    let error = ReadoutError {
+        p01: 0.05,
+        p10: 0.08,
+    };
+    NoiseModel {
+        after_gate,
+        readout: vec![readout.then_some(error); circuit.num_classical_bits],
+    }
+}
+
+// A trajectory shot keeps its outcomes on the device between the reads that need them.
+// Against the same shot reading each outcome back as it lands, the record and the final
+// state match bit for bit, through conditionals, a region, resets, readout error, and
+// branches decided on the device and on the host.
+#[cfg(feature = "bench-internal")]
+#[test]
+fn deferred_trajectory_shots_match_immediate_readbacks_bit_for_bit() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 10;
+    let circuit = feed_forward_circuit(n);
+    for readout in [false, true] {
+        let noise = feed_forward_noise(&circuit, readout);
+        for seed in 0..6u64 {
+            let run = |defer: bool| {
+                let mut backend = StatevectorBackend::new(seed).with_gpu(f.ctx.clone());
+                let bits =
+                    prism_q::run_noisy_shot(&mut backend, &circuit, &noise, seed, defer).unwrap();
+                (bits, backend.export_statevector().unwrap())
+            };
+            let (deferred_bits, deferred_state) = run(true);
+            let (immediate_bits, immediate_state) = run(false);
+            assert_eq!(
+                deferred_bits, immediate_bits,
+                "record differs, readout {readout}, seed {seed}"
+            );
+            for (i, (d, m)) in deferred_state.iter().zip(&immediate_state).enumerate() {
+                assert!(
+                    d.re.to_bits() == m.re.to_bits() && d.im.to_bits() == m.im.to_bits(),
+                    "amplitude {i}, readout {readout}, seed {seed}: deferred {d:?}, immediate {m:?}"
+                );
+            }
+        }
+    }
+}

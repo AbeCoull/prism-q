@@ -8,7 +8,7 @@
 //! `Multi2q` launches once per sub-gate, on the permutation or diagonal kernel when the
 //! sub-gate's matrix is exactly one.
 
-use cudarc::driver::{CudaViewMut, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaViewMut, DevicePtr, LaunchConfig, PushKernelArg};
 use num_complex::Complex64;
 
 use crate::backend::statevector::kernels as cpu_k;
@@ -1053,8 +1053,9 @@ pub(crate) fn noise_kraus(
 /// One trajectory noise site on `qubit` in two launches and no readback: a
 /// `noise_site_*` kernel that runs stage 1 of [`measure_prob_one`] (or of
 /// [`reduced_density_matrix_1q`] for a Kraus channel) and decides the branch in the block
-/// that finishes last, then `apply_gate_1q_from_buffer`. The pending norm is read, not
-/// changed: each branch matrix carries its own normalization.
+/// that finishes last, then `apply_gate_1q_from_buffer`. The pending norm is read from the
+/// measure log while it holds it, and is not changed: each branch matrix carries its own
+/// normalization.
 fn noise_site(
     ctx: &GpuContext,
     state: &mut GpuState,
@@ -1087,7 +1088,11 @@ fn noise_site(
     let decision = scratch.noise_decision.as_mut().unwrap();
     let ticket = scratch.noise_ticket.as_mut().unwrap();
 
-    let norm = state.pending_norm();
+    let norm_log: u64 = match (&state.measure_log, state.norm_in_log) {
+        (Some(log), true) => log.raw().device_ptr(stream).0,
+        _ => 0,
+    };
+    let norm = state.pending_norm;
     let eps = crate::sim::trajectory::JUMP_EPSILON;
     let qubit_i = qubit as i32;
     {
@@ -1105,6 +1110,7 @@ fn noise_site(
             .arg(partials.raw_mut())
             .arg(ticket.raw_mut())
             .arg(decision.raw_mut())
+            .arg(&norm_log)
             .arg(&norm);
         match &decide {
             NoiseDecide::Damping {
@@ -1142,7 +1148,7 @@ fn noise_site(
         // SAFETY: signature matches kernel; num_blocks * 2*BLOCK_SIZE covers `count`
         // elements (or pairs), the partials hold `columns` f64s per block, the ticket is
         // zero between launches, and only thread 0 of the last block writes the nine f64s
-        // of `decision`.
+        // of `decision`. `norm_log` is null or the live measure log.
         unsafe {
             builder.launch(cfg).map_err(|e| driver_err(name, e))?;
         }
@@ -1508,29 +1514,21 @@ pub(crate) fn measure_collapse(
 }
 
 /// Start a run of measurements decided on the device: size the log for `capacity`
-/// outcomes and upload the pending norm into its first slot.
+/// outcomes between readbacks. The first [`measure_logged`] after each readback uploads
+/// the pending norm.
 pub(crate) fn begin_measure_log(
     ctx: &GpuContext,
     state: &mut GpuState,
     capacity: usize,
 ) -> Result<()> {
-    let device = ctx.device();
+    debug_assert!(!state.norm_in_log, "measure log begun with outcomes unread");
     if state
         .measure_log
         .as_ref()
         .is_none_or(|log| log.len() < capacity + 1)
     {
-        state.measure_log = Some(GpuBuffer::<f64>::alloc_zeros(device, capacity + 1)?);
+        state.measure_log = Some(GpuBuffer::<f64>::alloc_zeros(ctx.device(), capacity + 1)?);
     }
-    let log = state
-        .measure_log
-        .as_mut()
-        .expect("measure log allocated above");
-    device
-        .stream()?
-        .memcpy_htod(&[state.pending_norm], &mut log.raw_mut().slice_mut(0..1))
-        .map_err(|e| driver_err("upload measure log norm", e))?;
-    device.count_upload();
     Ok(())
 }
 
@@ -1560,6 +1558,13 @@ pub(crate) fn measure_logged(
         .as_mut()
         .expect("measure_logged called before begin_measure_log");
     debug_assert!(slot < log.len() - 1, "measure log slot {slot} out of range");
+    if !state.norm_in_log {
+        stream
+            .memcpy_htod(&[state.pending_norm], &mut log.raw_mut().slice_mut(0..1))
+            .map_err(|e| driver_err("upload measure log norm", e))?;
+        device.count_upload();
+        state.norm_in_log = true;
+    }
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
@@ -1653,6 +1658,7 @@ pub(crate) fn read_measure_log(
         .map_err(|e| driver_err("measure log dtoh", e))?;
     device.count_drain();
     state.pending_norm = host[0];
+    state.norm_in_log = false;
     Ok(host[1..].iter().map(|&v| v != 0.0).collect())
 }
 

@@ -318,3 +318,50 @@ fn trajectory_noise_sites_decide_on_the_device_without_a_readback() {
         );
     }
 }
+
+// A noisy trajectory shot leaves its measurement outcomes on the device and reads them
+// back once at the end, and once more before each conditional gate that reads one.
+#[test]
+fn noisy_trajectory_shot_reads_outcomes_back_at_guards_and_the_end() {
+    use prism_q::circuit::ClassicalCondition;
+    use prism_q::{NoiseChannel, NoiseEvent, NoiseModel};
+    let Some(ctx) = gpu_device::context() else {
+        return;
+    };
+    let mut circuit = Circuit::new(NUM_QUBITS, NUM_QUBITS);
+    for q in 0..NUM_QUBITS {
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_measure(q, q);
+    }
+    let mut guarded = circuit.clone();
+    guarded.instructions.insert(
+        NUM_QUBITS,
+        Instruction::Conditional {
+            condition: ClassicalCondition::BitIsOne(0),
+            gate: Gate::X,
+            targets: smallvec![NUM_QUBITS - 1],
+        },
+    );
+    for (circuit, drains) in [(circuit, 1), (guarded, 2)] {
+        let after_gate = circuit
+            .instructions
+            .iter()
+            .map(|inst| match inst {
+                Instruction::Gate { targets, .. } => vec![NoiseEvent {
+                    channel: NoiseChannel::AmplitudeDamping { gamma: 0.1 },
+                    qubits: std::iter::once(targets[0]).collect(),
+                }],
+                _ => Vec::new(),
+            })
+            .collect();
+        let noise = NoiseModel {
+            after_gate,
+            readout: vec![None; NUM_QUBITS],
+        };
+        let mut backend = StatevectorBackend::new(42).with_gpu(ctx.clone());
+        let before = ctx.pass_census();
+        prism_q::run_noisy_shot(&mut backend, &circuit, &noise, 42, true).unwrap();
+        let census = ctx.pass_census() - before;
+        assert_eq!((census.drains, census.uploads), (drains, drains));
+    }
+}

@@ -1034,6 +1034,32 @@ impl crate::backend::sealed::Sealed for StatevectorBackend {
     }
 
     #[cfg(feature = "gpu")]
+    fn begin_deferred_measurements(&mut self, capacity: usize) -> Result<()> {
+        let Some(gpu) = self.gpu_state.as_mut() else {
+            return Ok(());
+        };
+        if capacity == 0 || self.measure_defer.is_some() {
+            return Ok(());
+        }
+        let ctx = gpu.context().clone();
+        crate::gpu::kernels::dense::begin_measure_log(&ctx, gpu, capacity)?;
+        self.measure_defer = Some(Vec::with_capacity(capacity));
+        Ok(())
+    }
+
+    #[cfg(feature = "gpu")]
+    fn sync_deferred_measurements(&mut self) -> Result<()> {
+        self.sync_measure_log()
+    }
+
+    #[cfg(feature = "gpu")]
+    fn end_deferred_measurements(&mut self) -> Result<()> {
+        let synced = self.sync_measure_log();
+        self.measure_defer = None;
+        synced
+    }
+
+    #[cfg(feature = "gpu")]
     fn thermal_on_device(
         &mut self,
         qubit: usize,
@@ -1120,14 +1146,10 @@ impl Backend for StatevectorBackend {
                 .filter(|i| matches!(i, Instruction::Measure { .. } | Instruction::Reset { .. }))
                 .count();
             if capacity > 0 {
-                let gpu = self.gpu_state.as_mut().expect("checked above");
-                let ctx = gpu.context().clone();
-                crate::gpu::kernels::dense::begin_measure_log(&ctx, gpu, capacity)?;
-                self.measure_defer = Some(Vec::with_capacity(capacity));
+                use crate::backend::sealed::Sealed;
+                self.begin_deferred_measurements(capacity)?;
                 let result = self.apply_instructions(instructions);
-                let synced = self.sync_measure_log();
-                self.measure_defer = None;
-                return result.and(synced);
+                return result.and(self.end_deferred_measurements());
             }
         }
         #[cfg(feature = "gpu")]
@@ -1157,6 +1179,10 @@ impl Backend for StatevectorBackend {
         self.num_qubits = num_qubits;
         self.pending_norm = 1.0;
         crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
+        #[cfg(feature = "gpu")]
+        {
+            self.measure_defer = None;
+        }
 
         // The device path is budgeted by VRAM, not by the host cap: the host
         // vector is never allocated while the state lives on the device.
@@ -1278,6 +1304,8 @@ impl Backend for StatevectorBackend {
     }
 
     fn set_classical_bit(&mut self, bit: usize, value: bool) -> Result<()> {
+        #[cfg(feature = "gpu")]
+        self.sync_measure_log()?;
         self.classical_bits[bit] = value;
         Ok(())
     }
@@ -1423,6 +1451,7 @@ impl Backend for StatevectorBackend {
     fn reset(&mut self, qubit: usize) -> Result<()> {
         #[cfg(feature = "gpu")]
         if self.gpu_state.is_some() {
+            self.sync_measure_log()?;
             return self.apply_reset_gpu(qubit);
         }
         self.apply_reset(qubit);

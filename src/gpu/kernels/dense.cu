@@ -680,6 +680,12 @@ __device__ __forceinline__ void noise_write(double *decision, double kernel,
     decision[5] = m10r; decision[6] = m10i; decision[7] = m11r; decision[8] = m11i;
 }
 
+// The pending norm: log[0] while the measure log holds it, else the host's value.
+__device__ __forceinline__ double noise_norm(const double *norm_log, double norm)
+{
+    return norm_log ? norm_log[0] : norm;
+}
+
 // The host's qubit_probability: the raw sum times pending_norm^2, clamped to [0, 1].
 __device__ __forceinline__ double noise_prob_one(double p_raw, double norm)
 {
@@ -831,7 +837,7 @@ __device__ __forceinline__ void noise_decide_kraus(double *decision, const doubl
 
 extern "C" __global__ void noise_site_damping(
     const double2 *state, unsigned long long dim, int qubit, double *partials,
-    unsigned int *ticket, double *decision, double norm,
+    unsigned int *ticket, double *decision, const double *norm_log, double norm,
     double gamma, double keep, int moves, double r, double eps)
 {
     extern __shared__ double sdata[];
@@ -840,12 +846,13 @@ extern "C" __global__ void noise_site_damping(
     if (!noise_last_block(ticket)) return;
     double p_raw = sum_partials(partials, gridDim.x, sdata);
     if (threadIdx.x != 0) return;
-    noise_decide_damping(decision, p_raw, norm, gamma, keep, moves, r, eps);
+    noise_decide_damping(decision, p_raw, noise_norm(norm_log, norm), gamma, keep, moves,
+        r, eps);
 }
 
 extern "C" __global__ void noise_site_thermal(
     const double2 *state, unsigned long long dim, int qubit, double *partials,
-    unsigned int *ticket, double *decision, double norm,
+    unsigned int *ticket, double *decision, const double *norm_log, double norm,
     double relax, double dephase, double excite, double excited,
     double decay_keep, double dephase_keep, double hot0, double hot1,
     double cold_scale, double cold_keep, double r, double eps)
@@ -856,13 +863,13 @@ extern "C" __global__ void noise_site_thermal(
     if (!noise_last_block(ticket)) return;
     double p_raw = sum_partials(partials, gridDim.x, sdata);
     if (threadIdx.x != 0) return;
-    noise_decide_thermal(decision, p_raw, norm, relax, dephase, excite, excited,
-        decay_keep, dephase_keep, hot0, hot1, cold_scale, cold_keep, r, eps);
+    noise_decide_thermal(decision, p_raw, noise_norm(norm_log, norm), relax, dephase,
+        excite, excited, decay_keep, dephase_keep, hot0, hot1, cold_scale, cold_keep, r, eps);
 }
 
 extern "C" __global__ void noise_site_kraus(
     const double2 *state, unsigned long long pairs, int qubit, double *partials,
-    unsigned int *ticket, double *decision, double norm,
+    unsigned int *ticket, double *decision, const double *norm_log, double norm,
     KrausSet set, double r_unit, double eps)
 {
     extern __shared__ double sdata[];
@@ -871,7 +878,7 @@ extern "C" __global__ void noise_site_kraus(
     if (!noise_last_block(ticket)) return;
     sum_partials4(partials, gridDim.x, sdata);
     if (threadIdx.x != 0) return;
-    noise_decide_kraus(decision, sdata, norm, set, r_unit, eps);
+    noise_decide_kraus(decision, sdata, noise_norm(norm_log, norm), set, r_unit, eps);
 }
 
 // apply_gate_1q or apply_diagonal_1q, as decision[0] names, on the matrix in

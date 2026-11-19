@@ -6,7 +6,7 @@ them.
 
 ```admonish tip title="Which engine?"
 - Exact shots or probabilities with T gates that reach at most 20 qubits, or shots from a
-  register that splits into parts of at most 24: stabilizer rank (`run_stabilizer_rank`,
+  register that splits into parts of at most 26: stabilizer rank (`run_stabilizer_rank`,
   `run_stabilizer_rank_shots`).
 - Many T gates, marginals only: stochastic Pauli propagation, SPP (`run_spp`).
 - Moderate T count, exact or bounded-error expectation values: deterministic Pauli
@@ -64,9 +64,10 @@ that flips a `|0>` qubit is a fair coin, and the rest are read from tables of re
 marginals. Shots fold each new register qubit's rotation into `C` as well, so it joins
 as a one-qubit state, and split the register into parts: the qubits that a T rotation
 over earlier register qubits links, joined where the measured rows anticommute part by
-part. Each part up to 24 qubits draws from its own table, small tables packed into one,
-and a wider part is cut in two sides of at most 20 that no rotation crosses, each shot
-correcting the draw over the row pairs that anticommute across the cut, at most 12. A cut
+part. Each part up to 26 qubits draws from its own table, small tables packed into one,
+and a wider part, or one past 24 whose cut prices lower, is cut in two sides of at most
+20 that no rotation crosses, each shot correcting the draw over the row pairs that
+anticommute across the cut, at most 12. A cut
 with `E` such pairs costs each shot `(E + 3) 2^E` amplitude units, which
 `Simulate::plan` reports as `units_per_shot` before any table is built. A
 register that does not split that way, or holds more than 64 qubits, returns
@@ -98,7 +99,7 @@ register wider than 20 qubits falls back to one branch per T choice, capped at `
 |----------|-----|
 | `run_stabilizer_rank` | Exact probabilities (register width ≤ 20, n ≤ 25) |
 | `run_stabilizer_rank_approx` | Approximate under a coefficient budget (register width ≤ 20, n ≤ 25) |
-| `run_stabilizer_rank_shots` | Shot sampling past the statevector cap (register parts of at most 24 qubits, up to 64 in all) |
+| `run_stabilizer_rank_shots` | Shot sampling past the statevector cap (register parts of at most 26 qubits, up to 64 in all) |
 | `stabilizer_overlap_sq` | Inner product between stabilizer states |
 
 `run_stabilizer_rank_approx` runs the same register and, after each `T`, zeroes all but

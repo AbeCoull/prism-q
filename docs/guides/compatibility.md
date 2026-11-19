@@ -105,6 +105,14 @@ Seeded output has changed in these releases:
     two outcomes. The cheaper readout also moves `Auto` terminal shots of some Clifford+T
     circuits from the statevector to the register, those whose register is nearly as wide
     as the circuit, and fixed-seed shots on those circuits changed.
+  - The Clifford register holds a part of 25 or 26 qubits whole, where the widest whole
+    part was 24, when the part has no cut into two sides of at most 20 across at most 12
+    row pairs. Those circuits move to the register: `Auto` terminal shots from the
+    statevector, or past the statevector cap from the MPS, and explicit `StabilizerRank`
+    shots return where they returned `BackendUnsupported`. Fixed-seed shots on those
+    circuits changed. A part of 25 or 26 qubits with such a cut keeps it and its shots.
+    The amplitudes summed over the parts are held to the process statevector cap, so
+    under a cap below 25 a register past it declines where it was taken.
   - `Auto` terminal shots of a Clifford+T circuit are priced between the Clifford
     register and the dense run instead of capping the T count. Circuits with more than 20
     T gates, or at least as many T gates as qubits, whose register fits 20 qubits move to

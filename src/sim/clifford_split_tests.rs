@@ -60,6 +60,7 @@ use rand_chacha::ChaCha8Rng;
 const TIER_LIMITS: SplitLimits = SplitLimits {
     pack_bits: 2,
     whole_width: 4,
+    whole_first_width: 6,
     table_width: 6,
     side_width: 4,
     cheap_pairs: 1,
@@ -612,8 +613,8 @@ fn the_split_declines_past_its_anchors_its_widest_unit_and_its_pairs() {
     };
     assert!(SplitPlan::new(&anchored(64)).unwrap().is_some());
     assert!(SplitPlan::new(&anchored(65)).unwrap().is_none());
-    assert!(SplitPlan::new(&one_wide_unit(24, 1)).unwrap().is_some());
-    assert!(SplitPlan::new(&one_wide_unit(25, 1)).unwrap().is_none());
+    assert!(SplitPlan::new(&one_wide_unit(26, 1)).unwrap().is_some());
+    assert!(SplitPlan::new(&one_wide_unit(27, 1)).unwrap().is_none());
 
     // A cut past its pairs, at the tier limits with one pair allowed, and a part past 6
     // qubits read on fewer rows than its width, each admitted once that one limit is
@@ -818,4 +819,149 @@ fn walsh_readout_is_identical_on_one_and_many_threads() {
     let (one, many) = (run(1), run(4));
     assert_eq!(one.0, many.0);
     assert_eq!(one.1, many.1);
+}
+
+/// Two units of `a` and `b` anchored qubits, each linked by one excess rotation over every
+/// qubit of the unit, then `gates` random CX across the units, `S` or `H`, every qubit
+/// measured in the `X` basis.
+fn two_linked_units(a: usize, b: usize, gates: usize, seed: u64) -> Circuit {
+    let n = a + b;
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, n);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+        c.add_gate(Gate::T, &[q]);
+    }
+    for (first, width) in [(0, a), (a, b)] {
+        for q in first + 1..first + width {
+            c.add_gate(Gate::Cx, &[q, first]);
+        }
+        c.add_gate(Gate::T, &[first]);
+        for q in first + 1..first + width {
+            c.add_gate(Gate::Cx, &[q, first]);
+        }
+    }
+    for _ in 0..gates {
+        let x = rng.random_range(0..a);
+        let y = a + rng.random_range(0..b);
+        match rng.random_range(0..4) {
+            0 => c.add_gate(Gate::Cx, &[x, y]),
+            1 => c.add_gate(Gate::Cx, &[y, x]),
+            2 => c.add_gate(Gate::S, &[rng.random_range(0..n)]),
+            _ => c.add_gate(Gate::H, &[rng.random_range(0..n)]),
+        }
+    }
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    c.measure_all();
+    c
+}
+
+/// [`SPLIT_LIMITS`] with every part up to the table width held whole ahead of a cut.
+const WHOLE_LIMITS: SplitLimits = SplitLimits {
+    cheap_pairs: 0,
+    whole_first_width: SPLIT_LIMITS.table_width,
+    ..SPLIT_LIMITS
+};
+
+/// The plan of `circuit` at `limits` with its one part of `width` qubits, asserting that
+/// the part is cut or held whole as `cut` says.
+fn plan_with_wide_part(circuit: &Circuit, limits: SplitLimits, width: u32, cut: bool) -> SplitPlan {
+    let plan = SplitPlan::with_limits(circuit, limits).unwrap().unwrap();
+    let wide: Vec<&Part> = plan
+        .parts
+        .iter()
+        .filter(|p| p.mask.count_ones() == width)
+        .collect();
+    assert_eq!(wide.len(), 1);
+    assert_eq!(wide[0].cut.is_some(), cut);
+    assert!(cut || wide[0].walsh);
+    plan
+}
+
+#[test]
+fn a_part_past_24_qubits_takes_the_cut_that_prices_lower() {
+    // Nine pairs across the cut, past the cheap pairs: up to 24 qubits the part would be
+    // held whole, and here the cut prices far below the 2^26 entry readout.
+    let circuit = two_linked_units(13, 13, 128, 42);
+    let plan = plan_with_wide_part(&circuit, SPLIT_LIMITS, 26, true);
+    let part = plan.parts.iter().find(|p| p.cut.is_some()).unwrap();
+    assert!(part.cut.unwrap().pairs > SPLIT_LIMITS.cheap_pairs);
+    plan_with_wide_part(&circuit, WHOLE_LIMITS, 26, false);
+}
+
+/// Two-sample chi-square of equally many shots `a` and `b` on the classical bits `bits`,
+/// over the cells either reaches.
+fn two_sample_chi_square(
+    a: &[Vec<bool>],
+    b: &[Vec<bool>],
+    bits: std::ops::Range<usize>,
+) -> (f64, usize) {
+    assert_eq!(a.len(), b.len());
+    let cells = 1usize << bits.len();
+    let count = |shots: &[Vec<bool>]| {
+        let mut seen = vec![0usize; cells];
+        for shot in shots {
+            let key = shot[bits.clone()]
+                .iter()
+                .enumerate()
+                .fold(0usize, |acc, (i, &bit)| acc | usize::from(bit) << i);
+            seen[key] += 1;
+        }
+        seen
+    };
+    let (x, y) = (count(a), count(b));
+    let mut stat = 0.0;
+    let mut reached = 0;
+    for (&x, &y) in x.iter().zip(&y) {
+        if x + y > 0 {
+            stat += (x as f64 - y as f64).powi(2) / (x + y) as f64;
+            reached += 1;
+        }
+    }
+    (stat, reached.max(2) - 1)
+}
+
+#[test]
+fn a_whole_part_of_26_qubits_draws_the_cut_distribution() {
+    let circuit = two_linked_units(13, 13, 64, 42);
+    let cut = plan_with_wide_part(&circuit, SPLIT_LIMITS, 26, true);
+    let whole = plan_with_wide_part(&circuit, WHOLE_LIMITS, 26, false);
+    let shots = 1 << 18;
+    let from_whole = whole.sampler().sample(shots, 42);
+    let from_cut = cut.sampler().sample(shots, 7);
+    // Twelve bits across both units, far from uniform on this circuit.
+    let (stat, df) = two_sample_chi_square(&from_whole, &from_cut, 7..19);
+    assert!(df > 1000, "{df} cells reached");
+    let bound = df as f64 + 6.0 * (2.0 * df as f64).sqrt();
+    assert!(stat < bound, "chi-square {stat} on {df} degrees");
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn a_whole_part_of_26_qubits_is_identical_on_one_and_many_threads() {
+    let circuit = two_linked_units(13, 13, 64, 42);
+    let pool = |threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+    };
+    let plan = plan_with_wide_part(&circuit, WHOLE_LIMITS, 26, false);
+    let (part, basis) = whole_parts(&plan)
+        .into_iter()
+        .find(|(part, _)| part.mask.count_ones() == 26)
+        .unwrap();
+    let one = pool(1).install(|| plan.walsh_table(part, &basis));
+    assert!(one == pool(4).install(|| plan.walsh_table(part, &basis)));
+    drop(one);
+    let shots = |threads: usize| {
+        pool(threads).install(|| {
+            plan_with_wide_part(&circuit, WHOLE_LIMITS, 26, false)
+                .sampler()
+                .sample(4096, 42)
+        })
+    };
+    assert_eq!(shots(1), shots(4));
 }

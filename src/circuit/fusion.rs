@@ -1706,10 +1706,7 @@ pub(super) fn fuse_at_width<'a>(
     profile: FusionProfile,
     t: &mut Tracer,
 ) -> Cow<'a, Circuit> {
-    let pass_s = split_batch_phases(circuit, t);
-    let pass_r = apply_pass(pass_s, t, |c, _| fuse_region_bodies(c, n, profile));
-    let pass0 = apply_pass(pass_r, t, cancel_self_inverse_pairs);
-    let pass0r = apply_pass(pass0, t, fuse_rzz);
+    let pass0r = front_passes(circuit, n, profile, t);
     if profile == FusionProfile::Device {
         return device_passes(pass0r, n, t);
     }
@@ -1721,10 +1718,7 @@ pub(super) fn fuse_at_width<'a>(
         return pass0b;
     }
 
-    let pass1 = apply_pass(pass0b, t, fuse_single_qubit_gates);
-    let pass1r = reorder_1q_gates(pass1, t);
-    let pass1c = apply_pass(pass1r, t, cancel_self_inverse_pairs);
-    let pass1f = apply_pass(pass1c, t, fuse_single_qubit_gates);
+    let pass1f = single_qubit_passes(pass0b, t);
 
     let pass_2q = gated(pass1f, n, MIN_QUBITS_FOR_2Q_FUSION, |c| {
         fuse_2q_gates(c, t, n)
@@ -1738,6 +1732,30 @@ pub(super) fn fuse_at_width<'a>(
     batch_passes(pass_2qb, n, t)
 }
 
+/// The passes every profile opens with: `BatchPhase` split, region bodies, self-inverse
+/// cancellation, and `Rzz` recognition.
+#[inline]
+fn front_passes<'a>(
+    circuit: &'a Circuit,
+    n: usize,
+    profile: FusionProfile,
+    t: &mut Tracer,
+) -> Cow<'a, Circuit> {
+    let pass_s = split_batch_phases(circuit, t);
+    let pass_r = apply_pass(pass_s, t, |c, _| fuse_region_bodies(c, n, profile));
+    let pass0 = apply_pass(pass_r, t, cancel_self_inverse_pairs);
+    apply_pass(pass0, t, fuse_rzz)
+}
+
+/// 1q fusion, reordering, the cancellation the reorder exposes, and 1q fusion again.
+#[inline]
+fn single_qubit_passes<'a>(stream: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<'a, Circuit> {
+    let pass1 = apply_pass(stream, t, fuse_single_qubit_gates);
+    let pass1r = reorder_1q_gates(pass1, t);
+    let pass1c = apply_pass(pass1r, t, cancel_self_inverse_pairs);
+    apply_pass(pass1c, t, fuse_single_qubit_gates)
+}
+
 /// The [`FusionProfile::Device`] passes after `fuse_rzz`. A 1q gate joins a 2q gate only
 /// inside a same-pair run that fuses to a dense 4x4 anyway, so a lone CX stays a
 /// permutation and its neighbours stay 1q gates the device can tile.
@@ -1745,10 +1763,7 @@ fn device_passes<'a>(stream: Cow<'a, Circuit>, n: usize, t: &mut Tracer) -> Cow<
     if n < MIN_QUBITS_FOR_FUSION {
         return stream;
     }
-    let pass1 = apply_pass(stream, t, fuse_single_qubit_gates);
-    let pass1r = reorder_1q_gates(pass1, t);
-    let pass1c = apply_pass(pass1r, t, cancel_self_inverse_pairs);
-    let pass1f = apply_pass(pass1c, t, fuse_single_qubit_gates);
+    let pass1f = single_qubit_passes(stream, t);
     let pass_2q = gated(pass1f, n, MIN_QUBITS_FOR_2Q_FUSION, |c| {
         let runs = same_pair_run_members(&c);
         fuse_2q_gates_where(c, t, false, |i| runs[i])
@@ -1827,19 +1842,14 @@ pub(crate) fn fuse_staged(
 #[cfg(any(test, feature = "bench-internal"))]
 pub(crate) fn fuse_before_batching(circuit: &Circuit, n: usize) -> Cow<'_, Circuit> {
     let t = &mut Tracer::off();
-    let pass_r = fuse_region_bodies(circuit, n, FusionProfile::Host);
-    let pass0 = apply_pass(pass_r, t, cancel_self_inverse_pairs);
-    let pass0r = apply_pass(pass0, t, fuse_rzz);
+    let pass0r = front_passes(circuit, n, FusionProfile::Host, t);
     let pass0b = gated(pass0r, n, MIN_QUBITS_FOR_DIAG_BATCH, |c| {
         apply_pass(c, t, fuse_batch_rzz)
     });
     if n < MIN_QUBITS_FOR_FUSION {
         return pass0b;
     }
-    let pass1 = apply_pass(pass0b, t, fuse_single_qubit_gates);
-    let pass1r = reorder_1q_gates(pass1, t);
-    let pass1c = apply_pass(pass1r, t, cancel_self_inverse_pairs);
-    let pass1f = apply_pass(pass1c, t, fuse_single_qubit_gates);
+    let pass1f = single_qubit_passes(pass0b, t);
     let pass_2q = gated(pass1f, n, MIN_QUBITS_FOR_2Q_FUSION, |c| {
         fuse_2q_gates(c, t, n)
     });

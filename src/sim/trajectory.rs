@@ -177,7 +177,7 @@ impl PreparedChannel {
                     .iter()
                     .map(|op| Kraus2q {
                         op: *op,
-                        effect: kdagger_k_2q(op),
+                        effect: kdagger_k(op),
                     })
                     .collect(),
             ),
@@ -718,28 +718,63 @@ fn apply_pauli_op<B: Backend + ?Sized>(backend: &mut B, qubit: usize, op: PauliO
     })
 }
 
-/// Compute the branch effect `Kdagger K` for a single-qubit Kraus operator.
+/// `Kdagger K`, entry `[i][j] = sum_r conj(K[r][i]) K[r][j]`.
 #[inline]
-fn kdagger_k(k: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
-    [
-        [
-            k[0][0].conj() * k[0][0] + k[1][0].conj() * k[1][0],
-            k[0][0].conj() * k[0][1] + k[1][0].conj() * k[1][1],
-        ],
-        [
-            k[0][1].conj() * k[0][0] + k[1][1].conj() * k[1][0],
-            k[0][1].conj() * k[0][1] + k[1][1].conj() * k[1][1],
-        ],
-    ]
+fn kdagger_k<const D: usize>(k: &[[Complex64; D]; D]) -> [[Complex64; D]; D] {
+    let mut effect = [[Complex64::new(0.0, 0.0); D]; D];
+    for (i, effect_row) in effect.iter_mut().enumerate() {
+        for (j, entry) in effect_row.iter_mut().enumerate() {
+            for row in k.iter() {
+                *entry += row[i].conj() * row[j];
+            }
+        }
+    }
+    effect
 }
 
+/// `Tr(E rho) = sum_{i,j} E[i][j] rho[j][i]` for a branch effect `E`, clamped
+/// at zero.
 #[inline]
-fn effect_probability(effect: &[[Complex64; 2]; 2], rho: &[[Complex64; 2]; 2]) -> f64 {
-    let p = effect[0][0] * rho[0][0]
-        + effect[0][1] * rho[1][0]
-        + effect[1][0] * rho[0][1]
-        + effect[1][1] * rho[1][1];
+fn effect_probability<const D: usize>(
+    effect: &[[Complex64; D]; D],
+    rho: &[[Complex64; D]; D],
+) -> f64 {
+    let mut p = Complex64::new(0.0, 0.0);
+    for i in 0..D {
+        for j in 0..D {
+            p += effect[i][j] * rho[j][i];
+        }
+    }
     p.re.max(0.0)
+}
+
+/// Draw a branch with probability proportional to its entry of `probs`, returning its
+/// index and probability. `None` when the total or the drawn branch is at most
+/// [`JUMP_EPSILON`], and a total that small makes no draw.
+#[inline]
+fn pick_branch(probs: impl Iterator<Item = f64>, rng: &mut ChaCha8Rng) -> Option<(usize, f64)> {
+    let mut cumulative: smallvec::SmallVec<[f64; 16]> = smallvec::SmallVec::new();
+    let mut total = 0.0;
+    for pk in probs {
+        total += pk;
+        cumulative.push(total);
+    }
+
+    if total <= JUMP_EPSILON {
+        return None;
+    }
+
+    let r: f64 = rand::RngExt::random::<f64>(rng) * total;
+    let chosen = cumulative
+        .iter()
+        .position(|&c| r < c)
+        .unwrap_or(cumulative.len() - 1);
+    let pk = if chosen == 0 {
+        cumulative[0]
+    } else {
+        cumulative[chosen] - cumulative[chosen - 1]
+    };
+    (pk > JUMP_EPSILON).then_some((chosen, pk))
 }
 
 /// Sample and apply one of a set of 1-qubit Kraus operators.
@@ -772,31 +807,10 @@ fn kraus_host_decided(
     backend.sync_deferred_measurements()?;
     let rho = backend.reduced_density_matrix_1q(qubit)?;
 
-    let mut cumulative: smallvec::SmallVec<[f64; 8]> = smallvec::SmallVec::new();
-    let mut total = 0.0;
-    for k in kraus {
-        let pk = effect_probability(&k.effect, &rho);
-        total += pk;
-        cumulative.push(total);
-    }
-
-    if total <= JUMP_EPSILON {
+    let probs = kraus.iter().map(|k| effect_probability(&k.effect, &rho));
+    let Some((chosen, pk)) = pick_branch(probs, rng) else {
         return Ok(());
-    }
-
-    let r: f64 = rand::RngExt::random::<f64>(rng) * total;
-    let chosen = cumulative
-        .iter()
-        .position(|&c| r < c)
-        .unwrap_or(kraus.len() - 1);
-    let pk = if chosen == 0 {
-        cumulative[0]
-    } else {
-        cumulative[chosen] - cumulative[chosen - 1]
     };
-    if pk <= JUMP_EPSILON {
-        return Ok(());
-    }
     let inv = 1.0 / pk.sqrt();
     let inv_c = Complex64::new(inv, 0.0);
     let k = kraus[chosen].op;
@@ -824,30 +838,10 @@ fn apply_custom_kraus_2q(
 ) -> Result<()> {
     let rho = backend.reduced_density_matrix_2q(q0, q1)?;
 
-    let mut cumulative: smallvec::SmallVec<[f64; 16]> = smallvec::SmallVec::new();
-    let mut total = 0.0;
-    for k in kraus {
-        total += effect_probability_2q(&k.effect, &rho);
-        cumulative.push(total);
-    }
-
-    if total <= JUMP_EPSILON {
+    let probs = kraus.iter().map(|k| effect_probability(&k.effect, &rho));
+    let Some((chosen, pk)) = pick_branch(probs, rng) else {
         return Ok(());
-    }
-
-    let r: f64 = rand::RngExt::random::<f64>(rng) * total;
-    let chosen = cumulative
-        .iter()
-        .position(|&c| r < c)
-        .unwrap_or(kraus.len() - 1);
-    let pk = if chosen == 0 {
-        cumulative[0]
-    } else {
-        cumulative[chosen] - cumulative[chosen - 1]
     };
-    if pk <= JUMP_EPSILON {
-        return Ok(());
-    }
 
     let inv = Complex64::new(1.0 / pk.sqrt(), 0.0);
     let mut normalized = kraus[chosen].op;
@@ -860,32 +854,6 @@ fn apply_custom_kraus_2q(
         gate: Gate::Fused2q(Box::new(normalized)),
         targets: smallvec![q0, q1],
     })
-}
-
-/// `Kdagger K`, entry `[i][j] = sum_r conj(K[r][i]) K[r][j]`.
-fn kdagger_k_2q(k: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
-    let mut effect = [[Complex64::new(0.0, 0.0); 4]; 4];
-    for (i, effect_row) in effect.iter_mut().enumerate() {
-        for (j, entry) in effect_row.iter_mut().enumerate() {
-            for row in k.iter() {
-                *entry += row[i].conj() * row[j];
-            }
-        }
-    }
-    effect
-}
-
-/// `Tr(E rho) = sum_{i,j} E[i][j] rho[j][i]` for a branch effect `E`, clamped
-/// at zero.
-#[inline]
-fn effect_probability_2q(effect: &[[Complex64; 4]; 4], rho: &[[Complex64; 4]; 4]) -> f64 {
-    let mut p = Complex64::new(0.0, 0.0);
-    for i in 0..4 {
-        for j in 0..4 {
-            p += effect[i][j] * rho[j][i];
-        }
-    }
-    p.re.max(0.0)
 }
 
 fn apply_noise_event(

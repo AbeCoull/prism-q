@@ -401,7 +401,7 @@ fn unscreened_network(circuit: &Circuit, terms: &[PauliTerm]) -> ScalarExpectati
     }
     for (op, kept) in ops.into_iter().zip(keep) {
         if kept {
-            network.append_op(op).unwrap();
+            network.append_op(op);
         }
     }
     for (qubit, axis) in axes.into_iter().enumerate() {

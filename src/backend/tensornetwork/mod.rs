@@ -125,7 +125,9 @@ mod plan;
 mod slice;
 mod tensor;
 
-use expectation::{GateTensorOp, for_each_gate_tensor, gate_tensor, observable_axes, pauli_tensor};
+use expectation::{
+    GateTensorOp, append_gate_tensor, for_each_gate_tensor, observable_axes, pauli_tensor,
+};
 use plan::{TensorMeta, greedy_contract, plan_pairs};
 use slice::{CachedPlan, ContractionLimits, cached_plan, contract_within, last_discarded};
 use tensor::{Tensor, contract, transpose};
@@ -365,31 +367,15 @@ impl TensorNetworkBackend {
         self.output_legs[qubit] = out_leg;
     }
 
-    fn append_1q_matrix(&mut self, target: usize, mat: &[[Complex64; 2]; 2]) {
-        let in_leg = self.output_legs[target];
-        let out_leg = self.fresh_leg();
-        self.tensors.push(gate_tensor(
-            mat.as_flattened().to_vec(),
-            &[out_leg],
-            &[in_leg],
+    fn append_matrix(&mut self, qubits: &[usize], data: Vec<Complex64>) {
+        append_gate_tensor(
+            &mut self.tensors,
+            &mut self.output_legs,
+            &mut self.next_leg,
+            qubits,
+            data,
             false,
-        ));
-        self.output_legs[target] = out_leg;
-    }
-
-    fn apply_2q_matrix(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
-        let in0 = self.output_legs[q0];
-        let in1 = self.output_legs[q1];
-        let out0 = self.fresh_leg();
-        let out1 = self.fresh_leg();
-        self.tensors.push(gate_tensor(
-            mat.as_flattened().to_vec(),
-            &[out0, out1],
-            &[in0, in1],
-            false,
-        ));
-        self.output_legs[q0] = out0;
-        self.output_legs[q1] = out1;
+        );
     }
 
     /// Build the full row-major 2^m × 2^m matrix for an MCU gate.
@@ -406,17 +392,6 @@ impl TensorNetworkBackend {
         full[corner..corner + 2].copy_from_slice(&mat[0]);
         full[corner + dim..corner + dim + 2].copy_from_slice(&mat[1]);
         full
-    }
-
-    fn apply_nq_matrix(&mut self, qubits: &[usize], matrix: Vec<Complex64>) {
-        let in_legs: SmallVec<[LegId; 6]> = qubits.iter().map(|&q| self.output_legs[q]).collect();
-        let out_legs: SmallVec<[LegId; 6]> = (0..qubits.len()).map(|_| self.fresh_leg()).collect();
-        self.tensors
-            .push(gate_tensor(matrix, &out_legs, &in_legs, false));
-
-        for (i, &q) in qubits.iter().enumerate() {
-            self.output_legs[q] = out_legs[i];
-        }
     }
 
     fn apply_reset(&mut self, qubit: usize) -> Result<()> {
@@ -586,9 +561,11 @@ impl TensorNetworkBackend {
         let num_qubits = self.num_qubits;
         for_each_gate_tensor(gate, targets, num_qubits, |op| {
             match op {
-                GateTensorOp::OneQ(q, mat) => self.append_1q_matrix(q, &mat),
-                GateTensorOp::TwoQ(q0, q1, mat) => self.apply_2q_matrix(q0, q1, &mat),
-                GateTensorOp::NQ(qubits, matrix) => self.apply_nq_matrix(qubits, matrix),
+                GateTensorOp::OneQ(q, mat) => self.append_matrix(&[q], mat.as_flattened().to_vec()),
+                GateTensorOp::TwoQ(q0, q1, mat) => {
+                    self.append_matrix(&[q0, q1], mat.as_flattened().to_vec())
+                }
+                GateTensorOp::NQ(qubits, matrix) => self.append_matrix(qubits, matrix),
             }
             Ok(())
         })
@@ -696,7 +673,7 @@ impl Backend for TensorNetworkBackend {
     }
 
     fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
-        self.append_1q_matrix(qubit, matrix);
+        self.append_matrix(&[qubit], matrix.as_flattened().to_vec());
         Ok(())
     }
 

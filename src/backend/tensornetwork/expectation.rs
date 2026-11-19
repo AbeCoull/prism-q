@@ -27,7 +27,7 @@ use super::{LegId, TensorNetworkBackend};
 ///
 /// A row-major `2^k` by `2^k` matrix is already the tensor's data in that leg
 /// order, the first target the most significant bit on each side.
-pub(super) fn gate_tensor(
+fn gate_tensor(
     mut data: Vec<Complex64>,
     out_legs: &[LegId],
     in_legs: &[LegId],
@@ -40,6 +40,25 @@ pub(super) fn gate_tensor(
         data,
         shape: SmallVec::from_elem(2, out_legs.len() + in_legs.len()),
         legs: out_legs.iter().chain(in_legs).copied().collect(),
+    }
+}
+
+/// Push the gate tensor for `data` on `qubits`, reading each qubit's input leg
+/// from `legs` and replacing it with an output leg minted from `next_leg`.
+pub(super) fn append_gate_tensor(
+    tensors: &mut Vec<Tensor>,
+    legs: &mut [LegId],
+    next_leg: &mut LegId,
+    qubits: &[usize],
+    data: Vec<Complex64>,
+    conjugate: bool,
+) {
+    let in_legs: SmallVec<[LegId; 6]> = qubits.iter().map(|&q| legs[q]).collect();
+    let out_legs: SmallVec<[LegId; 6]> = (*next_leg..*next_leg + qubits.len()).collect();
+    *next_leg += qubits.len();
+    tensors.push(gate_tensor(data, &out_legs, &in_legs, conjugate));
+    for (&q, &leg) in qubits.iter().zip(&out_legs) {
+        legs[q] = leg;
     }
 }
 
@@ -86,7 +105,6 @@ pub(super) fn observable_axes(
 }
 
 pub(super) struct ScalarExpectationNetwork {
-    num_qubits: usize,
     pub(super) tensors: Vec<Tensor>,
     pub(super) ket_legs: Vec<LegId>,
     pub(super) bra_legs: Vec<LegId>,
@@ -98,7 +116,6 @@ impl ScalarExpectationNetwork {
     /// `in_cone` marks; the others never receive a tensor.
     pub(super) fn new(num_qubits: usize, in_cone: &[bool]) -> Self {
         let mut network = Self {
-            num_qubits,
             tensors: Vec::new(),
             ket_legs: vec![LegId::MAX; num_qubits],
             bra_legs: vec![LegId::MAX; num_qubits],
@@ -131,112 +148,22 @@ impl ScalarExpectationNetwork {
         leg
     }
 
-    fn validate_qubit(&self, qubit: usize) -> Result<()> {
-        if qubit >= self.num_qubits {
-            return Err(PrismError::InvalidQubit {
-                index: qubit,
-                register_size: self.num_qubits,
-            });
-        }
-        Ok(())
-    }
-
-    fn append_1q_matrix(
-        &mut self,
-        target: usize,
-        mat: &[[Complex64; 2]; 2],
-        conjugate: bool,
-    ) -> Result<()> {
-        self.validate_qubit(target)?;
-        let in_leg = if conjugate {
-            self.bra_legs[target]
-        } else {
-            self.ket_legs[target]
-        };
-        let out_leg = self.fresh_leg();
-        self.tensors.push(gate_tensor(
-            mat.as_flattened().to_vec(),
-            &[out_leg],
-            &[in_leg],
-            conjugate,
-        ));
-        if conjugate {
-            self.bra_legs[target] = out_leg;
-        } else {
-            self.ket_legs[target] = out_leg;
-        }
-        Ok(())
-    }
-
-    fn append_2q_matrix(
-        &mut self,
-        q0: usize,
-        q1: usize,
-        mat: &[[Complex64; 4]; 4],
-        conjugate: bool,
-    ) -> Result<()> {
-        self.validate_qubit(q0)?;
-        self.validate_qubit(q1)?;
-        let (in0, in1) = if conjugate {
-            (self.bra_legs[q0], self.bra_legs[q1])
-        } else {
-            (self.ket_legs[q0], self.ket_legs[q1])
-        };
-        let out0 = self.fresh_leg();
-        let out1 = self.fresh_leg();
-        self.tensors.push(gate_tensor(
-            mat.as_flattened().to_vec(),
-            &[out0, out1],
-            &[in0, in1],
-            conjugate,
-        ));
-        if conjugate {
-            self.bra_legs[q0] = out0;
-            self.bra_legs[q1] = out1;
-        } else {
-            self.ket_legs[q0] = out0;
-            self.ket_legs[q1] = out1;
-        }
-        Ok(())
-    }
-
-    fn append_nq_matrix(
-        &mut self,
-        qubits: &[usize],
-        matrix: Vec<Complex64>,
-        conjugate: bool,
-    ) -> Result<()> {
-        for &qubit in qubits {
-            self.validate_qubit(qubit)?;
-        }
-        let m = qubits.len();
-        let dim = 1usize << m;
-        if matrix.len() != dim * dim {
-            return Err(PrismError::InvalidParameter {
-                message: format!(
-                    "tensor-network scalar expected a {dim} by {dim} matrix for {} targets",
-                    qubits.len()
-                ),
-            });
-        }
-        let in_legs: SmallVec<[LegId; 6]> = if conjugate {
-            qubits.iter().map(|&q| self.bra_legs[q]).collect()
-        } else {
-            qubits.iter().map(|&q| self.ket_legs[q]).collect()
-        };
-        let out_legs: SmallVec<[LegId; 6]> = (0..m).map(|_| self.fresh_leg()).collect();
-        self.tensors
-            .push(gate_tensor(matrix, &out_legs, &in_legs, conjugate));
-
+    /// Append the gate tensor for `data` on `qubits` to the ket side, or to the
+    /// conjugated bra side when `conjugate` is set.
+    fn append_matrix(&mut self, qubits: &[usize], data: Vec<Complex64>, conjugate: bool) {
         let legs = if conjugate {
             &mut self.bra_legs
         } else {
             &mut self.ket_legs
         };
-        for (idx, &qubit) in qubits.iter().enumerate() {
-            legs[qubit] = out_legs[idx];
-        }
-        Ok(())
+        append_gate_tensor(
+            &mut self.tensors,
+            legs,
+            &mut self.next_leg,
+            qubits,
+            data,
+            conjugate,
+        );
     }
 
     /// `<0| U^dag P U |0>` over the backward light cone of `terms`, rejecting any
@@ -319,7 +246,7 @@ impl ScalarExpectationNetwork {
         let mut network = Self::new(num_qubits, &in_cone);
         for (op, kept) in ops.into_iter().zip(keep) {
             if kept {
-                network.append_op(op)?;
+                network.append_op(op);
             }
         }
         for (qubit, axis) in axes.into_iter().enumerate() {
@@ -334,19 +261,19 @@ impl ScalarExpectationNetwork {
         Ok(network)
     }
 
-    pub(super) fn append_op(&mut self, op: GateTensorOp<'_>) -> Result<()> {
+    pub(super) fn append_op(&mut self, op: GateTensorOp<'_>) {
         match op {
             GateTensorOp::OneQ(q, mat) => {
-                self.append_1q_matrix(q, &mat, false)?;
-                self.append_1q_matrix(q, &mat, true)
+                self.append_matrix(&[q], mat.as_flattened().to_vec(), false);
+                self.append_matrix(&[q], mat.as_flattened().to_vec(), true);
             }
             GateTensorOp::TwoQ(q0, q1, mat) => {
-                self.append_2q_matrix(q0, q1, &mat, false)?;
-                self.append_2q_matrix(q0, q1, &mat, true)
+                self.append_matrix(&[q0, q1], mat.as_flattened().to_vec(), false);
+                self.append_matrix(&[q0, q1], mat.as_flattened().to_vec(), true);
             }
             GateTensorOp::NQ(qubits, matrix) => {
-                self.append_nq_matrix(qubits, matrix.clone(), false)?;
-                self.append_nq_matrix(qubits, matrix, true)
+                self.append_matrix(qubits, matrix.clone(), false);
+                self.append_matrix(qubits, matrix, true);
             }
         }
     }

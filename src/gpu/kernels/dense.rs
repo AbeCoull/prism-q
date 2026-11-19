@@ -17,7 +17,8 @@ use crate::error::{PrismError, Result};
 use super::super::tiles::{Geometry, TileOp};
 use super::super::{GpuBuffer, GpuContext, GpuState};
 use super::{
-    check_pair, check_qubit, driver_err, launch_limit_err, linear_cfg, require_i32, stream_and_fn,
+    check_pair, check_qubit, driver_err, grid_for, launch_counted, launch_limit_err, linear_cfg,
+    require_i32, stream_and_fn,
 };
 
 const BLOCK_SIZE: u32 = 256;
@@ -172,10 +173,6 @@ pub(crate) fn kernel_source() -> String {
         .replace("{{NOISE_MAX_KRAUS}}", &NOISE_MAX_KRAUS.to_string())
 }
 
-fn grid_for(count: u64) -> u32 {
-    count.div_ceil(BLOCK_SIZE as u64).max(1) as u32
-}
-
 /// Write amplitude 0 = 1; assumes the buffer is already zeroed.
 pub(crate) fn launch_set_initial_state(ctx: &GpuContext, state: &mut GpuState) -> Result<()> {
     let (stream, func) = stream_and_fn(ctx, "set_initial_state")?;
@@ -184,13 +181,7 @@ pub(crate) fn launch_set_initial_state(ctx: &GpuContext, state: &mut GpuState) -
     let buffer = state.buffer_mut().raw_mut();
     builder.arg(buffer);
     // SAFETY: kernel signature is (double2*); single-thread write within allocated range.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("set_initial_state", e))?;
-    }
-    ctx.device().count_launch(0);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "set_initial_state", ctx.device(), 0) }
 }
 
 pub(crate) fn launch_compute_probabilities(ctx: &GpuContext, state: &GpuState) -> Result<Vec<f64>> {
@@ -198,7 +189,7 @@ pub(crate) fn launch_compute_probabilities(ctx: &GpuContext, state: &GpuState) -
     let dim: u64 = 1u64 << n;
     let device = ctx.device();
     let (stream, func) = stream_and_fn(ctx, "compute_probabilities")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim, BLOCK_SIZE));
 
     let mut scratch_slot = state.probs_scratch();
     if scratch_slot.as_ref().is_none_or(|b| b.len() < dim as usize) {
@@ -212,12 +203,7 @@ pub(crate) fn launch_compute_probabilities(ctx: &GpuContext, state: &GpuState) -
     let out = scratch.raw_mut();
     builder.arg(state_buf).arg(&dim).arg(&norm_sq).arg(out);
     // SAFETY: signature matches; grid covers dim; scratch is at least dim elements.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("compute_probabilities", e))?;
-    }
-    ctx.device().count_launch(1);
+    unsafe { launch_counted(builder, cfg, "compute_probabilities", ctx.device(), 1) }?;
     let mut host = vec![0.0_f64; dim as usize];
     scratch.copy_to_host(device, &mut host)?;
     Ok(host)
@@ -233,7 +219,7 @@ pub(crate) fn launch_apply_gate_1q(
     check_qubit(n, target)?;
     let pair_count: u64 = 1u64 << (n - 1);
     let (stream, func) = stream_and_fn(ctx, "apply_gate_1q")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count, BLOCK_SIZE));
     let m00r = matrix[0][0].re;
     let m00i = matrix[0][0].im;
     let m01r = matrix[0][1].re;
@@ -258,13 +244,7 @@ pub(crate) fn launch_apply_gate_1q(
         .arg(&m11r)
         .arg(&m11i);
     // SAFETY: signature matches kernel declaration; grid/block sized so threads <= pair_count.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("apply_gate_1q", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "apply_gate_1q", ctx.device(), 1) }
 }
 
 pub(crate) fn launch_apply_diagonal_1q(
@@ -278,7 +258,7 @@ pub(crate) fn launch_apply_diagonal_1q(
     check_qubit(n, target)?;
     let pair_count: u64 = 1u64 << (n - 1);
     let (stream, func) = stream_and_fn(ctx, "apply_diagonal_1q")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count, BLOCK_SIZE));
     let target_i = target as i32;
     let d0r = d0.re;
     let d0i = d0.im;
@@ -295,13 +275,7 @@ pub(crate) fn launch_apply_diagonal_1q(
         .arg(&d1r)
         .arg(&d1i);
     // SAFETY: signature matches; grid sized to pair_count.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("apply_diagonal_1q", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "apply_diagonal_1q", ctx.device(), 1) }
 }
 
 fn launch_2q(
@@ -317,18 +291,14 @@ fn launch_2q(
     let device = ctx.device();
     let stream = device.stream()?;
     let func = device.function(kernel)?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count, BLOCK_SIZE));
     let q0_i = q0 as i32;
     let q1_i = q1 as i32;
     let mut builder = stream.launch_builder(&func);
     let buffer = state.buffer_mut().raw_mut();
     builder.arg(buffer).arg(&pair_count).arg(&q0_i).arg(&q1_i);
     // SAFETY: signature matches kernel (state, pair_count, q0, q1); grid covers iter space.
-    unsafe {
-        builder.launch(cfg).map_err(|e| driver_err(kernel, e))?;
-    }
-    device.count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, kernel, device, 1) }
 }
 
 pub(crate) fn launch_apply_cx(
@@ -372,7 +342,7 @@ pub(crate) fn launch_apply_parity_phase(
     check_pair(n, q0, q1)?;
     let dim: u64 = 1u64 << n;
     let (stream, func) = stream_and_fn(ctx, "apply_parity_phase")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim, BLOCK_SIZE));
     let q0_i = q0 as i32;
     let q1_i = q1 as i32;
     let sr = same.re;
@@ -391,13 +361,7 @@ pub(crate) fn launch_apply_parity_phase(
         .arg(&dr)
         .arg(&di);
     // SAFETY: signature matches kernel; dim covers whole state.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("apply_parity_phase", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "apply_parity_phase", ctx.device(), 1) }
 }
 
 pub(crate) fn launch_apply_rzz(
@@ -427,7 +391,7 @@ pub(crate) fn launch_apply_cu(
     check_pair(n, control, target)?;
     let pair_count: u64 = 1u64 << (n - 2);
     let (stream, func) = stream_and_fn(ctx, "apply_cu")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count, BLOCK_SIZE));
     let ctrl_i = control as i32;
     let tgt_i = target as i32;
     let m00r = matrix[0][0].re;
@@ -454,11 +418,7 @@ pub(crate) fn launch_apply_cu(
         .arg(&m11r)
         .arg(&m11i);
     // SAFETY: signature matches kernel; grid covers pair_count.
-    unsafe {
-        builder.launch(cfg).map_err(|e| driver_err("apply_cu", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "apply_cu", ctx.device(), 1) }
 }
 
 pub(crate) fn launch_apply_cu_phase(
@@ -472,7 +432,7 @@ pub(crate) fn launch_apply_cu_phase(
     check_pair(n, control, target)?;
     let pair_count: u64 = 1u64 << (n - 2);
     let (stream, func) = stream_and_fn(ctx, "apply_cu_phase")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count, BLOCK_SIZE));
     let ctrl_i = control as i32;
     let tgt_i = target as i32;
     let pr = phase.re;
@@ -487,13 +447,7 @@ pub(crate) fn launch_apply_cu_phase(
         .arg(&pr)
         .arg(&pi);
     // SAFETY: signature matches kernel; grid covers pair_count.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("apply_cu_phase", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "apply_cu_phase", ctx.device(), 1) }
 }
 
 fn validate_mcu_qubits(n: usize, controls: &[usize], target: usize) -> Result<Vec<u32>> {
@@ -532,7 +486,7 @@ pub(crate) fn launch_apply_mcu(
     let tgt_mask: u64 = 1u64 << target;
 
     let (stream, func) = stream_and_fn(ctx, "apply_mcu")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(iter_count));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(iter_count, BLOCK_SIZE));
     let sorted_arg = qubit_list(&sorted);
     let m00r = matrix[0][0].re;
     let m00i = matrix[0][0].im;
@@ -561,13 +515,7 @@ pub(crate) fn launch_apply_mcu(
         .arg(&m11i);
     // SAFETY: signature matches; the qubit list rides in parameter space and the grid
     // covers iter_count.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("apply_mcu", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "apply_mcu", ctx.device(), 1) }
 }
 
 pub(crate) fn launch_apply_mcu_phase(
@@ -587,7 +535,7 @@ pub(crate) fn launch_apply_mcu_phase(
     }
 
     let (stream, func) = stream_and_fn(ctx, "apply_mcu_phase")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(iter_count));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(iter_count, BLOCK_SIZE));
     let sorted_arg = qubit_list(&sorted);
     let pr = phase.re;
     let pi = phase.im;
@@ -603,13 +551,7 @@ pub(crate) fn launch_apply_mcu_phase(
         .arg(&pi);
     // SAFETY: signature matches; the qubit list rides in parameter space and the grid
     // covers iter_count.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("apply_mcu_phase", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "apply_mcu_phase", ctx.device(), 1) }
 }
 
 /// Kernel route for a 4x4 matrix in the `apply_fused_2q` basis, where `q0` is the high
@@ -719,7 +661,7 @@ fn launch_apply_monomial_2q(
     check_pair(n, q0, q1)?;
     let pair_count: u64 = 1u64 << (n - 2);
     let (stream, func) = stream_and_fn(ctx, "apply_monomial_2q")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count, BLOCK_SIZE));
     let mut arg = MonoScaleArg { v: [0.0; 8] };
     for (slot, entry) in arg.v.as_chunks_mut::<2>().0.iter_mut().zip(scale) {
         slot[0] = entry.re;
@@ -743,13 +685,7 @@ fn launch_apply_monomial_2q(
         .arg(&packed_src);
     // SAFETY: signature matches; the scales ride in parameter space and the grid covers
     // pair_count.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("apply_monomial_2q", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "apply_monomial_2q", ctx.device(), 1) }
 }
 
 /// The matrix rides in Gauss form as a by-value kernel parameter.
@@ -764,7 +700,7 @@ pub(crate) fn launch_apply_fused_2q(
     check_pair(n, q0, q1)?;
     let pair_count: u64 = 1u64 << (n - 2);
     let (stream, func) = stream_and_fn(ctx, "apply_fused_2q")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count, BLOCK_SIZE));
     let mut mat = FusedMatArg { v: [0.0; 48] };
     for (slot, entry) in mat
         .v
@@ -786,12 +722,7 @@ pub(crate) fn launch_apply_fused_2q(
         .arg(&q1_i)
         .arg(&mat);
     // SAFETY: signature matches; the matrix is copied into parameter space at launch.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("apply_fused_2q", e))?;
-    }
-    ctx.device().count_launch(1);
+    unsafe { launch_counted(builder, cfg, "apply_fused_2q", ctx.device(), 1) }?;
     ctx.device().count_dense_2q();
     Ok(())
 }
@@ -836,12 +767,7 @@ pub(crate) fn measure_prob_one(ctx: &GpuContext, state: &GpuState, qubit: usize)
             .arg(&qubit_i)
             .arg(partials.raw_mut());
         // SAFETY: signature matches kernel; num_blocks * 2*BLOCK_SIZE covers dim.
-        unsafe {
-            builder
-                .launch(stage1_cfg)
-                .map_err(|e| driver_err("measure_prob_one", e))?;
-        }
-        device.count_launch(1);
+        unsafe { launch_counted(builder, stage1_cfg, "measure_prob_one", device, 1) }?;
     }
 
     let result = super::ensure_capacity(&mut scratch.measure_result, device, 1)?;
@@ -854,12 +780,7 @@ pub(crate) fn measure_prob_one(ctx: &GpuContext, state: &GpuState, qubit: usize)
             .arg(result.raw_mut());
         // SAFETY: signature matches kernel; one block of BLOCK_SIZE threads, grid-stride
         // loop over `count_u32` partials. Both buffers held by the scratch guard.
-        unsafe {
-            builder
-                .launch(stage2_cfg)
-                .map_err(|e| driver_err("measure_prob_one_finalize", e))?;
-        }
-        device.count_launch(0);
+        unsafe { launch_counted(builder, stage2_cfg, "measure_prob_one_finalize", device, 0) }?;
     }
 
     let mut host_result = [0.0_f64];
@@ -922,12 +843,7 @@ pub(crate) fn reduced_density_matrix_1q(
             .arg(partials.raw_mut());
         // SAFETY: signature matches kernel; num_blocks * 2*BLOCK_SIZE covers pairs and
         // out_partials holds 4*num_blocks f64s.
-        unsafe {
-            builder
-                .launch(stage1_cfg)
-                .map_err(|e| driver_err("rdm_qubit", e))?;
-        }
-        device.count_launch(1);
+        unsafe { launch_counted(builder, stage1_cfg, "rdm_qubit", device, 1) }?;
     }
 
     let result = super::ensure_capacity(&mut scratch.rdm_result, device, 4)?;
@@ -940,12 +856,7 @@ pub(crate) fn reduced_density_matrix_1q(
             .arg(result.raw_mut());
         // SAFETY: signature matches kernel; one block of BLOCK_SIZE threads, grid-stride
         // loop over `count_u32` four-column partials. Both buffers held by the scratch guard.
-        unsafe {
-            builder
-                .launch(stage2_cfg)
-                .map_err(|e| driver_err("rdm_qubit_finalize", e))?;
-        }
-        device.count_launch(0);
+        unsafe { launch_counted(builder, stage2_cfg, "rdm_qubit_finalize", device, 0) }?;
     }
 
     let mut host_result = [0.0_f64; 4];
@@ -1149,10 +1060,7 @@ fn noise_site(
         // elements (or pairs), the partials hold `columns` f64s per block, the ticket is
         // zero between launches, and only thread 0 of the last block writes the nine f64s
         // of `decision`. `norm_log` is null or the live measure log.
-        unsafe {
-            builder.launch(cfg).map_err(|e| driver_err(name, e))?;
-        }
-        device.count_launch(1);
+        unsafe { launch_counted(builder, cfg, name, device, 1) }?;
     }
 
     let func = device.function("apply_gate_1q_from_buffer")?;
@@ -1166,12 +1074,14 @@ fn noise_site(
     // only its own amplitude pair. `decision` is written by the launch before, in stream
     // order.
     unsafe {
-        builder
-            .launch(linear_cfg(BLOCK_SIZE, grid_for(pairs)))
-            .map_err(|e| driver_err("apply_gate_1q_from_buffer", e))?;
+        launch_counted(
+            builder,
+            linear_cfg(BLOCK_SIZE, grid_for(pairs, BLOCK_SIZE)),
+            "apply_gate_1q_from_buffer",
+            device,
+            1,
+        )
     }
-    device.count_launch(1);
-    Ok(())
 }
 
 /// `sum_j conj(psi[j ^ xmask]) psi[j] (-1)^{popcount(j & zmask)}` per
@@ -1254,11 +1164,14 @@ pub(crate) fn pauli_sums(
         // member slot is a distinct mask index, so `partials` holds two f64s per
         // (slot, block). All buffers are held by the scratch guard.
         unsafe {
-            builder
-                .launch(cfg)
-                .map_err(|e| driver_err("sv_pauli_expect", e))?;
-        }
-        device.count_launch(u64::from(launch_groups));
+            launch_counted(
+                builder,
+                cfg,
+                "sv_pauli_expect",
+                device,
+                u64::from(launch_groups),
+            )
+        }?;
     }
     let norm_sq = state.pending_norm() * state.pending_norm();
     super::finalize_pauli_sums(
@@ -1401,12 +1314,14 @@ fn launch_group_moments(
     // A later group's upload into the same mask buffers lands in stream order after this
     // kernel, and a reallocated buffer is freed in stream order.
     unsafe {
-        builder
-            .launch(linear_cfg(BLOCK_SIZE, grid))
-            .map_err(|e| driver_err("sv_group_moments", e))?;
+        launch_counted(
+            builder,
+            linear_cfg(BLOCK_SIZE, grid),
+            "sv_group_moments",
+            device,
+            1,
+        )
     }
-    device.count_launch(1);
-    Ok(())
 }
 
 /// `(<H>, <H^2>)` of the operator in `table` over the device `state` from one
@@ -1455,11 +1370,14 @@ pub(crate) fn operator_moments(
     // state's qubits; `offsets` holds `num_groups + 1` entries bounding `zs` and the
     // interleaved `coefficients`, and `partials` holds three f64s per block.
     unsafe {
-        builder
-            .launch(linear_cfg(BLOCK_SIZE, grid))
-            .map_err(|e| driver_err("sv_operator_moments", e))?;
-    }
-    device.count_launch(1);
+        launch_counted(
+            builder,
+            linear_cfg(BLOCK_SIZE, grid),
+            "sv_operator_moments",
+            device,
+            1,
+        )
+    }?;
     let mut partials = vec![0.0_f64; 3 * grid as usize];
     partials_dev.copy_to_host(device, &mut partials)?;
     let (s0, s1, s2) = partials
@@ -1497,20 +1415,14 @@ pub(crate) fn measure_collapse(
     check_qubit(n, qubit)?;
     let dim: u64 = 1u64 << n;
     let (stream, func) = stream_and_fn(ctx, "measure_collapse")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim, BLOCK_SIZE));
     let qubit_i = qubit as i32;
     let outcome_i: i32 = if outcome { 1 } else { 0 };
     let mut builder = stream.launch_builder(&func);
     let buffer = state.buffer_mut().raw_mut();
     builder.arg(buffer).arg(&dim).arg(&qubit_i).arg(&outcome_i);
     // SAFETY: signature matches kernel; grid covers dim.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("measure_collapse", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "measure_collapse", ctx.device(), 1) }
 }
 
 /// Start a run of measurements decided on the device: size the log for `capacity`
@@ -1584,12 +1496,7 @@ pub(crate) fn measure_logged(
             shared_mem_bytes: shared_bytes,
         };
         // SAFETY: signature matches kernel; num_blocks * 2*BLOCK_SIZE covers dim.
-        unsafe {
-            builder
-                .launch(cfg)
-                .map_err(|e| driver_err("measure_prob_one", e))?;
-        }
-        device.count_launch(1);
+        unsafe { launch_counted(builder, cfg, "measure_prob_one", device, 1) }?;
     }
     {
         let func = device.function("measure_decide")?;
@@ -1608,12 +1515,7 @@ pub(crate) fn measure_logged(
         };
         // SAFETY: signature matches kernel; one block reduces `num_blocks` partials and
         // thread 0 writes log[0] and log[1 + slot], inside the log by the capacity check.
-        unsafe {
-            builder
-                .launch(cfg)
-                .map_err(|e| driver_err("measure_decide", e))?;
-        }
-        device.count_launch(0);
+        unsafe { launch_counted(builder, cfg, "measure_decide", device, 0) }?;
     }
     let (name, count) = if reset {
         ("reset_fold_logged", dim / 2)
@@ -1631,12 +1533,14 @@ pub(crate) fn measure_logged(
     // SAFETY: signature matches kernel; the grid covers `count` amplitudes (or pairs),
     // and each thread writes only its own amplitude (or its own pair).
     unsafe {
-        builder
-            .launch(linear_cfg(BLOCK_SIZE, grid_for(count)))
-            .map_err(|e| driver_err(name, e))?;
+        launch_counted(
+            builder,
+            linear_cfg(BLOCK_SIZE, grid_for(count, BLOCK_SIZE)),
+            name,
+            device,
+            1,
+        )
     }
-    device.count_launch(1);
-    Ok(())
 }
 
 /// Read back the first `slots` outcomes of the measure log as booleans and take its norm
@@ -1698,20 +1602,14 @@ pub(crate) fn launch_apply_multi_fused_diagonal(
 
     let dim: u64 = 1u64 << n;
     let (stream, func) = stream_and_fn(ctx, "apply_multi_fused_diagonal")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim, BLOCK_SIZE));
     let num_gates_i = num_gates as i32;
     let mut builder = stream.launch_builder(&func);
     let buffer = state.buffer_mut().raw_mut();
     builder.arg(buffer).arg(&dim).arg(&arg).arg(&num_gates_i);
     // SAFETY: signature matches; the gate list rides in parameter space with num_gates
     // entries filled; grid covers dim.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("apply_multi_fused_diagonal", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "apply_multi_fused_diagonal", ctx.device(), 1) }
 }
 
 pub(crate) fn launch_apply_batch_phase(
@@ -1760,7 +1658,7 @@ pub(crate) fn launch_apply_batch_phase(
     let half_count: u64 = 1u64 << (n - 1);
     let device = ctx.device();
     let (stream, func) = stream_and_fn(ctx, "apply_batch_phase")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(half_count));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(half_count, BLOCK_SIZE));
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
@@ -1794,13 +1692,7 @@ pub(crate) fn launch_apply_batch_phase(
         .arg(&num_groups_i);
     // SAFETY: signature matches kernel; every table read is below the staged length by
     // construction of the offsets; grid covers half. The scratch guard holds the upload.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("apply_batch_phase", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "apply_batch_phase", ctx.device(), 1) }
 }
 
 pub(crate) fn launch_apply_batch_rzz(
@@ -1848,7 +1740,7 @@ pub(crate) fn launch_apply_batch_rzz(
     let dim: u64 = 1u64 << n;
     let device = ctx.device();
     let (stream, func) = stream_and_fn(ctx, "apply_batch_rzz")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim, BLOCK_SIZE));
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
@@ -1880,13 +1772,7 @@ pub(crate) fn launch_apply_batch_rzz(
         .arg(&num_groups_i);
     // SAFETY: signature matches kernel; every table read is below the staged length by
     // construction of the offsets; grid covers dim. The scratch guard holds the upload.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("apply_batch_rzz", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "apply_batch_rzz", ctx.device(), 1) }
 }
 
 /// Apply a `DiagonalBatch` in one launch, or per entry when the entries span more groups
@@ -1945,7 +1831,7 @@ pub(crate) fn launch_apply_diagonal_batch(
     let dim: u64 = 1u64 << n;
     let device = ctx.device();
     let (stream, func) = stream_and_fn(ctx, "apply_diagonal_batch")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim, BLOCK_SIZE));
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
@@ -1978,13 +1864,7 @@ pub(crate) fn launch_apply_diagonal_batch(
         .arg(&num_groups_i);
     // SAFETY: signature matches kernel; every table read is below the staged length by
     // construction of the offsets; grid covers dim. The scratch guard holds the upload.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("apply_diagonal_batch", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "apply_diagonal_batch", ctx.device(), 1) }
 }
 
 /// Most DIF stages one `qft_dif_pass` block runs: its shared-memory tile holds
@@ -2156,12 +2036,7 @@ pub(crate) fn launch_apply_qft_block(
         // `2^(bits + row_log)` amplitudes fit its `2^QFT_TILE_Q` shared tile, and every
         // twiddle and phase index stays inside the staged tables by construction of
         // their lengths. The scratch guard holds the upload.
-        unsafe {
-            builder
-                .launch(cfg)
-                .map_err(|e| driver_err("qft_dif_pass", e))?;
-        }
-        device.count_launch(1);
+        unsafe { launch_counted(builder, cfg, "qft_dif_pass", device, 1) }?;
     }
     if reverse_output {
         launch_qft_bit_reverse(ctx, state, start, num)?;
@@ -2196,28 +2071,18 @@ fn launch_qft_bit_reverse(
         // SAFETY: signature matches; one block per 1024-amplitude tile index, and only
         // the block of the smaller middle of each reversed pair writes, so no two
         // blocks touch one amplitude.
-        unsafe {
-            builder
-                .launch(cfg)
-                .map_err(|e| driver_err("qft_bit_reverse_tiled", e))?;
-        }
+        unsafe { launch_counted(builder, cfg, "qft_bit_reverse_tiled", ctx.device(), 1) }
     } else {
         let (stream, func) = stream_and_fn(ctx, "qft_bit_reverse")?;
-        let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim));
+        let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim, BLOCK_SIZE));
         let start_i = start as i32;
         let mut builder = stream.launch_builder(&func);
         let buffer = state.buffer_mut().raw_mut();
         builder.arg(buffer).arg(&dim).arg(&start_i).arg(&num_i);
         // SAFETY: signature matches; the grid covers dim and only the lower index of
         // each reversed pair swaps.
-        unsafe {
-            builder
-                .launch(cfg)
-                .map_err(|e| driver_err("qft_bit_reverse", e))?;
-        }
+        unsafe { launch_counted(builder, cfg, "qft_bit_reverse", ctx.device(), 1) }
     }
-    ctx.device().count_launch(1);
-    Ok(())
 }
 
 /// Matches the `TILE_Q` / `TILE_SIZE` in the PTX source: a tile spans `2^TILE_Q`
@@ -2373,12 +2238,7 @@ pub(crate) fn launch_apply_mixed_tile<'a: 'b, 'b>(
     // SAFETY: signature matches; num_tiles blocks of the 2^MIXED_TILE_Q amplitudes over
     // MIXED_TILE_Q distinct qubits below n cover the state once, every op position names
     // a tile qubit, and the op list rides in parameter space with num_ops entries filled.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("apply_mixed_tile", e))?;
-    }
-    ctx.device().count_launch(1);
+    unsafe { launch_counted(builder, cfg, "apply_mixed_tile", ctx.device(), 1) }?;
     ctx.device().count_tile();
     Ok(())
 }
@@ -2500,12 +2360,7 @@ pub(crate) fn launch_apply_multi_fused_nondiag(
         // SAFETY: signature matches; num_tiles * TILE_SIZE = dim; the tile holds TILE_Q
         // distinct qubits below n, every target position is inside it, and the gate list
         // rides in parameter space with num_gates entries filled.
-        unsafe {
-            builder
-                .launch(cfg)
-                .map_err(|e| driver_err("apply_multi_fused_tiled", e))?;
-        }
-        ctx.device().count_launch(1);
+        unsafe { launch_counted(builder, cfg, "apply_multi_fused_tiled", ctx.device(), 1) }?;
     }
     Ok(())
 }

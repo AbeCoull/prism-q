@@ -10,7 +10,8 @@ pub(crate) mod stabilizer;
 use std::sync::Arc;
 
 use cudarc::driver::{
-    CudaFunction, CudaStream, DevicePtr, DeviceRepr, LaunchConfig, PushKernelArg, ValidAsZeroBits,
+    CudaFunction, CudaStream, DevicePtr, DeviceRepr, LaunchArgs, LaunchConfig, PushKernelArg,
+    ValidAsZeroBits,
 };
 use num_complex::Complex64;
 
@@ -33,6 +34,33 @@ pub(super) fn linear_cfg(block_size: u32, grid_blocks: u32) -> LaunchConfig {
         block_dim: (block_size, 1, 1),
         shared_mem_bytes: 0,
     }
+}
+
+/// Blocks of `block` threads covering `count` threads, at least one.
+#[inline]
+pub(super) fn grid_for(count: u64, block: u32) -> u32 {
+    count.div_ceil(block as u64).max(1) as u32
+}
+
+/// Launch `builder` with `cfg`, naming the kernel `name` in a driver error, and count one
+/// launch of `passes` state passes.
+///
+/// # Safety
+///
+/// The arguments pushed onto `builder` must match the kernel's parameters in order and
+/// type, and `cfg` must keep every thread's accesses inside the buffers it is given.
+#[inline(always)]
+pub(super) unsafe fn launch_counted(
+    mut builder: LaunchArgs<'_>,
+    cfg: LaunchConfig,
+    name: &str,
+    device: &GpuDevice,
+    passes: u64,
+) -> Result<()> {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe { builder.launch(cfg) }.map_err(|e| driver_err(name, e))?;
+    device.count_launch(passes);
+    Ok(())
 }
 
 pub(super) fn check_qubit(n: usize, qubit: usize) -> Result<()> {
@@ -277,12 +305,7 @@ pub(super) fn finalize_pauli_sums(
     // SAFETY: signature matches the kernel; one block per mask strides over that
     // mask's `blocks_per_mask` partial pairs, and `result` holds two f64s per mask.
     // Both buffers are held by the caller's scratch guard.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("dm_pauli_expect_finalize", e))?;
-    }
-    device.count_launch(0);
+    unsafe { launch_counted(builder, cfg, "dm_pauli_expect_finalize", device, 0) }?;
     let mut host = vec![0.0_f64; 2 * num_masks as usize];
     result.copy_to_host(device, &mut host)?;
     Ok(host

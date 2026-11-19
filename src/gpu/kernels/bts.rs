@@ -16,7 +16,9 @@ use crate::sim::compiled::rng::Xoshiro256PlusPlus;
 use crate::sim::compiled::shot_tail_mask;
 
 use super::super::GpuContext;
-use super::{div_ceil_grid, driver_err, linear_cfg, require_i32, require_u32, stream_and_fn};
+use super::{
+    div_ceil_grid, driver_err, launch_counted, linear_cfg, require_i32, require_u32, stream_and_fn,
+};
 
 const SAMPLE_BLOCK_SIZE: u32 = 128;
 /// Columns of random bits one `bts_fill_random` thread draws; matches `BTS_FILL_COLS`.
@@ -157,11 +159,14 @@ impl GpuBtsCache {
             // columns of one (batch, column block) pair, disjoint from every other thread,
             // inside the `chunk_s_words * rank` words the view covers.
             unsafe {
-                builder
-                    .launch(linear_cfg(SAMPLE_BLOCK_SIZE, blocks))
-                    .map_err(|e| driver_err("bts_fill_random", e))?;
-            }
-            device.count_launch(0);
+                launch_counted(
+                    builder,
+                    linear_cfg(SAMPLE_BLOCK_SIZE, blocks),
+                    "bts_fill_random",
+                    device,
+                    0,
+                )
+            }?;
         }
 
         let num_meas_i = require_i32("bts_sample_meas_major", "num_meas", num_meas)?;
@@ -210,12 +215,7 @@ impl GpuBtsCache {
         // output word, addressed by measurement row and chunk-local batch index, inside
         // the `num_meas * out_stride_words` view. All input buffers are sized to cover
         // the access pattern above.
-        unsafe {
-            builder
-                .launch(cfg)
-                .map_err(|e| driver_err("bts_sample_meas_major", e))?;
-        }
-        device.count_launch(0);
+        unsafe { launch_counted(builder, cfg, "bts_sample_meas_major", device, 0) }?;
         Ok(())
     }
 }
@@ -464,12 +464,7 @@ pub(crate) fn launch_bts_transpose_meas_to_shot(
         // SAFETY: the launches together cover every (m_word, batch) tile exactly once;
         // each tile's 64 threads produce 64 disjoint shot-major u64s. Shared tile is
         // block-local.
-        unsafe {
-            builder
-                .launch(cfg)
-                .map_err(|e| driver_err("bts_transpose_meas_to_shot", e))?;
-        }
-        ctx.device().count_launch(0);
+        unsafe { launch_counted(builder, cfg, "bts_transpose_meas_to_shot", ctx.device(), 0) }?;
     }
     Ok(shot_major)
 }
@@ -589,12 +584,14 @@ pub(crate) fn generate_and_apply_noise_masks_meas_major_by_row(
     // SAFETY: one thread per (row, batch); register accumulator replaces the
     // cross-block atomic path. No two threads write the same output index.
     unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("bts_generate_and_apply_noise_meas_major_by_row", e))?;
+        launch_counted(
+            builder,
+            cfg,
+            "bts_generate_and_apply_noise_meas_major_by_row",
+            ctx.device(),
+            0,
+        )
     }
-    ctx.device().count_launch(0);
-    Ok(())
 }
 
 /// One thread per (event, batch) pair, with atomic XOR on rows shared
@@ -670,12 +667,14 @@ pub(crate) fn apply_noise_masks_meas_major(
     // SAFETY: each thread owns one (event, batch) pair and uses atomic XOR
     // updates when multiple events touch the same measurement row.
     unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("bts_apply_noise_masks_meas_major", e))?;
+        launch_counted(
+            builder,
+            cfg,
+            "bts_apply_noise_masks_meas_major",
+            ctx.device(),
+            0,
+        )
     }
-    ctx.device().count_launch(0);
-    Ok(())
 }
 
 /// Flip readout error into a measurement-major record of `num_shots` shots, one
@@ -726,11 +725,14 @@ pub(crate) fn apply_readout_meas_major(
         // SAFETY: signature matches the kernel. The launches cover every (entry,
         // batch) pair once and entries name distinct rows, so each thread owns one word.
         unsafe {
-            builder
-                .launch(cfg)
-                .map_err(|e| driver_err("bts_apply_readout_meas_major", e))?;
-        }
-        ctx.device().count_launch(0);
+            launch_counted(
+                builder,
+                cfg,
+                "bts_apply_readout_meas_major",
+                ctx.device(),
+                0,
+            )
+        }?;
     }
     Ok(())
 }
@@ -791,12 +793,7 @@ pub(crate) fn count_meas_major_marginals(
         .arg(&tail_mask_u64)
         .arg(row_counts.raw_mut());
     // SAFETY: one block owns one measurement row and writes one unique count.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("bts_popcount_rows", e))?;
-    }
-    ctx.device().count_launch(0);
+    unsafe { launch_counted(builder, cfg, "bts_popcount_rows", ctx.device(), 0) }?;
 
     row_counts.copy_to_host(device, &mut host_counts)?;
     Ok(host_counts)
@@ -830,12 +827,7 @@ fn count_used_slots(
         .arg(used_out.raw_mut());
     // SAFETY: each block scans a disjoint subset of indices and contributes
     // its local sum through one atomic add into `used_out`.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("bts_count_used_slots", e))?;
-    }
-    ctx.device().count_launch(0);
+    unsafe { launch_counted(builder, cfg, "bts_count_used_slots", ctx.device(), 0) }?;
 
     let mut used_host = [0u32; 1];
     used_out.copy_to_host(device, &mut used_host)?;
@@ -948,11 +940,14 @@ fn compact_count_table(
     // SAFETY: each occupied slot compacts into a unique output index obtained
     // from an atomic counter.
     unsafe {
-        compact_builder
-            .launch(compact_cfg)
-            .map_err(|e| driver_err("bts_compact_counts_upto8", e))?;
-    }
-    ctx.device().count_launch(0);
+        launch_counted(
+            compact_builder,
+            compact_cfg,
+            "bts_compact_counts_upto8",
+            ctx.device(),
+            0,
+        )
+    }?;
 
     let mut out_len_host = [0u32; 1];
     out_len.copy_to_host(device, &mut out_len_host)?;
@@ -1023,12 +1018,7 @@ pub(crate) fn try_count_shot_major(
         .arg(table.overflow.raw());
     // SAFETY: each thread handles at most one shot-major outcome and uses
     // atomics to claim or update hash slots.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("bts_count_shot_major_upto8", e))?;
-    }
-    ctx.device().count_launch(0);
+    unsafe { launch_counted(builder, cfg, "bts_count_shot_major_upto8", ctx.device(), 0) }?;
 
     table.finish(ctx, m_words, raw_transfer_bytes)
 }
@@ -1105,12 +1095,7 @@ pub(crate) fn try_count_meas_major(
         .arg(table.overflow.raw());
     // SAFETY: each thread handles at most one logical shot and uses atomics to
     // claim or update hash slots.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("bts_count_meas_major_upto8", e))?;
-    }
-    ctx.device().count_launch(0);
+    unsafe { launch_counted(builder, cfg, "bts_count_meas_major_upto8", ctx.device(), 0) }?;
 
     table.finish(ctx, m_words, raw_transfer_bytes)
 }

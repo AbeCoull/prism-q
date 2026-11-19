@@ -1,4 +1,6 @@
 use super::*;
+use crate::circuits;
+use crate::sim::compiled::compile_measurements;
 
 fn shot_major_packed(num_shots: usize, num_meas: usize, bits: &[(usize, usize)]) -> PackedShots {
     let m_words = num_meas.div_ceil(64);
@@ -212,5 +214,108 @@ fn direct_histogram_matches_typed_counts() {
             };
             assert_eq!(pooled(&shot_major), pooled(&meas_major));
         }
+    }
+}
+
+#[test]
+fn chunked_histogram_matches_direct() {
+    let mut c = circuits::clifford_heavy_circuit(20, 5, 42);
+    c.num_classical_bits = 20;
+    for i in 0..20 {
+        c.add_measure(i, i);
+    }
+    let num_shots = 50_000;
+
+    let mut sampler_direct = compile_measurements(&c, 42).unwrap();
+    let direct_counts = sampler_direct.sample_bulk_packed(num_shots).counts();
+
+    let mut sampler_chunked = compile_measurements(&c, 42).unwrap();
+    let mut acc = HistogramAccumulator::new();
+    sampler_chunked.sample_chunked(num_shots, &mut acc);
+    let chunked_counts = acc.into_counts();
+
+    assert_eq!(
+        direct_counts, chunked_counts,
+        "chunked histogram must match direct"
+    );
+}
+
+#[test]
+fn accumulator_matches_packed_counts() {
+    let mut c = circuits::clifford_heavy_circuit(20, 5, 42);
+    c.num_classical_bits = 20;
+    for i in 0..20 {
+        c.add_measure(i, i);
+    }
+
+    let mut sampler = compile_measurements(&c, 42).unwrap();
+    let packed = sampler.sample_bulk_packed(100_000);
+    let direct_counts = packed.counts();
+
+    let mut acc = HistogramAccumulator::new();
+    acc.accumulate(&packed);
+    let acc_counts = acc.into_counts();
+
+    assert_eq!(
+        direct_counts, acc_counts,
+        "accumulator counts must match PackedShots::counts"
+    );
+}
+
+#[test]
+fn chunked_histogram_small_chunks() {
+    let mut c = circuits::ghz_circuit(10);
+    c.num_classical_bits = 10;
+    for i in 0..10 {
+        c.add_measure(i, i);
+    }
+    let num_shots = 10_000;
+
+    let mut sampler = compile_measurements(&c, 42).unwrap();
+    let mut acc = HistogramAccumulator::new();
+    sampler.sample_chunked_with_size(num_shots, 300, &mut acc);
+    let counts = acc.into_counts();
+
+    let total: u64 = counts.values().sum();
+    assert_eq!(total, num_shots as u64, "total shots must match");
+    assert_eq!(counts.len(), 2, "GHZ-10 should have exactly 2 outcomes");
+
+    let all_zeros = vec![0u64; 10usize.div_ceil(64)];
+    let all_ones = {
+        let mut v = vec![0u64; 10usize.div_ceil(64)];
+        v[0] = (1u64 << 10) - 1;
+        v
+    };
+    let c0 = counts.get(&all_zeros).copied().unwrap_or(0);
+    let c1 = counts.get(&all_ones).copied().unwrap_or(0);
+    assert!(
+        (c0 as f64 / num_shots as f64 - 0.5).abs() < 0.03,
+        "GHZ |0⟩^n fraction {c0}/{num_shots} should be ~0.5"
+    );
+    assert!(
+        (c1 as f64 / num_shots as f64 - 0.5).abs() < 0.03,
+        "GHZ |1⟩^n fraction {c1}/{num_shots} should be ~0.5"
+    );
+}
+
+#[test]
+fn correlator_ghz() {
+    let mut c = circuits::ghz_circuit(10);
+    c.num_classical_bits = 10;
+    for i in 0..10 {
+        c.add_measure(i, i);
+    }
+
+    let pairs = vec![(0, 1), (0, 9), (3, 7)];
+    let mut sampler = compile_measurements(&c, 42).unwrap();
+    let mut acc = CorrelatorAccumulator::new(pairs);
+    sampler.sample_chunked(100_000, &mut acc);
+    let corrs = acc.correlators();
+
+    for (i, &c) in corrs.iter().enumerate() {
+        assert!(
+            (c - 1.0).abs() < 0.02,
+            "GHZ pair {i} correlator {c} should be ~1.0"
+        );
     }
 }

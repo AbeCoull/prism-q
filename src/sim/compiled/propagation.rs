@@ -3,13 +3,13 @@
 //! column-major forward stabilizer simulation.
 
 use super::accumulator::transpose_64x64_dispatch;
-use super::{PauliVec, flip_bit, get_bit, set_bit};
+use super::{PauliVec, flip_bit, get_bit, incompatible, set_bit};
 #[cfg(target_arch = "x86_64")]
 use crate::backend::stabilizer::kernels::rowmul_words_avx512;
 #[cfg(target_arch = "x86_64")]
 use crate::backend::word_ops::{WordTier, word_tier};
 use crate::circuit::{Circuit, Instruction};
-use crate::error::{PrismError, Result};
+use crate::error::Result;
 use crate::gates::Gate;
 
 /// Heisenberg-picture backward propagation of a Pauli through a Clifford gate,
@@ -111,17 +111,13 @@ pub(super) fn build_measurement_rows(circuit: &Circuit) -> Vec<(PauliVec, usize,
     let n = circuit.num_qubits;
     let num_qubit_words = n.div_ceil(64);
 
-    let measurements: Vec<(usize, usize)> = circuit
-        .instructions
-        .iter()
-        .filter_map(|inst| match inst {
-            Instruction::Measure {
-                qubit,
-                classical_bit,
-            } => Some((*qubit, *classical_bit)),
-            _ => None,
-        })
-        .collect();
+    debug_assert!(
+        !circuit
+            .instructions
+            .iter()
+            .any(|inst| matches!(inst, Instruction::Region(_)))
+    );
+    let measurements = circuit.measurement_map();
 
     let m = measurements.len();
     if m == 0 {
@@ -1873,10 +1869,10 @@ pub(super) fn forward_as_backward_gate(gate: &Gate) -> Result<&Gate> {
         Gate::H | Gate::X | Gate::Y | Gate::Z | Gate::Id | Gate::Cx | Gate::Cz | Gate::Swap => {
             Ok(gate)
         }
-        _ => Err(PrismError::IncompatibleBackend {
-            backend: "CompiledSampler".to_string(),
-            reason: format!("unsupported gate {:?} in column-major forward sim", gate),
-        }),
+        _ => Err(incompatible(format!(
+            "unsupported gate {:?} in column-major forward sim",
+            gate
+        ))),
     }
 }
 

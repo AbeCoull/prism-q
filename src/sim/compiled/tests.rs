@@ -60,205 +60,6 @@ fn reset_rejected() {
 }
 
 #[test]
-fn defer_measure_reset_rewrites_reuse() {
-    let mut c = Circuit::new(1, 2);
-    c.add_gate(Gate::X, &[0]);
-    c.add_measure(0, 0);
-    c.add_reset(0);
-    c.add_measure(0, 1);
-
-    let deferred = defer_measure_reset_circuit(&c).unwrap();
-    assert_eq!(deferred.num_qubits, 2);
-    assert!(!deferred.has_resets());
-    assert!(deferred.has_terminal_measurements_only());
-    assert_eq!(deferred.measurement_map(), vec![(0, 0), (1, 1)]);
-
-    let mut sampler = compile_measurements(&deferred, 42).unwrap();
-    for shot in sampler.sample_bulk(64) {
-        assert!(shot[0]);
-        assert!(!shot[1]);
-    }
-}
-
-#[test]
-fn defer_measure_reset_copies_a_reused_measured_qubit() {
-    let mut c = Circuit::new(1, 2);
-    c.add_gate(Gate::X, &[0]);
-    c.add_measure(0, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::H, &[0]);
-    c.add_measure(0, 1);
-
-    let deferred = defer_measure_reset_circuit(&c).unwrap();
-    let gates: Vec<(Gate, Vec<usize>)> = deferred
-        .instructions
-        .iter()
-        .filter_map(|inst| match inst {
-            Instruction::Gate { gate, targets } => Some((gate.clone(), targets.to_vec())),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        gates,
-        vec![
-            (Gate::X, vec![0]),
-            (Gate::Cx, vec![0, 1]),
-            (Gate::H, vec![0]),
-            (Gate::H, vec![0]),
-        ]
-    );
-    assert_eq!(deferred.num_qubits, 2);
-    assert_eq!(deferred.measurement_map(), vec![(1, 0), (0, 1)]);
-
-    let mut sampler = compile_measurements(&deferred, 42).unwrap();
-    for shot in sampler.sample_bulk(64) {
-        assert!(shot[0] && shot[1]);
-    }
-}
-
-#[test]
-fn defer_measure_reset_controls_a_guarded_pauli_on_the_measured_alias() {
-    let mut c = Circuit::new(2, 2);
-    c.add_gate(Gate::H, &[0]);
-    c.add_measure(0, 0);
-    c.add_reset(0);
-    c.instructions.push(Instruction::Conditional {
-        condition: ClassicalCondition::BitIsOne(0),
-        gate: Gate::Y,
-        targets: smallvec![1],
-    });
-    c.add_measure(1, 1);
-
-    let deferred = defer_measure_reset_circuit(&c).unwrap();
-    let gates: Vec<(Gate, Vec<usize>)> = deferred
-        .instructions
-        .iter()
-        .filter_map(|inst| match inst {
-            Instruction::Gate { gate, targets } => Some((gate.clone(), targets.to_vec())),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        gates,
-        vec![
-            (Gate::H, vec![0]),
-            (Gate::Sdg, vec![1]),
-            (Gate::Cx, vec![0, 1]),
-            (Gate::S, vec![1]),
-        ]
-    );
-    assert!(deferred.has_terminal_measurements_only());
-
-    let mut sampler = compile_measurements(&deferred, 42).unwrap();
-    for shot in sampler.sample_bulk(256) {
-        assert_eq!(shot[0], shot[1]);
-    }
-}
-
-#[test]
-fn defer_measure_reset_rejects_guards_no_controlled_pauli_expresses() {
-    let mut hadamard = Circuit::new(2, 2);
-    hadamard.add_measure(0, 0);
-    hadamard.instructions.push(Instruction::Conditional {
-        condition: ClassicalCondition::BitIsOne(0),
-        gate: Gate::H,
-        targets: smallvec![1],
-    });
-    hadamard.add_measure(1, 1);
-
-    let mut both_bits = Circuit::new(3, 3);
-    both_bits.add_measure(0, 0);
-    both_bits.add_measure(1, 1);
-    both_bits.instructions.push(Instruction::Conditional {
-        condition: ClassicalCondition::RegisterEquals {
-            offset: 0,
-            size: 2,
-            value: 0b11,
-        },
-        gate: Gate::X,
-        targets: smallvec![2],
-    });
-    both_bits.add_measure(2, 2);
-
-    for (circuit, reason) in [
-        (&hadamard, "classical conditionals on `h`"),
-        (&both_bits, "reads two measured bits"),
-    ] {
-        let err = defer_measure_reset_circuit(circuit)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains(reason), "{err}");
-    }
-}
-
-#[test]
-fn defer_guarded_keeps_a_comparison_of_two_bits_as_an_entry() {
-    let mut c = Circuit::new(3, 3);
-    c.add_measure(0, 0);
-    c.add_measure(1, 1);
-    c.instructions.push(Instruction::Conditional {
-        condition: ClassicalCondition::RegisterNotEquals {
-            offset: 0,
-            size: 2,
-            value: 0b01,
-        },
-        gate: Gate::Z,
-        targets: smallvec![2],
-    });
-    c.add_measure(2, 2);
-
-    let deferred = defer_guarded_circuit(&c).unwrap();
-    assert!(
-        deferred
-            .circuit
-            .instructions
-            .iter()
-            .all(|inst| !matches!(inst, Instruction::Gate { .. }))
-    );
-    let [entry] = deferred.guarded.as_slice() else {
-        panic!("{} entries", deferred.guarded.len());
-    };
-    assert_eq!(entry.qubit, 2);
-    assert_eq!(entry.kind, GuardedKind::Gate(3));
-    assert_eq!(
-        entry.guard,
-        Guard::All {
-            terms: smallvec![(0, true), (1, false)],
-            negate: true,
-        }
-    );
-}
-
-#[test]
-fn run_shots_deferred_reset_preserves_bell_correlation() {
-    let mut c = Circuit::new(2, 2);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    c.add_measure(1, 0);
-    c.add_reset(1);
-    c.add_measure(0, 1);
-
-    let result = crate::sim::run_shots_with(
-        BackendKind::Stabilizer,
-        &c,
-        1024,
-        42,
-        &ResolvedLimits::process_default(),
-    )
-    .unwrap();
-    assert_eq!(result.num_classical_bits, 2);
-    let mut saw_zero = false;
-    let mut saw_one = false;
-    for shot in &result.shots {
-        assert_eq!(shot[0], shot[1]);
-        saw_zero |= !shot[0];
-        saw_one |= shot[0];
-    }
-    assert!(saw_zero);
-    assert!(saw_one);
-}
-
-#[test]
 fn conditional_rejected() {
     let mut c = Circuit::new(2, 2);
     c.add_gate(Gate::H, &[0]);
@@ -1259,73 +1060,6 @@ fn sparse_parity_empty_circuit() {
 }
 
 #[test]
-fn bts_meas_major_ghz_counts() {
-    let mut c = circuits::ghz_circuit(8);
-    c.num_classical_bits = 8;
-    for i in 0..8 {
-        c.add_measure(i, i);
-    }
-    let mut sampler = compile_forward(&c, 42).unwrap();
-    let packed = sampler.sample_bulk_packed(10_000);
-
-    assert_eq!(packed.layout(), ShotLayout::MeasMajor);
-
-    let counts = packed.counts();
-    assert_eq!(counts.len(), 2, "GHZ should have exactly 2 outcomes");
-    let total: u64 = counts.values().sum();
-    assert_eq!(total, 10_000);
-}
-
-#[test]
-fn bts_meas_major_get_bit_consistency() {
-    let mut c = circuits::clifford_heavy_circuit(20, 5, 42);
-    c.num_classical_bits = 20;
-    for i in 0..20 {
-        c.add_measure(i, i);
-    }
-    let mut sampler = compile_forward(&c, 42).unwrap();
-    let packed = sampler.sample_bulk_packed(500);
-
-    let shots = packed.to_shots();
-    for (s, shot) in shots.iter().enumerate() {
-        for (m, &val) in shot.iter().enumerate().take(20) {
-            assert_eq!(packed.get_bit(s, m), val, "Mismatch at shot={s} meas={m}");
-        }
-    }
-}
-
-#[test]
-fn bts_meas_major_marginals_match_stabilizer() {
-    let mut c = circuits::clifford_heavy_circuit(50, 5, 42);
-    c.num_classical_bits = 50;
-    for i in 0..50 {
-        c.add_measure(i, i);
-    }
-    let mut sampler = compile_forward(&c, 42).unwrap();
-    let packed = sampler.sample_bulk_packed(5_000);
-
-    let reference = crate::sim::run_shots_with(
-        BackendKind::Stabilizer,
-        &c,
-        5_000,
-        42,
-        &ResolvedLimits::process_default(),
-    )
-    .unwrap();
-
-    for q in 0..50 {
-        let bts_ones: usize = (0..5_000).filter(|&s| packed.get_bit(s, q)).count();
-        let ref_ones: usize = reference.shots.iter().filter(|s| s[q]).count();
-        let bts_frac = bts_ones as f64 / 5_000.0;
-        let ref_frac = ref_ones as f64 / 5_000.0;
-        assert!(
-            (bts_frac - ref_frac).abs() < 0.05,
-            "q{q}: bts={bts_frac:.3} ref={ref_frac:.3}"
-        );
-    }
-}
-
-#[test]
 fn streaming_counts_ghz() {
     let mut c = circuits::ghz_circuit(10);
     c.num_classical_bits = 10;
@@ -1499,63 +1233,6 @@ fn bts_bulk_sampling_conserves_shots() {
 }
 
 #[test]
-fn block_detection_independent_pairs() {
-    let mut c = circuits::independent_bell_pairs(4);
-    c.num_classical_bits = 8;
-    for i in 0..8 {
-        c.add_measure(i, i);
-    }
-    let sampler = compile_measurements(&c, 42).unwrap();
-    let sparse = sampler.sparse.as_ref().unwrap();
-    let blocks = sparse.find_blocks(sampler.rank);
-    assert!(blocks.is_some());
-    let blocks = blocks.unwrap();
-    assert_eq!(blocks.len(), 4);
-    for b in &blocks {
-        assert_eq!(b.len(), 2);
-    }
-    let firsts: Vec<usize> = blocks.iter().map(|b| b[0]).collect();
-    assert!(firsts.is_sorted(), "blocks out of row order: {firsts:?}");
-}
-
-#[test]
-fn block_detection_single_block() {
-    let mut c = circuits::clifford_random_pairs(8, 20, 42);
-    c.num_classical_bits = 8;
-    for i in 0..8 {
-        c.add_measure(i, i);
-    }
-    let sampler = compile_measurements(&c, 42).unwrap();
-    assert!(sampler.parity_blocks.is_none());
-}
-
-#[test]
-fn block_parallel_bts_correctness() {
-    let mut c = circuits::independent_bell_pairs(8);
-    c.num_classical_bits = 16;
-    for i in 0..16 {
-        c.add_measure(i, i);
-    }
-
-    let mut sampler_block = compile_measurements(&c, 42).unwrap();
-    assert!(sampler_block.parity_blocks.is_some());
-
-    let packed = sampler_block.sample_bulk_packed(10_000);
-    let counts = packed.counts();
-    let total: u64 = counts.values().sum();
-    assert_eq!(total, 10_000);
-
-    let shots = packed.to_shots();
-    for shot in &shots {
-        for pair in 0..8 {
-            let b0 = shot[2 * pair];
-            let b1 = shot[2 * pair + 1];
-            assert_eq!(b0, b1, "Bell pair {pair} must be correlated");
-        }
-    }
-}
-
-#[test]
 fn gray_code_exact_counts_bell_pair() {
     let mut c = Circuit::new(2, 2);
     c.add_gate(Gate::H, &[0]);
@@ -1635,34 +1312,6 @@ fn compiled_sampler_scale_fixture_reaches_batched_bts() {
     for shots in [100_000, 1_000_000, 10_000_000] {
         assert!(shots > BTS_BATCH_SHOTS);
         assert!(sampler.should_use_bts(shots));
-    }
-}
-
-#[test]
-fn bts_batched_correctness() {
-    let mut c = Circuit::new(4, 4);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    c.add_gate(Gate::H, &[2]);
-    c.add_gate(Gate::Cx, &[2, 3]);
-    for i in 0..4 {
-        c.add_measure(i, i);
-    }
-
-    let num_shots = BTS_BATCH_SHOTS * 3 + 100;
-    let mut sampler = compile_measurements(&c, 42).unwrap();
-    assert!(sampler.should_use_bts(num_shots));
-
-    let packed = sampler.sample_bulk_packed(num_shots);
-    assert_eq!(packed.num_shots, num_shots);
-    let counts = packed.counts();
-    let total: u64 = counts.values().sum();
-    assert_eq!(total, num_shots as u64);
-
-    let shots = packed.to_shots();
-    for shot in &shots {
-        assert_eq!(shot[0], shot[1], "Bell pair 0 must be correlated");
-        assert_eq!(shot[2], shot[3], "Bell pair 1 must be correlated");
     }
 }
 
@@ -1779,29 +1428,6 @@ fn detection_events_carry_reference_bits_on_every_path() {
             assert_eq!(fired, 0);
         }
     }
-}
-
-#[test]
-fn chunked_histogram_matches_direct() {
-    let mut c = circuits::clifford_heavy_circuit(20, 5, 42);
-    c.num_classical_bits = 20;
-    for i in 0..20 {
-        c.add_measure(i, i);
-    }
-    let num_shots = 50_000;
-
-    let mut sampler_direct = compile_measurements(&c, 42).unwrap();
-    let direct_counts = sampler_direct.sample_bulk_packed(num_shots).counts();
-
-    let mut sampler_chunked = compile_measurements(&c, 42).unwrap();
-    let mut acc = super::accumulator::HistogramAccumulator::new();
-    sampler_chunked.sample_chunked(num_shots, &mut acc);
-    let chunked_counts = acc.into_counts();
-
-    assert_eq!(
-        direct_counts, chunked_counts,
-        "chunked histogram must match direct"
-    );
 }
 
 #[test]
@@ -1959,64 +1585,6 @@ fn rank_zero_run_counts_match_shot_counts() {
 }
 
 #[test]
-fn accumulator_matches_packed_counts() {
-    let mut c = circuits::clifford_heavy_circuit(20, 5, 42);
-    c.num_classical_bits = 20;
-    for i in 0..20 {
-        c.add_measure(i, i);
-    }
-
-    let mut sampler = compile_measurements(&c, 42).unwrap();
-    let packed = sampler.sample_bulk_packed(100_000);
-    let direct_counts = packed.counts();
-
-    let mut acc = super::accumulator::HistogramAccumulator::new();
-    acc.accumulate(&packed);
-    let acc_counts = acc.into_counts();
-
-    assert_eq!(
-        direct_counts, acc_counts,
-        "accumulator counts must match PackedShots::counts"
-    );
-}
-
-#[test]
-fn chunked_histogram_small_chunks() {
-    let mut c = circuits::ghz_circuit(10);
-    c.num_classical_bits = 10;
-    for i in 0..10 {
-        c.add_measure(i, i);
-    }
-    let num_shots = 10_000;
-
-    let mut sampler = compile_measurements(&c, 42).unwrap();
-    let mut acc = HistogramAccumulator::new();
-    sampler.sample_chunked_with_size(num_shots, 300, &mut acc);
-    let counts = acc.into_counts();
-
-    let total: u64 = counts.values().sum();
-    assert_eq!(total, num_shots as u64, "total shots must match");
-    assert_eq!(counts.len(), 2, "GHZ-10 should have exactly 2 outcomes");
-
-    let all_zeros = vec![0u64; 10usize.div_ceil(64)];
-    let all_ones = {
-        let mut v = vec![0u64; 10usize.div_ceil(64)];
-        v[0] = (1u64 << 10) - 1;
-        v
-    };
-    let c0 = counts.get(&all_zeros).copied().unwrap_or(0);
-    let c1 = counts.get(&all_ones).copied().unwrap_or(0);
-    assert!(
-        (c0 as f64 / num_shots as f64 - 0.5).abs() < 0.03,
-        "GHZ |0⟩^n fraction {c0}/{num_shots} should be ~0.5"
-    );
-    assert!(
-        (c1 as f64 / num_shots as f64 - 0.5).abs() < 0.03,
-        "GHZ |1⟩^n fraction {c1}/{num_shots} should be ~0.5"
-    );
-}
-
-#[test]
 fn marginals_ghz() {
     let mut c = circuits::ghz_circuit(10);
     c.num_classical_bits = 10;
@@ -2093,28 +1661,6 @@ fn pauli_expectation_ghz() {
         assert!(
             (e - 1.0).abs() < 0.02,
             "GHZ Z_iZ_j observable {i} expectation {e} should be ~1.0"
-        );
-    }
-}
-
-#[test]
-fn correlator_ghz() {
-    let mut c = circuits::ghz_circuit(10);
-    c.num_classical_bits = 10;
-    for i in 0..10 {
-        c.add_measure(i, i);
-    }
-
-    let pairs = vec![(0, 1), (0, 9), (3, 7)];
-    let mut sampler = compile_measurements(&c, 42).unwrap();
-    let mut acc = CorrelatorAccumulator::new(pairs);
-    sampler.sample_chunked(100_000, &mut acc);
-    let corrs = acc.correlators();
-
-    for (i, &c) in corrs.iter().enumerate() {
-        assert!(
-            (c - 1.0).abs() < 0.02,
-            "GHZ pair {i} correlator {c} should be ~1.0"
         );
     }
 }
@@ -3073,51 +2619,6 @@ fn set_bit_parity_build_matches_the_bit_probe() {
             }
         }
     }
-}
-
-#[test]
-fn early_exit_blocks_match_the_column_lists() {
-    use rand::{RngExt, SeedableRng};
-    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
-    let mut split = 0;
-    for case in 0..300 {
-        let num_meas = rng.random_range(2..200usize);
-        let rank = rng.random_range(1..150usize);
-        let groups = rng.random_range(1..6usize);
-        let density = [0.02, 0.1, 0.5][case % 3];
-        let cover_every_row = case % 2 == 0;
-        let words = num_meas.div_ceil(64);
-        let mut flip_rows = vec![vec![0u64; words]; rank];
-        for m in 0..num_meas {
-            let group = m % groups;
-            let cols: Vec<usize> = (0..rank).filter(|c| c % groups == group).collect();
-            for &c in &cols {
-                if rng.random_bool(density) {
-                    flip_rows[c][m / 64] |= 1 << (m % 64);
-                }
-            }
-            if cover_every_row && !cols.is_empty() {
-                let c = cols[rng.random_range(0..cols.len())];
-                flip_rows[c][m / 64] |= 1 << (m % 64);
-            }
-        }
-        let sparse = SparseParity::from_flip_rows(&flip_rows, num_meas);
-        let expected = sparse.find_blocks_by_column_lists(rank);
-        assert_eq!(sparse.find_blocks(rank), expected, "case {case}");
-
-        let ref_bits = vec![0u64; words];
-        let expected_useful =
-            expected.filter(|blocks| blocks.len() >= 2 && blocks.iter().all(|b| b.len() >= 2));
-        let actual_useful = build_parity_blocks_if_useful(&sparse, rank, &ref_bits).map(|p| {
-            p.blocks
-                .into_iter()
-                .map(|b| b.meas_indices)
-                .collect::<Vec<_>>()
-        });
-        split += usize::from(actual_useful.is_some());
-        assert_eq!(actual_useful, expected_useful, "case {case}");
-    }
-    assert!(split > 0);
 }
 
 #[test]

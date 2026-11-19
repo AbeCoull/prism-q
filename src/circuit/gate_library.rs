@@ -2,7 +2,7 @@
 
 use num_complex::Complex64;
 
-use crate::circuit::openqasm::Dialect;
+use crate::circuit::openqasm::{Dialect, unsupported};
 use crate::circuit::{Instruction, SmallVec};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
@@ -146,10 +146,7 @@ pub(crate) fn resolve_gate(
         "syc" => Ok(Gate::Fused2q(Box::new(syc_matrix()))),
         "sqrt_iswap" => Ok(Gate::Fused2q(Box::new(sqrt_iswap_matrix(1.0)))),
         "sqrt_iswap_inv" => Ok(Gate::Fused2q(Box::new(sqrt_iswap_matrix(-1.0)))),
-        _ => Err(PrismError::UnsupportedConstruct {
-            construct: name.to_string(),
-            line: line_num,
-        }),
+        _ => Err(unsupported(line_num, name)),
     }
 }
 

@@ -1,7 +1,65 @@
 use super::*;
-use crate::qec::noise::compile_qec_noisy_sampler_on_compiled_base;
+use crate::qec::noise::{
+    compile_qec_noisy_sampler_on_compiled_base, lower_qec_program_to_deferred_circuit,
+};
+use crate::qec::parity_walk::compile_parity_noise;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+
+/// Compile a noisy program straight onto the detector and observable bits of
+/// `projection`: the noiseless pattern and the faults that flip it, `None` when a
+/// detector or observable is random in the noiseless circuit.
+fn compile_qec_parity_noise(
+    program: &QecProgram,
+    projection: &QecParityProjection,
+) -> Result<Option<(Vec<u64>, QecParityNoise)>> {
+    compile_qec_parity_noise_windows(program, projection, None)
+}
+
+/// [`compile_qec_parity_noise`] over a fixed number of walk windows; `None` picks it
+/// from the gate count and the thread pool. The result is the same for every count.
+fn compile_qec_parity_noise_windows(
+    program: &QecProgram,
+    projection: &QecParityProjection,
+    windows: Option<usize>,
+) -> Result<Option<(Vec<u64>, QecParityNoise)>> {
+    let deferred = lower_qec_program_to_deferred_circuit(program)?;
+    compile_parity_noise(&deferred, projection, program.options().seed, windows)
+}
+
+/// Overwrite `projected` with the output parities of the record bits in `records`.
+fn project_into(projection: &QecParityProjection, records: &[u64], projected: &mut [u64]) {
+    projected.fill(0);
+    for (word_idx, &word) in records.iter().enumerate() {
+        let mut bits = word;
+        while bits != 0 {
+            let record = word_idx * 64 + bits.trailing_zeros() as usize;
+            let outputs = &projection.record_outputs
+                [projection.record_offsets[record]..projection.record_offsets[record + 1]];
+            for &output in outputs {
+                projected[output / 64] ^= 1u64 << (output % 64);
+            }
+            bits &= bits - 1;
+        }
+    }
+}
+
+/// Projected reference records, or `None` when any flip row of `sampler` reaches an
+/// output and the noiseless parities vary between shots.
+fn constant_pattern(
+    projection: &QecParityProjection,
+    sampler: &crate::sim::compiled::CompiledSampler,
+) -> Option<Vec<u64>> {
+    let mut projected = vec![0u64; projection.words];
+    for row in sampler.flip_rows() {
+        project_into(projection, row, &mut projected);
+        if projected.iter().any(|&word| word != 0) {
+            return None;
+        }
+    }
+    project_into(projection, sampler.ref_bits_packed(), &mut projected);
+    Some(projected)
+}
 
 fn parse_dropping_records(text: &str) -> QecProgram {
     let mut program = QecProgram::from_text(text).unwrap();
@@ -54,7 +112,7 @@ fn constant_pattern_exists_only_for_fixed_parities() {
             sampler.detector_rows(),
             sampler.observable_rows(),
         );
-        let pattern = projection.constant_pattern(sampler.measurement_sampler());
+        let pattern = constant_pattern(&projection, sampler.measurement_sampler());
         assert_eq!(pattern, expected, "{text}");
     }
 }
@@ -118,7 +176,7 @@ DETECTOR rec[-1]",
             &program.observable_rows().unwrap(),
         );
         let sampler = compile_qec_noisy_sampler_on_compiled_base(&program).unwrap();
-        let expected = projection.constant_pattern(sampler.compiled_base().unwrap());
+        let expected = constant_pattern(&projection, sampler.compiled_base());
         let pattern = compile_qec_parity_noise(&program, &projection)
             .unwrap()
             .map(|(pattern, _)| pattern);
@@ -205,7 +263,7 @@ fn parity_compile_matches_the_record_sampler_on_random_clifford_programs() {
             &program.observable_rows().unwrap(),
         );
         let sampler = compile_qec_noisy_sampler_on_compiled_base(&program).unwrap();
-        let expected = projection.constant_pattern(sampler.compiled_base().unwrap());
+        let expected = constant_pattern(&projection, sampler.compiled_base());
         let compiled = compile_qec_parity_noise(&program, &projection).unwrap();
         let pattern = compiled.as_ref().map(|(pattern, _)| pattern.clone());
         assert_eq!(pattern, expected, "{text}");

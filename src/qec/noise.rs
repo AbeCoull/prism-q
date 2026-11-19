@@ -3,8 +3,6 @@
 //! and the density-matrix lowering for noisy `EXP_VAL` estimation.
 
 use super::leakage::{QecDeferredLeakEvent, push_deferred_leak_event};
-#[cfg(test)]
-use super::runner::QecParityProjection;
 use super::{
     QecBasis, QecNoise, QecOp, QecPauli, QecProgram, append_basis_to_z_rotation,
     append_mpp_parity_rotations, append_z_to_basis_rotation, ensure_lowered_record_count,
@@ -190,23 +188,13 @@ impl QecDeferredProgram {
 }
 
 pub(super) struct QecCompiledNoiseSampler {
-    base: QecRecordBase,
+    /// Packed records of one noiseless run with every random outcome 0, where a records
+    /// sample starts. The frame walk spreads it over the noiseless outcome space with a
+    /// fair-coin Z at the birth of every alias whose Z can flip a record.
+    reference: Vec<u64>,
     noise: Option<QecRecordNoise>,
     feedforward: Option<QecFeedforwardFlips>,
     num_measurements: usize,
-}
-
-/// Where a records sample starts before the frame walk lands on it.
-enum QecRecordBase {
-    /// Packed records of one noiseless run with every random outcome 0. The frame walk
-    /// spreads it over the noiseless outcome space with a fair-coin Z at the birth of
-    /// every alias whose Z can flip a record.
-    Reference(Vec<u64>),
-    /// Compiled sampler over the deferred circuit, whose draws already cover the
-    /// noiseless outcome space, so the frame walk carries faults alone. Kept to compare the
-    /// reference base against in distribution.
-    #[cfg(test)]
-    Compiled(Box<CompiledSampler>),
 }
 
 /// Record flips of a program's Pauli feed-forward corrections, applied in op order
@@ -556,34 +544,13 @@ fn land_buckets(
 }
 
 impl QecCompiledNoiseSampler {
-    /// Packed reference records the sampler starts from, `None` on the compiled base.
+    /// Packed reference records the sampler starts from.
     pub(super) fn reference_records(&self) -> Option<&[u64]> {
-        match &self.base {
-            QecRecordBase::Reference(records) => Some(records),
-            #[cfg(test)]
-            QecRecordBase::Compiled(_) => None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn compiled_base(&self) -> Option<&CompiledSampler> {
-        match &self.base {
-            QecRecordBase::Compiled(sampler) => Some(sampler.as_ref()),
-            QecRecordBase::Reference(_) => None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn feedforward(&self) -> Option<&QecFeedforwardFlips> {
-        self.feedforward.as_ref()
+        Some(&self.reference)
     }
 
     /// Restart every stream as a sampler compiled with `seed` starts it.
     pub(super) fn reseed(&mut self, seed: u64) {
-        #[cfg(test)]
-        if let QecRecordBase::Compiled(sampler) = &mut self.base {
-            sampler.reseed(seed);
-        }
         if let Some(noise) = &mut self.noise {
             noise.seed = seed;
             noise.cached_unit = None;
@@ -597,16 +564,7 @@ impl QecCompiledNoiseSampler {
         num_shots: usize,
         total_shots: usize,
     ) -> Result<PackedShots> {
-        #[allow(clippy::infallible_destructuring_match)]
-        let reference = match &mut self.base {
-            QecRecordBase::Reference(records) => records,
-            #[cfg(test)]
-            QecRecordBase::Compiled(sampler) => {
-                let measurements = sampler.try_sample_bulk_packed(num_shots)?;
-                return self.apply_noise_to_measurements(measurements, first_shot, total_shots);
-            }
-        };
-        let mut data = broadcast_records(reference, self.num_measurements, num_shots);
+        let mut data = broadcast_records(&self.reference, self.num_measurements, num_shots);
         if num_shots > 0 {
             if let Some(noise) = &mut self.noise {
                 noise.apply(
@@ -629,19 +587,13 @@ impl QecCompiledNoiseSampler {
     }
 
     /// Noiseless records of a `num_shots`-shot run: the reference with the birth coins
-    /// landed, or the compiled base's draw.
+    /// landed.
     #[cfg(feature = "bench-internal")]
     pub(super) fn sample_noiseless_measurements_packed(
         &mut self,
         num_shots: usize,
     ) -> Result<PackedShots> {
-        #[allow(clippy::infallible_destructuring_match)]
-        let reference = match &mut self.base {
-            QecRecordBase::Reference(records) => records,
-            #[cfg(test)]
-            QecRecordBase::Compiled(sampler) => return sampler.try_sample_bulk_packed(num_shots),
-        };
-        let mut data = broadcast_records(reference, self.num_measurements, num_shots);
+        let mut data = broadcast_records(&self.reference, self.num_measurements, num_shots);
         if let Some(noise) = &mut self.noise
             && num_shots > 0
         {
@@ -1800,34 +1752,73 @@ pub(super) fn compile_qec_noisy_sampler(program: &QecProgram) -> Result<QecCompi
     let reference = reference?
         .expect("the deferred lowering admits Clifford gates only, so the reference run exists");
     Ok(QecCompiledNoiseSampler {
-        base: QecRecordBase::Reference(reference),
+        reference,
         noise,
         feedforward,
         num_measurements,
     })
 }
 
-/// [`compile_qec_noisy_sampler`] on a compiled sampler over the deferred circuit, the
-/// base before the reference run took its place.
+/// Record sampler over a compiled sampler of the deferred circuit, whose draws already
+/// cover the noiseless outcome space, so the frame walk carries faults alone: the base
+/// before the reference run took its place, kept to compare it against in distribution.
+#[cfg(test)]
+pub(super) struct QecCompiledBaseSampler {
+    base: CompiledSampler,
+    /// Noise and feed-forward over the base's draws; its reference is empty and unread.
+    records: QecCompiledNoiseSampler,
+}
+
+#[cfg(test)]
+impl QecCompiledBaseSampler {
+    pub(super) fn compiled_base(&self) -> &CompiledSampler {
+        &self.base
+    }
+
+    pub(super) fn feedforward(&self) -> Option<&QecFeedforwardFlips> {
+        self.records.feedforward.as_ref()
+    }
+
+    pub(super) fn reseed(&mut self, seed: u64) {
+        self.base.reseed(seed);
+        self.records.reseed(seed);
+    }
+
+    pub(super) fn sample_measurements_packed(
+        &mut self,
+        first_shot: usize,
+        num_shots: usize,
+        total_shots: usize,
+    ) -> Result<PackedShots> {
+        let measurements = self.base.try_sample_bulk_packed(num_shots)?;
+        self.records
+            .apply_noise_to_measurements(measurements, first_shot, total_shots)
+    }
+}
+
+/// [`compile_qec_noisy_sampler`] on a compiled sampler over the deferred circuit.
 #[cfg(test)]
 pub(super) fn compile_qec_noisy_sampler_on_compiled_base(
     program: &QecProgram,
-) -> Result<QecCompiledNoiseSampler> {
+) -> Result<QecCompiledBaseSampler> {
     if program.has_leakage() {
         return Err(super::leakage::leakage_rejection(
             "QEC record-noise sampler",
         ));
     }
     let deferred = lower_qec_program_to_deferred_circuit_inner(program, false, true)?;
-    let noiseless = compile_measurements(&deferred.to_circuit(), program.options().seed)?;
+    let base = compile_measurements(&deferred.to_circuit(), program.options().seed)?;
     let num_measurements = deferred.measurement_qubits.len();
     let feedforward = QecFeedforwardFlips::compile(&deferred);
     let noise = QecRecordNoise::compile(deferred, program.options().seed, false)?;
-    Ok(QecCompiledNoiseSampler {
-        base: QecRecordBase::Compiled(Box::new(noiseless)),
-        noise,
-        feedforward,
-        num_measurements,
+    Ok(QecCompiledBaseSampler {
+        base,
+        records: QecCompiledNoiseSampler {
+            reference: Vec::new(),
+            noise,
+            feedforward,
+            num_measurements,
+        },
     })
 }
 
@@ -2602,36 +2593,6 @@ fn qec_deferred_noise_target(
         return Ok(None);
     }
     Ok(Some(alias))
-}
-
-/// Compile a noisy program straight onto the detector and observable bits of
-/// `projection`: the noiseless pattern and the faults that flip it. `None` when a
-/// detector or observable is random in the noiseless circuit, which the record path
-/// then samples.
-///
-/// Events, branch rates and draw order match [`QecCompiledNoiseSampler`], so sampling
-/// stays bit-identical to projecting its record flips. Nothing here grows with records
-/// times gates or records times events: the walk carries one Pauli row per output
-/// still live at its position, and an event stores the output indices its branches
-/// flip.
-#[cfg(test)]
-pub(super) fn compile_qec_parity_noise(
-    program: &QecProgram,
-    projection: &QecParityProjection,
-) -> Result<Option<(Vec<u64>, QecParityNoise)>> {
-    compile_qec_parity_noise_windows(program, projection, None)
-}
-
-/// [`compile_qec_parity_noise`] over a fixed number of walk windows; `None` picks it
-/// from the gate count and the thread pool. The result is the same for every count.
-#[cfg(test)]
-pub(super) fn compile_qec_parity_noise_windows(
-    program: &QecProgram,
-    projection: &QecParityProjection,
-    windows: Option<usize>,
-) -> Result<Option<(Vec<u64>, QecParityNoise)>> {
-    let deferred = lower_qec_program_to_deferred_circuit(program)?;
-    super::parity_walk::compile_parity_noise(&deferred, projection, program.options().seed, windows)
 }
 
 /// Draw one single-qubit Pauli event over `num_shots` shots, calling `flip(shot, branch)`

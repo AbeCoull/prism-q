@@ -1230,6 +1230,7 @@ fn clifford_t_price_rows_pin_their_engines() {
         ("layers_24q_t24", price_layers(24, 24)),
         ("layers_26q_t24", price_layers(26, 24)),
         ("scrambled_22q_t20", price_scrambled(22, 20)),
+        ("scrambled_26q_t30", price_scrambled(26, 30)),
         ("layers_20q_t40", price_layers(20, 40)),
         ("distinct_17q_t16", price_distinct()),
     ];

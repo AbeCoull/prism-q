@@ -102,11 +102,11 @@ fn shots_with_t_bypass_statevector_qubit_cap_terminal() {
     assert_eq!(auto_result.shots.len(), 8);
 }
 
-// The split admits any register whose parts fit, so only an excess rotation that links 25
+// The split admits any register whose parts fit, so only an excess rotation that links 27
 // register qubits into one unit, past the widest table, declines it.
 #[test]
 fn shots_decline_a_register_unit_past_its_cap() {
-    let width = 25;
+    let width = 27;
     let mut c = Circuit::new(width + 1, width + 1);
     for q in 0..width {
         c.add_gate(Gate::H, &[q]);

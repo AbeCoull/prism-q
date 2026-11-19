@@ -274,9 +274,10 @@ Clifford gates cost O(n²) for all branches together and each T gate doubles the
   the kept norm into a fidelity floor. A register past 20 qubits is refused.
 - Terminal shots run on the same tableau in the product gauge, split into parts
   (`src/sim/clifford_split.rs`): qubits an excess rotation links, joined where the
-  measured rows fail to commute part by part. A part of up to 24 qubits is one dense
-  table; a wider one, or one past 20 that pays few row pairs, is cut in two sides of at
-  most 20 that no rotation crosses. The sides are drawn apart, then each shot corrects the
+  measured rows fail to commute part by part. A part of up to 26 qubits is one dense
+  table; a wider one, one past 20 that pays few row pairs, or one past 24 whose cut
+  prices below its table, is cut in two sides of at most 20 that no rotation crosses.
+  The sides are drawn apart, then each shot corrects the
   draw over the row pairs across the cut, at most 12. Up to 64 register qubits in all. Small tables are packed, each shot
   reads a fixed count of words from one ChaCha8 stream per 256 shots, and every drawn bit
   carries a precomputed classical key. Shots with mid-circuit measurement keep coherent

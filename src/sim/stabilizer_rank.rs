@@ -1135,8 +1135,8 @@ pub(super) fn sample_mps_branches_online(
 ///
 /// Terminal measurements of a unitary circuit are drawn from a Clifford tableau over a
 /// register holding only the qubits the T gates reach, split into independent parts: a
-/// part of up to 24 qubits is held as one dense table, a wider one cut in two sides of at
-/// most 20, up to 64 register qubits in all. A circuit whose register does not split that
+/// part is held as one dense table of up to 26 qubits or cut in two sides of at most 20,
+/// up to 64 register qubits in all. A circuit whose register does not split that
 /// way returns `BackendUnsupported`. A circuit with mid-circuit measurements, guards or
 /// resets takes the same register once its measurements move to the end, which holds when
 /// every guard applies a Pauli and no gate reuses a measured qubit before a reset.
@@ -1166,7 +1166,7 @@ pub fn run_stabilizer_rank_shots(
             return Err(PrismError::BackendUnsupported {
                 backend: "stabilizer_rank".into(),
                 operation: "terminal sampling with a Clifford register that does not split \
-                            into parts of at most 24 qubits, or cuts of at most 20 a side"
+                            into parts of at most 26 qubits, or cuts of at most 20 a side"
                     .into(),
             });
         };

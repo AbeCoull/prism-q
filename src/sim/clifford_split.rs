@@ -13,6 +13,7 @@ use super::{
 use crate::backend::simd::walsh_hadamard;
 use crate::circuit::Circuit;
 use crate::error::Result;
+use crate::limits::ResolvedLimits;
 use crate::sim::shots::{draws_split_across_workers, sample_in_shot_blocks};
 
 /// Admission limits of the split register. Each one decides which circuits the register
@@ -23,7 +24,10 @@ pub(super) struct SplitLimits {
     pack_bits: usize,
     /// Widest part held whole before a cut is tried.
     whole_width: usize,
-    /// Widest part held whole at all: one table of `2^width` entries.
+    /// Widest part held whole ahead of any cut past `cheap_pairs`.
+    whole_first_width: usize,
+    /// Widest part held whole at all: one table of `2^width` entries. A part wider than
+    /// `whole_first_width` takes a cut past `cheap_pairs` when the cut prices lower.
     table_width: usize,
     side_width: usize,
     /// Most row pairs across a cut taken ahead of a whole part up to `table_width`.
@@ -32,7 +36,8 @@ pub(super) struct SplitLimits {
     /// a cut with `E` pairs.
     max_pairs: usize,
     max_anchors: usize,
-    /// `log2` of the most amplitudes summed over whole parts and cut sides.
+    /// `log2` of the most amplitudes summed over whole parts and cut sides, lowered to the
+    /// statevector cap of the process limits.
     total_log2: usize,
 }
 
@@ -40,17 +45,19 @@ pub(super) struct SplitLimits {
 pub(super) const SPLIT_LIMITS: SplitLimits = SplitLimits {
     pack_bits: 12,
     whole_width: 20,
-    table_width: 24,
+    whole_first_width: 24,
+    table_width: 26,
     side_width: 20,
     cheap_pairs: 7,
     max_pairs: 12,
     max_anchors: 64,
-    total_log2: 25,
+    total_log2: 27,
 };
 #[cfg(prism_lowered_thresholds)]
 pub(super) const SPLIT_LIMITS: SplitLimits = SplitLimits {
     pack_bits: 2,
     whole_width: 2,
+    whole_first_width: 3,
     table_width: 3,
     side_width: 2,
     cheap_pairs: 1,
@@ -347,6 +354,14 @@ impl SplitPlan {
         for mask in canonical_parts(&units, &forms) {
             let width = mask.count_ones() as usize;
             let rank = piece_rank(&basis, mask);
+            let excess: Vec<usize> = (0..gauge.excess.len())
+                .filter(|&i| {
+                    let (p, _) = gauge.excess[i];
+                    (p.x | p.z) & mask != 0
+                })
+                .collect();
+            let walsh_work = walsh_readout_work(rank, excess.len());
+            let dense_work = dense_readout_work(width, rank, excess.len());
             let cut = if width <= limits.whole_width {
                 None
             } else {
@@ -360,8 +375,15 @@ impl SplitPlan {
                     .filter(|c| c.left_width.max(c.right_width) <= limits.side_width);
                 match cut {
                     Some(c) if c.pairs <= limits.cheap_pairs => Some(c),
+                    _ if width <= limits.whole_first_width => None,
+                    Some(c)
+                        if c.pairs <= limits.max_pairs
+                            && (width > limits.table_width
+                                || (c.work as f64) < walsh_work.min(dense_work)) =>
+                    {
+                        Some(c)
+                    }
                     _ if width <= limits.table_width => None,
-                    Some(c) if c.pairs <= limits.max_pairs => Some(c),
                     _ => return Ok(None),
                 }
             };
@@ -369,16 +391,7 @@ impl SplitPlan {
                 None => 1u128 << width,
                 Some(c) => (1u128 << c.left_width) + (1u128 << c.right_width),
             };
-            let excess: Vec<usize> = (0..gauge.excess.len())
-                .filter(|&i| {
-                    let (p, _) = gauge.excess[i];
-                    (p.x | p.z) & mask != 0
-                })
-                .collect();
-            let walsh = cut.is_none()
-                && rank > 0
-                && walsh_readout_work(rank, excess.len())
-                    < dense_readout_work(width, rank, excess.len());
+            let walsh = cut.is_none() && rank > 0 && walsh_work < dense_work;
             parts.push(Part {
                 mask,
                 excess,
@@ -387,7 +400,8 @@ impl SplitPlan {
                 walsh,
             });
         }
-        if amplitudes > 1u128 << limits.total_log2 {
+        let cap = ResolvedLimits::process_default().statevector_qubits.value;
+        if amplitudes > 1u128 << limits.total_log2.min(cap) {
             return Ok(None);
         }
         Ok(Some(Self {

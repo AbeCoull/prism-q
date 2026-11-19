@@ -2,6 +2,23 @@
 
 use super::*;
 
+/// A `mutable` array argument's source array and the offsets its elements came from.
+type ArrayWriteBack = (String, Vec<usize>);
+
+/// What the arguments of one inlined `def` call bind, gathered before its body runs.
+#[derive(Default)]
+struct DefArguments<'a> {
+    bindings: HashMap<&'a str, ClassicalValue>,
+    symbolic: Vec<&'a str>,
+    /// Arguments a runtime call passes as runtime values.
+    scalar_args: Vec<(&'a str, ClassicalType, ClassicalExpr)>,
+    durations: HashMap<&'a str, Timed>,
+    complex: HashMap<&'a str, Complex64>,
+    array_args: Vec<(&'a str, Rc<ClassicalArray>, Option<ArrayWriteBack>)>,
+    qubit_bindings: Vec<(&'a str, SmallVec<[usize; 4]>)>,
+    bit_bindings: Vec<(&'a str, SmallVec<[usize; 4]>)>,
+}
+
 impl<'a> Parser<'a> {
     pub(super) fn exec_call(
         &mut self,
@@ -599,327 +616,500 @@ impl<'a> Parser<'a> {
 
         let copied = 2 * def.constants.len() + def.arrays.len() + args.len();
         self.charge(copied, line)?;
-        let mut bindings = HashMap::new();
-        let mut symbolic = Vec::new();
         let runtime = self.def_is_runtime(name, &def.args, args);
-        let mut scalar_args = Vec::new();
-        let mut durations = HashMap::new();
-        let mut complex = HashMap::new();
-        let mut array_args = Vec::new();
+        let mut arguments = self.bind_def_arguments(name, def, args, runtime, line)?;
+        let frame = self.def_frame(name, def, result, &arguments.bit_bindings, line)?;
+        let scalar_args = std::mem::take(&mut arguments.scalar_args);
+        let (mut sub, write_backs) = self.def_subparser(def, arguments, frame);
+        if runtime {
+            let value = self.execute_runtime_def(name, def, sub, scalar_args, line)?;
+            return Ok((Vec::new(), value));
+        }
+        for param in &def.args {
+            if let DefParam::Value { name, ty, width } = param {
+                let kind = sub.classical_type(ty, width.as_ref(), line)?;
+                Rc::make_mut(&mut sub.cregs).remove(name);
+                Rc::make_mut(&mut sub.aliases).remove(name);
+                sub.params.remove(name);
+                Rc::make_mut(&mut sub.classical).insert(
+                    name,
+                    ClassicalDecl {
+                        ty: kind,
+                        constant: false,
+                        value: None,
+                    },
+                );
+            }
+        }
+        let instructions = sub.execute(&def.body)?;
+        self.write_back_arrays(&sub, write_backs);
+        let frame = sub.def_result.expect("installed above");
+        if sub.exit == Some(Exit::End) {
+            self.exec_end(line)?;
+            let value = frame.value.or_else(|| {
+                def.result
+                    .is_some()
+                    .then_some(Expr::Number(ClassicalValue::Int(0)))
+            });
+            return Ok((instructions, value));
+        }
+        if def.local.is_some() {
+            self.charge(frame.bits.len(), line)?;
+            let mut initialized = frame.bits.iter().map(|&bit| (bit, false)).collect();
+            if self.returned_bits_need_initialization(&instructions, &mut initialized, line)?
+                || initialized.values().any(|initialized| !initialized)
+            {
+                return Err(unsupported(
+                    line,
+                    format!(
+                        "an initializer on the bit returned by def `{name}`; use `parse_dynamic`"
+                    ),
+                ));
+            }
+        }
+        if def.result.is_some() && !frame.returned {
+            return Err(parse_error(
+                line,
+                format!("def `{name}` reaches its end without a result"),
+            ));
+        }
+        Ok((instructions, frame.value))
+    }
+
+    /// Bind each argument of a call to def `name`, in declaration order, with the
+    /// def's constants seeded first.
+    fn bind_def_arguments(
+        &self,
+        name: &str,
+        def: &DefDefinition<'a>,
+        args: &[Argument],
+        runtime: bool,
+        line: usize,
+    ) -> Result<DefArguments<'a>> {
+        let mut bound = DefArguments::default();
         for (&name, decl) in def.constants.iter() {
             match decl.value {
                 Some(ConstValue::Number(value)) => {
-                    bindings.insert(name, value);
+                    bound.bindings.insert(name, value);
                 }
                 Some(ConstValue::Complex(value)) => {
-                    complex.insert(name, value);
+                    bound.complex.insert(name, value);
                 }
                 Some(ConstValue::Duration(value)) => {
-                    durations.insert(name, value);
+                    bound.durations.insert(name, value);
                 }
                 None => {}
             }
         }
-        let mut qubit_bindings: Vec<(&'a str, SmallVec<[usize; 4]>)> = Vec::new();
         let mut bound_qubits = HashSet::new();
-        let mut bit_bindings: Vec<(&'a str, SmallVec<[usize; 4]>)> = Vec::new();
         for (slot, argument) in def.args.iter().zip(args) {
             match slot {
                 DefParam::Qubit {
                     name: param_name,
                     width,
-                } => {
-                    let param_name = *param_name;
-                    let operand = match argument {
-                        Argument::Operand(operand) => operand.clone(),
-                        Argument::Value(expr) => {
-                            let Some(register) = expr.as_ident() else {
-                                return Err(parse_error(
-                                    line,
-                                    format!(
-                                        "def `{name}` qubit parameter `{param_name}` needs a \
-                                         qubit, not an expression"
-                                    ),
-                                ));
-                            };
-                            Operand {
-                                name: OperandName::Register(register),
-                                index: None,
-                                line,
-                            }
-                        }
-                    };
-                    let qubits = self.qubits_of(&operand)?;
-                    self.charge(qubits.len(), line)?;
-                    let wanted = match width {
-                        Some(width) => self.integer_of(width, line)?,
-                        None => 1,
-                    };
-                    if wanted <= 0 || qubits.len() as i64 != wanted {
-                        return Err(parse_error(
-                            line,
-                            format!(
-                                "def `{name}` qubit parameter `{param_name}` takes {wanted} qubit(s), got {}",
-                                qubits.len()
-                            ),
-                        ));
-                    }
-                    if qubits.iter().any(|&qubit| !bound_qubits.insert(qubit)) {
-                        return Err(parse_error(
-                            line,
-                            format!("def `{name}` passes a qubit more than once"),
-                        ));
-                    }
-                    qubit_bindings.push((param_name, qubits));
-                }
+                } => self.bind_qubit_param(
+                    name,
+                    param_name,
+                    width.as_ref(),
+                    argument,
+                    &mut bound_qubits,
+                    &mut bound,
+                    line,
+                )?,
                 DefParam::Value {
                     name: param_name,
                     ty,
                     width,
-                } => {
-                    let param_name = *param_name;
-                    let element = self.element_argument(argument);
-                    let expr = match (argument, &element) {
-                        (_, Some(element)) => element,
-                        (Argument::Value(expr), None) => expr,
-                        (Argument::Operand(_), None) => {
-                            return Err(parse_error(
-                                line,
-                                format!("def `{name}` parameter `{param_name}` takes a value"),
-                            ));
-                        }
-                    };
-                    let kind = self.classical_type(ty, width.as_ref(), line)?;
-                    // An `input` passes through as its tag, which the body reads
-                    // only as a gate angle. An angle parameter keeps it unwrapped,
-                    // as a bound `input angle` is.
-                    if let Some(input) = self.symbol_in(expr) {
-                        if !matches!(
-                            kind,
-                            ClassicalType::Float(64 | 128) | ClassicalType::Angle(None)
-                        ) {
-                            return Err(self.symbol_error(
-                                input,
-                                &format!(
-                                    "as `def {name}` parameter `{param_name}`, whose type rounds it"
-                                ),
-                                line,
-                            ));
-                        }
-                        bindings.insert(
-                            param_name,
-                            ClassicalValue::Float(self.fold_angle(expr, line)?),
-                        );
-                        symbolic.push(param_name);
-                        continue;
-                    }
-                    if let ClassicalType::Complex(_) = kind {
-                        if runtime {
-                            return Err(super::dynamic::runtime_complex(line));
-                        }
-                        complex.insert(param_name, self.complex_of(expr, line)?);
-                        continue;
-                    }
-                    if runtime {
-                        let lowered = match self.lower_expr(expr, line)? {
-                            ClassicalExpr::Const(_) => {
-                                ClassicalExpr::Const(self.fold_typed(kind, expr, line)?)
-                            }
-                            value => value,
-                        };
-                        scalar_args.push((param_name, kind, lowered));
-                    } else {
-                        bindings.insert(param_name, self.fold_typed(kind, expr, line)?);
-                    }
-                }
+                } => self.bind_value_param(
+                    name,
+                    param_name,
+                    ty,
+                    width.as_ref(),
+                    argument,
+                    runtime,
+                    &mut bound,
+                    line,
+                )?,
                 DefParam::Duration(param_name) => {
-                    let Argument::Value(expr) = argument else {
-                        return Err(parse_error(
-                            line,
-                            format!("def `{name}` parameter `{param_name}` takes a duration"),
-                        ));
-                    };
-                    let expr = self.with_durationof(expr, line)?;
-                    let value = timed_of(
-                        &expr,
-                        line,
-                        self.param_vars.as_ref(),
-                        &self.durations,
-                        &self.arrays,
-                    )?;
-                    if let Timed::Number(number) = value {
-                        return Err(parse_error(
-                            line,
-                            format!(
-                                "def `{name}` parameter `{param_name}` takes a duration, got {number}"
-                            ),
-                        ));
-                    }
-                    durations.insert(param_name, value);
+                    self.bind_duration_param(name, param_name, argument, &mut bound, line)?
                 }
                 DefParam::Bit {
                     name: param_name,
                     width,
-                } => {
-                    if runtime
-                        && let Some((size, value)) = self.runtime_bit_argument(argument, line)?
-                    {
-                        let wanted = width
-                            .as_ref()
-                            .map(|width| self.integer_of(width, line))
-                            .transpose()?
-                            .unwrap_or(1);
-                        if size as i64 != wanted {
-                            return Err(parse_error(
-                                line,
-                                format!(
-                                    "def `{name}` bit parameter `{param_name}` takes {wanted} bit(s), got {size}"
-                                ),
-                            ));
-                        }
-                        scalar_args.push((
-                            *param_name,
-                            ClassicalType::Int(RuntimeType::Uint { width: size as u32 }),
-                            value,
-                        ));
-                        continue;
-                    }
-                    let operand = match argument {
-                        Argument::Operand(operand) => operand.clone(),
-                        Argument::Value(expr) => match expr.as_ident() {
-                            Some(register) => Operand {
-                                name: OperandName::Register(register),
-                                index: None,
-                                line,
-                            },
-                            None => {
-                                return Err(parse_error(
-                                    line,
-                                    format!(
-                                        "def `{name}` bit parameter `{param_name}` needs a bit, \
-                                         not an expression"
-                                    ),
-                                ));
-                            }
-                        },
-                    };
-                    let bits = self.bits_of(&operand)?;
-                    let wanted = match width {
-                        Some(width) => self.integer_of(width, line)?,
-                        None => 1,
-                    };
-                    if bits.len() as i64 != wanted {
-                        return Err(parse_error(
-                            line,
-                            format!(
-                                "def `{name}` bit parameter `{param_name}` takes {wanted} bit(s), \
-                                 got {}",
-                                bits.len()
-                            ),
-                        ));
-                    }
-                    if runtime {
-                        let value = super::dynamic::bits_value(&bits, line)?;
-                        let kind = RuntimeType::Uint {
-                            width: bits.len() as u32,
-                        };
-                        scalar_args.push((*param_name, ClassicalType::Int(kind), value));
-                    } else {
-                        bit_bindings.push((param_name, bits));
-                    }
-                }
+                } => self.bind_bit_param(
+                    name,
+                    param_name,
+                    width.as_ref(),
+                    argument,
+                    runtime,
+                    &mut bound,
+                    line,
+                )?,
                 DefParam::Array {
                     name: param_name,
                     mutable,
                     ty,
                     width,
                     shape,
-                } => {
-                    let reference = match argument {
-                        Argument::Value(expr) => expr.clone(),
-                        Argument::Operand(operand) => operand_reference(operand)?,
-                    };
-                    let (source, indices) = match &reference {
-                        Expr::Ident(source) => (*source, &[][..]),
-                        Expr::Element(element) => (element.array, element.indices.as_slice()),
-                        _ => ("", &[][..]),
-                    };
-                    let Some(array) = self.arrays.get(source) else {
-                        return Err(parse_error(
-                            line,
-                            format!(
-                                "def `{name}` parameter `{param_name}` takes an array, got \
-                                 `{reference}`"
-                            ),
-                        ));
-                    };
-                    let kind = self.array_kind(ty, width.as_ref(), line)?;
-                    if kind != array.ty {
-                        return Err(parse_error(
-                            line,
-                            format!(
-                                "def `{name}` parameter `{param_name}` takes `{ty}` elements, \
-                                 which `{source}` does not hold"
-                            ),
-                        ));
-                    }
-                    let view = array_view(array, source, indices, line, |index| {
-                        self.typed_of(index, line)
-                    })?;
-                    let fits = match shape {
-                        ArrayShape::Sized(dims) => {
-                            let wanted = dims
-                                .iter()
-                                .map(|size| self.integer_of(size, line))
-                                .collect::<Result<Vec<_>>>()?;
-                            wanted.len() == view.dims.len()
-                                && wanted
-                                    .iter()
-                                    .zip(&view.dims)
-                                    .all(|(&wanted, &size)| wanted == size as i64)
-                        }
-                        ArrayShape::Rank(rank) => {
-                            self.integer_of(rank, line)? == view.dims.len() as i64
-                        }
-                    };
-                    if !fits {
-                        return Err(parse_error(
-                            line,
-                            format!(
-                                "def `{name}` parameter `{param_name}` cannot take `{reference}`, \
-                                 whose shape is {:?}",
-                                view.dims
-                            ),
-                        ));
-                    }
-                    if *mutable && array.constant {
-                        return Err(parse_error(
-                            line,
-                            format!("`{source}` is `const` and cannot pass as a `mutable` array"),
-                        ));
-                    }
-                    if *mutable && runtime {
-                        return Err(unsupported(
-                            line,
-                            format!(
-                                "a `mutable` array argument to def `{name}`, whose call runs \
-                                 at runtime"
-                            ),
-                        ));
-                    }
-                    self.charge(view.offsets.len(), line)?;
-                    let bound = ClassicalArray {
-                        ty: kind,
-                        constant: !*mutable,
-                        dims: view.dims,
-                        values: view.offsets.iter().map(|&at| array.values[at]).collect(),
-                    };
-                    let write_back = mutable.then(|| (source.to_string(), view.offsets));
-                    array_args.push((*param_name, Rc::new(bound), write_back));
-                }
+                } => self.bind_array_param(
+                    name,
+                    param_name,
+                    *mutable,
+                    ty,
+                    width.as_ref(),
+                    shape,
+                    argument,
+                    runtime,
+                    &mut bound,
+                    line,
+                )?,
             }
         }
+        Ok(bound)
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    fn bind_qubit_param(
+        &self,
+        name: &str,
+        param_name: &'a str,
+        width: Option<&Expr>,
+        argument: &Argument,
+        bound_qubits: &mut HashSet<usize>,
+        bound: &mut DefArguments<'a>,
+        line: usize,
+    ) -> Result<()> {
+        let operand = match argument {
+            Argument::Operand(operand) => operand.clone(),
+            Argument::Value(expr) => {
+                let Some(register) = expr.as_ident() else {
+                    return Err(parse_error(
+                        line,
+                        format!(
+                            "def `{name}` qubit parameter `{param_name}` needs a \
+                             qubit, not an expression"
+                        ),
+                    ));
+                };
+                Operand {
+                    name: OperandName::Register(register),
+                    index: None,
+                    line,
+                }
+            }
+        };
+        let qubits = self.qubits_of(&operand)?;
+        self.charge(qubits.len(), line)?;
+        let wanted = match width {
+            Some(width) => self.integer_of(width, line)?,
+            None => 1,
+        };
+        if wanted <= 0 || qubits.len() as i64 != wanted {
+            return Err(parse_error(
+                line,
+                format!(
+                    "def `{name}` qubit parameter `{param_name}` takes {wanted} qubit(s), got {}",
+                    qubits.len()
+                ),
+            ));
+        }
+        if qubits.iter().any(|&qubit| !bound_qubits.insert(qubit)) {
+            return Err(parse_error(
+                line,
+                format!("def `{name}` passes a qubit more than once"),
+            ));
+        }
+        bound.qubit_bindings.push((param_name, qubits));
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_value_param(
+        &self,
+        name: &str,
+        param_name: &'a str,
+        ty: &str,
+        width: Option<&Expr>,
+        argument: &Argument,
+        runtime: bool,
+        bound: &mut DefArguments<'a>,
+        line: usize,
+    ) -> Result<()> {
+        let element = self.element_argument(argument);
+        let expr = match (argument, &element) {
+            (_, Some(element)) => element,
+            (Argument::Value(expr), None) => expr,
+            (Argument::Operand(_), None) => {
+                return Err(parse_error(
+                    line,
+                    format!("def `{name}` parameter `{param_name}` takes a value"),
+                ));
+            }
+        };
+        let kind = self.classical_type(ty, width, line)?;
+        // An `input` passes through as its tag, which the body reads
+        // only as a gate angle. An angle parameter keeps it unwrapped,
+        // as a bound `input angle` is.
+        if let Some(input) = self.symbol_in(expr) {
+            if !matches!(
+                kind,
+                ClassicalType::Float(64 | 128) | ClassicalType::Angle(None)
+            ) {
+                return Err(self.symbol_error(
+                    input,
+                    &format!("as `def {name}` parameter `{param_name}`, whose type rounds it"),
+                    line,
+                ));
+            }
+            bound.bindings.insert(
+                param_name,
+                ClassicalValue::Float(self.fold_angle(expr, line)?),
+            );
+            bound.symbolic.push(param_name);
+            return Ok(());
+        }
+        if let ClassicalType::Complex(_) = kind {
+            if runtime {
+                return Err(super::dynamic::runtime_complex(line));
+            }
+            bound
+                .complex
+                .insert(param_name, self.complex_of(expr, line)?);
+            return Ok(());
+        }
+        if runtime {
+            let lowered = match self.lower_expr(expr, line)? {
+                ClassicalExpr::Const(_) => ClassicalExpr::Const(self.fold_typed(kind, expr, line)?),
+                value => value,
+            };
+            bound.scalar_args.push((param_name, kind, lowered));
+        } else {
+            bound
+                .bindings
+                .insert(param_name, self.fold_typed(kind, expr, line)?);
+        }
+        Ok(())
+    }
+
+    fn bind_duration_param(
+        &self,
+        name: &str,
+        param_name: &'a str,
+        argument: &Argument,
+        bound: &mut DefArguments<'a>,
+        line: usize,
+    ) -> Result<()> {
+        let Argument::Value(expr) = argument else {
+            return Err(parse_error(
+                line,
+                format!("def `{name}` parameter `{param_name}` takes a duration"),
+            ));
+        };
+        let expr = self.with_durationof(expr, line)?;
+        let value = timed_of(
+            &expr,
+            line,
+            self.param_vars.as_ref(),
+            &self.durations,
+            &self.arrays,
+        )?;
+        if let Timed::Number(number) = value {
+            return Err(parse_error(
+                line,
+                format!("def `{name}` parameter `{param_name}` takes a duration, got {number}"),
+            ));
+        }
+        bound.durations.insert(param_name, value);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_bit_param(
+        &self,
+        name: &str,
+        param_name: &'a str,
+        width: Option<&Expr>,
+        argument: &Argument,
+        runtime: bool,
+        bound: &mut DefArguments<'a>,
+        line: usize,
+    ) -> Result<()> {
+        if runtime && let Some((size, value)) = self.runtime_bit_argument(argument, line)? {
+            let wanted = width
+                .map(|width| self.integer_of(width, line))
+                .transpose()?
+                .unwrap_or(1);
+            if size as i64 != wanted {
+                return Err(parse_error(
+                    line,
+                    format!(
+                        "def `{name}` bit parameter `{param_name}` takes {wanted} bit(s), got {size}"
+                    ),
+                ));
+            }
+            bound.scalar_args.push((
+                param_name,
+                ClassicalType::Int(RuntimeType::Uint { width: size as u32 }),
+                value,
+            ));
+            return Ok(());
+        }
+        let operand = match argument {
+            Argument::Operand(operand) => operand.clone(),
+            Argument::Value(expr) => match expr.as_ident() {
+                Some(register) => Operand {
+                    name: OperandName::Register(register),
+                    index: None,
+                    line,
+                },
+                None => {
+                    return Err(parse_error(
+                        line,
+                        format!(
+                            "def `{name}` bit parameter `{param_name}` needs a bit, \
+                             not an expression"
+                        ),
+                    ));
+                }
+            },
+        };
+        let bits = self.bits_of(&operand)?;
+        let wanted = match width {
+            Some(width) => self.integer_of(width, line)?,
+            None => 1,
+        };
+        if bits.len() as i64 != wanted {
+            return Err(parse_error(
+                line,
+                format!(
+                    "def `{name}` bit parameter `{param_name}` takes {wanted} bit(s), \
+                     got {}",
+                    bits.len()
+                ),
+            ));
+        }
+        if runtime {
+            let value = super::dynamic::bits_value(&bits, line)?;
+            let kind = RuntimeType::Uint {
+                width: bits.len() as u32,
+            };
+            bound
+                .scalar_args
+                .push((param_name, ClassicalType::Int(kind), value));
+        } else {
+            bound.bit_bindings.push((param_name, bits));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_array_param(
+        &self,
+        name: &str,
+        param_name: &'a str,
+        mutable: bool,
+        ty: &str,
+        width: Option<&Expr>,
+        shape: &ArrayShape,
+        argument: &Argument,
+        runtime: bool,
+        bound: &mut DefArguments<'a>,
+        line: usize,
+    ) -> Result<()> {
+        let reference = match argument {
+            Argument::Value(expr) => expr.clone(),
+            Argument::Operand(operand) => operand_reference(operand)?,
+        };
+        let (source, indices) = match &reference {
+            Expr::Ident(source) => (*source, &[][..]),
+            Expr::Element(element) => (element.array, element.indices.as_slice()),
+            _ => ("", &[][..]),
+        };
+        let Some(array) = self.arrays.get(source) else {
+            return Err(parse_error(
+                line,
+                format!(
+                    "def `{name}` parameter `{param_name}` takes an array, got \
+                     `{reference}`"
+                ),
+            ));
+        };
+        let kind = self.array_kind(ty, width, line)?;
+        if kind != array.ty {
+            return Err(parse_error(
+                line,
+                format!(
+                    "def `{name}` parameter `{param_name}` takes `{ty}` elements, \
+                     which `{source}` does not hold"
+                ),
+            ));
+        }
+        let view = array_view(array, source, indices, line, |index| {
+            self.typed_of(index, line)
+        })?;
+        let fits = match shape {
+            ArrayShape::Sized(dims) => {
+                let wanted = dims
+                    .iter()
+                    .map(|size| self.integer_of(size, line))
+                    .collect::<Result<Vec<_>>>()?;
+                wanted.len() == view.dims.len()
+                    && wanted
+                        .iter()
+                        .zip(&view.dims)
+                        .all(|(&wanted, &size)| wanted == size as i64)
+            }
+            ArrayShape::Rank(rank) => self.integer_of(rank, line)? == view.dims.len() as i64,
+        };
+        if !fits {
+            return Err(parse_error(
+                line,
+                format!(
+                    "def `{name}` parameter `{param_name}` cannot take `{reference}`, \
+                     whose shape is {:?}",
+                    view.dims
+                ),
+            ));
+        }
+        if mutable && array.constant {
+            return Err(parse_error(
+                line,
+                format!("`{source}` is `const` and cannot pass as a `mutable` array"),
+            ));
+        }
+        if mutable && runtime {
+            return Err(unsupported(
+                line,
+                format!(
+                    "a `mutable` array argument to def `{name}`, whose call runs \
+                     at runtime"
+                ),
+            ));
+        }
+        self.charge(view.offsets.len(), line)?;
+        let array = ClassicalArray {
+            ty: kind,
+            constant: !mutable,
+            dims: view.dims,
+            values: view.offsets.iter().map(|&at| array.values[at]).collect(),
+        };
+        let write_back = mutable.then(|| (source.to_string(), view.offsets));
+        bound
+            .array_args
+            .push((param_name, Rc::new(array), write_back));
+        Ok(())
+    }
+
+    /// The result frame a call to def `name` runs under, with `result` naming the
+    /// bits it assigns.
+    fn def_frame(
+        &self,
+        name: &str,
+        def: &DefDefinition<'a>,
+        result: Option<&[usize]>,
+        bit_bindings: &[(&'a str, SmallVec<[usize; 4]>)],
+        line: usize,
+    ) -> Result<DefResult<'a>> {
         let dropped: SmallVec<[usize; 4]>;
         let result = match (&def.result, result) {
             (Some(declared), None) if declared.ty == "bit" && self.private_bits.is_some() => {
@@ -933,7 +1123,7 @@ impl<'a> Parser<'a> {
             }
             _ => result,
         };
-        let frame = match (&def.result, result) {
+        Ok(match (&def.result, result) {
             (None, None) => DefResult {
                 bits: SmallVec::new(),
                 local: None,
@@ -1006,10 +1196,19 @@ impl<'a> Parser<'a> {
                     result_var: None,
                 }
             }
-        };
+        })
+    }
 
-        let mut sub = self.expansion_parser(bindings);
-        sub.symbolic = symbolic;
+    /// The parser a def body runs in, holding its bound arguments and `frame`,
+    /// and the `mutable` arrays to copy back once the body has run.
+    fn def_subparser(
+        &self,
+        def: &DefDefinition<'a>,
+        arguments: DefArguments<'a>,
+        frame: DefResult<'a>,
+    ) -> (Parser<'a>, Vec<(&'a str, ArrayWriteBack)>) {
+        let mut sub = self.expansion_parser(arguments.bindings);
+        sub.symbolic = arguments.symbolic;
         // The body runs in a parser of its own, so a write it made to an outer
         // variable would be dropped on return; only the constants it may read
         // stay declared, and a write to anything else is rejected.
@@ -1020,13 +1219,13 @@ impl<'a> Parser<'a> {
                 .map(|(name, decl)| (*name, decl.clone()))
                 .collect(),
         );
-        sub.durations = durations;
-        sub.complex = complex;
+        sub.durations = arguments.durations;
+        sub.complex = arguments.complex;
         // A def sees the global constants and nothing else it does not take as
         // an argument, so only a `const` array reaches its body.
         sub.arrays = def.arrays.clone();
         let mut write_backs = Vec::new();
-        for (param_name, array, write_back) in array_args {
+        for (param_name, array, write_back) in arguments.array_args {
             sub.arrays.insert(param_name, array);
             if let Some(write_back) = write_back {
                 write_backs.push((param_name, write_back));
@@ -1035,7 +1234,7 @@ impl<'a> Parser<'a> {
         sub.qregs = Rc::new(HashMap::new());
         sub.cregs = Rc::new(HashMap::new());
         sub.aliases = Rc::new(HashMap::new());
-        for (param_name, qubits) in qubit_bindings {
+        for (param_name, qubits) in arguments.qubit_bindings {
             sub.params.insert(
                 param_name,
                 Alias {
@@ -1044,34 +1243,17 @@ impl<'a> Parser<'a> {
                 },
             );
         }
-        for (param_name, bits) in bit_bindings {
+        for (param_name, bits) in arguments.bit_bindings {
             sub.bind_bits(param_name, bits);
         }
         if let Some(local) = frame.local {
             sub.bind_bits(local, frame.bits.clone());
         }
         sub.def_result = Some(frame);
-        if runtime {
-            let value = self.execute_runtime_def(name, def, sub, scalar_args, line)?;
-            return Ok((Vec::new(), value));
-        }
-        for param in &def.args {
-            if let DefParam::Value { name, ty, width } = param {
-                let kind = sub.classical_type(ty, width.as_ref(), line)?;
-                Rc::make_mut(&mut sub.cregs).remove(name);
-                Rc::make_mut(&mut sub.aliases).remove(name);
-                sub.params.remove(name);
-                Rc::make_mut(&mut sub.classical).insert(
-                    name,
-                    ClassicalDecl {
-                        ty: kind,
-                        constant: false,
-                        value: None,
-                    },
-                );
-            }
-        }
-        let instructions = sub.execute(&def.body)?;
+        (sub, write_backs)
+    }
+
+    fn write_back_arrays(&mut self, sub: &Parser<'a>, write_backs: Vec<(&'a str, ArrayWriteBack)>) {
         for (param_name, (source, offsets)) in write_backs {
             if let (Some(written), Some(array)) = (
                 sub.arrays.get(param_name),
@@ -1083,37 +1265,6 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        let frame = sub.def_result.expect("installed above");
-        if sub.exit == Some(Exit::End) {
-            self.exec_end(line)?;
-            let value = frame.value.or_else(|| {
-                def.result
-                    .is_some()
-                    .then_some(Expr::Number(ClassicalValue::Int(0)))
-            });
-            return Ok((instructions, value));
-        }
-        if def.local.is_some() {
-            self.charge(frame.bits.len(), line)?;
-            let mut initialized = frame.bits.iter().map(|&bit| (bit, false)).collect();
-            if self.returned_bits_need_initialization(&instructions, &mut initialized, line)?
-                || initialized.values().any(|initialized| !initialized)
-            {
-                return Err(unsupported(
-                    line,
-                    format!(
-                        "an initializer on the bit returned by def `{name}`; use `parse_dynamic`"
-                    ),
-                ));
-            }
-        }
-        if def.result.is_some() && !frame.returned {
-            return Err(parse_error(
-                line,
-                format!("def `{name}` reaches its end without a result"),
-            ));
-        }
-        Ok((instructions, frame.value))
     }
 
     fn returned_bits_need_initialization(

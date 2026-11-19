@@ -1,8 +1,12 @@
+use super::expectation::{FUSED_PLAN_TOTAL, ScalarExpectationNetwork};
+use super::plan::{PLANNER_CALLS, RESTART_PEAK_THRESHOLD, plan_with_restarts};
+use super::slice::{choose_slices, contract_slices, kept_rank, pin_axes, replay_plan, split_bond};
 use super::*;
 use crate::backend::Backend;
 use crate::backend::statevector::StatevectorBackend;
 use crate::circuit::Circuit;
 use crate::gates::{Gate, MultiFusedData};
+use crate::limits::LimitSource;
 use crate::test_support::assert_probs_close;
 
 const EPS: f64 = 1e-10;

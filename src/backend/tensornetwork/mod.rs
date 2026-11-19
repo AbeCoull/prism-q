@@ -1,0 +1,868 @@
+//! Tensor-network simulation backend.
+//!
+//! Represents the quantum state as a network of tensors. Gate application
+//! appends gate tensors to the network (deferred contraction). Contraction
+//! happens lazily when `probabilities()` or another query is requested.
+//!
+//! # Memory layout
+//!
+//! - Each tensor: contiguous `Vec<Complex64>` plus a shape vector and leg ids
+//!   (up to 6 held inline).
+//! - Gates append tensors, so memory grows with gate count until a query
+//!   contracts the network. Measurement and reset absorb a projector into the
+//!   tensor holding the measured qubit's output leg and keep the deferred
+//!   form: the outcome marginal contracts the doubled network, so mid-circuit
+//!   measurement carries no dense width ceiling and does not grow the network.
+//!
+//! # Gate support
+//!
+//! The full gate set: 1q and 2q gates as rank-2/rank-4 tensors, MCU as one
+//! dense multi-qubit tensor, batched variants expanded per entry.
+//! `Gate::QftBlock` is expanded to textbook gates before dispatch.
+//!
+//! # When to prefer this backend
+//!
+//! - Circuits with low treewidth (shallow or geometrically local).
+//! - Circuits where full statevector is infeasible (>30 qubits) but structure
+//!   permits efficient contraction.
+//!
+//! # When NOT to use this backend
+//!
+//! - High-treewidth circuits, where contraction intermediates outgrow the
+//!   dense statevector.
+//!
+//! # Contraction strategy
+//!
+//! A metadata-only planner picks the pair order, then the kernel replays it.
+//! The baseline plan is the greedy min-size heuristic: repeatedly contract the
+//! pair of tensors whose result has the smallest total element count,
+//! preferring pairs sharing a leg. O(T·r·log T) for T tensors of rank at most
+//! r. When the greedy plan's peak intermediate reaches
+//! `RESTART_PEAK_THRESHOLD`, the planner reruns with seeded multiplicative
+//! noise on the size key, `PLAN_RESTARTS_PER_TEMPERATURE` passes at each
+//! `PLAN_NOISE_TEMPERATURES` entry, and keeps the tree with the smallest peak
+//! intermediate, the greedy tree included, so the peak never rises. Planning
+//! touches shapes and legs only, so a restart costs a heap walk, not data
+//! movement. The winning plan's peak is held to `PRISM_MAX_TN_PEAK_QUBITS`
+//! (a memory-derived `2^q` elements by default) before the replay allocates
+//! anything, so a contraction the host cannot hold errors instead of aborting.
+//!
+//! # Index slicing at the memory ceiling
+//!
+//! A plan whose peak clears the cap is not rejected outright. Legs are fixed
+//! one at a time, greedily by the peak each choice buys, and the network is
+//! contracted once per assignment of the fixed legs and summed: a
+//! multiplicative time factor in exchange for a divided peak. Only a plan
+//! still over the cap once `PRISM_MAX_TN_SLICES` assignments are on the table
+//! is rejected, and the rejection names the cap. Slices are independent, so
+//! the parallel build runs them through Rayon, but only as many at once as fit
+//! under the cap together: the cap bounds the live intermediates of a sliced
+//! run the way it bounds an unsliced one. Sliced legs are shared by exactly two
+//! tensors, so the slice results sum; open legs stay whole. Every terminal
+//! contracts through the same path, and the result is exact either way.
+//!
+//! # Bounded contraction
+//!
+//! [`TensorNetworkBackend::with_tolerance`] trades exactness for reach. With
+//! a tolerance set, a plan over the cap first has an intermediate factored
+//! across the cut that separates its partner-facing legs from the rest, the
+//! new bond kept only as far as the tolerance on that cut's relative
+//! discarded weight allows. The factored halves go back into the network and
+//! the rest is replanned, so the peak comes down without the whole tensor
+//! ever forming. Slicing then covers whatever truncation leaves above the
+//! cap. Without a tolerance, slicing is the only lever and the answer is
+//! exact.
+//!
+//! # Observables and shots both contract natively
+//!
+//! `Backend::pauli_expectations`, `Backend::reduced_density_matrix_1q` and
+//! `Backend::reduced_density_matrix` answer by doubling the network against its
+//! conjugate: the bra copy's legs are shifted clear of the ket id space, and each
+//! qubit's boundary is closed against its twin (a trace), joined through an
+//! operator, or left open. No `2^n` vector is built, so none of them passes the
+//! dense ceiling.
+//!
+//! An identity factor is a closed leg rather than an appended tensor, so a
+//! weight-`k` observable adds `k` tensors to a network of `2T`, not `n`.
+//!
+//! `Backend::sample_basis_states` answers below the dense ceiling from one
+//! contraction of the full distribution, a measured 66x cheaper than the
+//! sweep at 16 qubits and 32 shots. Past the ceiling it samples qubit by
+//! qubit: each bit is drawn from the conditioned single-qubit marginal, and
+//! the outcome projector is absorbed before the next qubit's marginal, so a
+//! shot costs `n` doubled contractions whose peak is set by treewidth rather
+//! than `2^n`, each planned on the first shot and replayed from a per-call
+//! cache on the rest.
+//!
+//! `expectation_zero_state` remains a separate path, contracting `⟨0|U†PU|0⟩`
+//! from a circuit rather than an evolved backend over the observable's backward
+//! light cone. Explicit `TensorNetwork` expectations, the `Auto` bounded route
+//! and the QEC estimator ladder use it.
+
+use num_complex::Complex64;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
+use smallvec::SmallVec;
+
+use crate::backend::{
+    Backend, BasisSamples, NORM_CLAMP_MIN, dense_statevector_len, reserve_dense_output, simd,
+    tensor_probability_len,
+};
+use crate::circuit::Instruction;
+use crate::error::Result;
+use crate::gates::Gate;
+use crate::limits::ResolvedLimits;
+use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
+
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
+#[cfg(feature = "parallel")]
+use crate::backend::MIN_PAR_ELEMS;
+
+mod expectation;
+mod plan;
+mod slice;
+mod tensor;
+
+use expectation::{GateTensorOp, for_each_gate_tensor, gate_tensor, observable_axes, pauli_tensor};
+use plan::{TensorMeta, greedy_contract, plan_pairs};
+use slice::{CachedPlan, ContractionLimits, cached_plan, contract_within, last_discarded};
+use tensor::{Tensor, contract, transpose};
+
+pub(crate) use expectation::{
+    AUTO_EXPECTATION_PEAK_BOUND, BoundedExpectations, cone_entangling_gates,
+    expectation_zero_state, plan_bounded_expectations, plan_expectations,
+};
+#[cfg(feature = "bench-internal")]
+pub use expectation::{scalar_expectation, scalar_expectation_capped};
+#[doc(hidden)]
+pub use slice::last_slice_count;
+
+type LegId = usize;
+
+/// Tensor-network simulation backend with deferred contraction.
+pub struct TensorNetworkBackend {
+    num_qubits: usize,
+    tensors: Vec<Tensor>,
+    output_legs: Vec<LegId>,
+    next_leg: usize,
+    classical_bits: Vec<bool>,
+    rng: ChaCha8Rng,
+    tolerance: Option<f64>,
+    truncation_discarded: std::cell::Cell<f64>,
+    limits: ResolvedLimits,
+}
+
+impl TensorNetworkBackend {
+    /// Backend under the process default [`Limits`](crate::Limits).
+    pub fn new(seed: u64) -> Self {
+        Self::with_limits(seed, None, &ResolvedLimits::process_default())
+    }
+
+    /// A backend whose contractions may truncate an intermediate bond when
+    /// the planned peak crosses the memory cap, discarding at most
+    /// `tolerance` of a cut tensor's squared weight per cut.
+    ///
+    /// A tolerance of zero discards nothing and stays exact.
+    ///
+    /// # Panics
+    ///
+    /// When `tolerance` is negative or not finite.
+    pub fn with_tolerance(seed: u64, tolerance: f64) -> Self {
+        assert!(
+            tolerance.is_finite() && tolerance >= 0.0,
+            "tensor-network tolerance must be a finite fraction at or above zero, got {tolerance}"
+        );
+        Self::with_limits(seed, Some(tolerance), &ResolvedLimits::process_default())
+    }
+
+    /// A backend under `limits`, truncating up to `tolerance` per cut when set.
+    /// The tolerance is checked as [`Self::with_tolerance`] checks it, by the
+    /// caller.
+    pub(crate) fn with_limits(seed: u64, tolerance: Option<f64>, limits: &ResolvedLimits) -> Self {
+        Self {
+            num_qubits: 0,
+            tensors: Vec::new(),
+            output_legs: Vec::new(),
+            next_leg: 0,
+            classical_bits: Vec::new(),
+            rng: ChaCha8Rng::seed_from_u64(seed),
+            tolerance,
+            truncation_discarded: std::cell::Cell::new(0.0),
+            limits: *limits,
+        }
+    }
+
+    /// Cumulative fraction of squared weight the contractions of this backend
+    /// have discarded since [`Backend::init`].
+    ///
+    /// The total sums one relative discard per cut rather than measuring the
+    /// final state, so a run that truncates heavily can carry it past 1,
+    /// where the fidelity it implies clamps to zero and certifies nothing.
+    ///
+    /// [`Backend::init`]: crate::backend::Backend::init
+    pub fn truncation_discarded(&self) -> f64 {
+        self.truncation_discarded.get()
+    }
+
+    /// Limits every terminal of this backend contracts under.
+    fn contraction_limits(&self) -> ContractionLimits {
+        ContractionLimits::new(&self.limits, self.tolerance)
+    }
+
+    /// Add what the contraction just finished discarded to the running total.
+    fn book_truncation(&self) {
+        self.truncation_discarded
+            .set(self.truncation_discarded.get() + last_discarded());
+    }
+
+    fn fresh_leg(&mut self) -> LegId {
+        let id = self.next_leg;
+        self.next_leg += 1;
+        id
+    }
+
+    /// Draw the outcome for `qubit` from its reduced density matrix and append
+    /// the renormalizing projector, keeping the network in deferred form.
+    ///
+    /// The marginal contracts the doubled network, so no `2^n` vector is built
+    /// and measurement carries no dense width ceiling. One rng draw per call,
+    /// in program order, matching every other backend's outcome stream.
+    fn collapse_qubit(&mut self, qubit: usize, reset: bool) -> Result<bool> {
+        use rand::RngExt;
+
+        let uniform = self.rng.random::<f64>();
+        self.collapse_qubit_with(qubit, reset, uniform, None)
+    }
+
+    /// Collapse `qubit` with a caller-supplied uniform draw, so the native
+    /// sampler can drive collapses from its own seeded stream without
+    /// touching the run rng. `plan` is the sampler's cache slot for this
+    /// position; `None` plans the marginal afresh.
+    fn collapse_qubit_with(
+        &mut self,
+        qubit: usize,
+        reset: bool,
+        uniform: f64,
+        plan: Option<&mut Option<CachedPlan>>,
+    ) -> Result<bool> {
+        let rho = self.marginal_1q(qubit, plan)?;
+        let trace = (rho[0][0].re + rho[1][1].re).max(NORM_CLAMP_MIN);
+        let prob_one = (rho[1][1].re / trace).clamp(0.0, 1.0);
+        let outcome = uniform < prob_one;
+        let inv_norm = crate::backend::measurement_inv_norm(outcome, prob_one);
+        self.append_collapse(qubit, outcome, reset, inv_norm);
+        Ok(outcome)
+    }
+
+    /// Draw one shot into `samples` by fixing qubits in index order, each bit
+    /// from its conditioned marginal with the outcome projector absorbed.
+    fn sample_one_shot(
+        &mut self,
+        rng: &mut ChaCha8Rng,
+        shot: usize,
+        samples: &mut BasisSamples,
+        mut plans: Option<&mut [Option<CachedPlan>]>,
+    ) -> Result<()> {
+        use rand::RngExt;
+
+        for qubit in 0..self.num_qubits {
+            let uniform = rng.random::<f64>();
+            let plan = plans.as_deref_mut().map(|plans| &mut plans[qubit]);
+            if self.collapse_qubit_with(qubit, false, uniform, plan)? {
+                samples.set(shot, qubit);
+            }
+        }
+        Ok(())
+    }
+
+    /// Qubit-by-qubit conditional sampling, one doubled-network contraction
+    /// per qubit per shot; the module docstring carries the cost trade.
+    ///
+    /// Each position's contraction is planned on the first shot and replayed
+    /// on the rest: the projector is absorbed into its owner and leg ids
+    /// restart with the state, so the doubled network at a position carries
+    /// the same metadata in every shot. The cache lives for this call only,
+    /// and a fingerprint of that metadata guards every replay.
+    fn sample_native(&mut self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
+        let mut plans: Vec<Option<CachedPlan>> = std::iter::repeat_with(|| None)
+            .take(self.num_qubits)
+            .collect();
+        self.sample_sweep(num_shots, seed, Some(&mut plans))
+    }
+
+    /// The sweep behind [`Self::sample_native`], with the plan cache as a
+    /// parameter so a reference run can go without one.
+    ///
+    /// A pre-flight plans the first marginal and reserves its peak
+    /// intermediate as a feasibility proxy: later marginals open a different
+    /// qubit and can plan a different tree, so the gate is heuristic, not a
+    /// guarantee. The state is restored after every shot, errors included.
+    fn sample_sweep(
+        &mut self,
+        num_shots: usize,
+        seed: u64,
+        mut plans: Option<&mut [Option<CachedPlan>]>,
+    ) -> Result<BasisSamples> {
+        let n = self.num_qubits;
+        let mut samples = BasisSamples::new(num_shots, n);
+
+        let network = self.double_for_partial_trace(&[0]);
+        let slots: Vec<Option<TensorMeta>> =
+            network.iter().map(|t| Some(TensorMeta::of(t))).collect();
+        let plan =
+            plan_pairs(slots, None, usize::MAX, usize::MAX).expect("unbounded pass completes");
+        let mut probe: Vec<Complex64> = Vec::new();
+        reserve_dense_output(&mut probe, plan.peak, self.name(), "native sampling")?;
+        drop(probe);
+
+        let tensors = self.tensors.clone();
+        let output_legs = self.output_legs.clone();
+        let next_leg = self.next_leg;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        for shot in 0..num_shots {
+            let drawn = self.sample_one_shot(&mut rng, shot, &mut samples, plans.as_deref_mut());
+            self.tensors.clone_from(&tensors);
+            self.output_legs.clone_from(&output_legs);
+            self.next_leg = next_leg;
+            drawn?;
+        }
+        Ok(samples)
+    }
+
+    /// Absorb the rank-2 tensor that keeps only `outcome` on `qubit`, scaled by
+    /// `inv_norm`, into the tensor holding the qubit's output leg, mapping the
+    /// kept branch to `|0>` when `reset` is set.
+    ///
+    /// Contracting into the owner instead of appending keeps the tensor count
+    /// constant across measurements, so a measure or reset loop costs one
+    /// doubled contraction per event rather than growing the network it
+    /// contracts.
+    fn append_collapse(&mut self, qubit: usize, outcome: bool, reset: bool, inv_norm: f64) {
+        let in_leg = self.output_legs[qubit];
+        let out_leg = self.fresh_leg();
+        let zero = Complex64::new(0.0, 0.0);
+        let scale = Complex64::new(inv_norm, 0.0);
+
+        let in_idx = usize::from(outcome);
+        let out_idx = if reset { 0 } else { in_idx };
+        let mut data = vec![zero; 4];
+        data[out_idx * 2 + in_idx] = scale;
+
+        let projector = Tensor {
+            data,
+            shape: smallvec::smallvec![2, 2],
+            legs: smallvec::smallvec![out_leg, in_leg],
+        };
+        let owner = self
+            .tensors
+            .iter()
+            .position(|t| t.legs.contains(&in_leg))
+            .expect("every output leg has an owner");
+        self.tensors[owner] = contract(&self.tensors[owner], &projector);
+        self.output_legs[qubit] = out_leg;
+    }
+
+    fn append_1q_matrix(&mut self, target: usize, mat: &[[Complex64; 2]; 2]) {
+        let in_leg = self.output_legs[target];
+        let out_leg = self.fresh_leg();
+        self.tensors.push(gate_tensor(
+            mat.as_flattened().to_vec(),
+            &[out_leg],
+            &[in_leg],
+            false,
+        ));
+        self.output_legs[target] = out_leg;
+    }
+
+    fn apply_2q_matrix(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
+        let in0 = self.output_legs[q0];
+        let in1 = self.output_legs[q1];
+        let out0 = self.fresh_leg();
+        let out1 = self.fresh_leg();
+        self.tensors.push(gate_tensor(
+            mat.as_flattened().to_vec(),
+            &[out0, out1],
+            &[in0, in1],
+            false,
+        ));
+        self.output_legs[q0] = out0;
+        self.output_legs[q1] = out1;
+    }
+
+    /// Build the full row-major 2^m × 2^m matrix for an MCU gate.
+    fn mcu_full_matrix(num_controls: usize, mat: &[[Complex64; 2]; 2]) -> Vec<Complex64> {
+        let m = num_controls + 1;
+        let dim = 1usize << m;
+        let zero = Complex64::new(0.0, 0.0);
+        let one = Complex64::new(1.0, 0.0);
+        let mut full = vec![zero; dim * dim];
+        for i in 0..dim - 2 {
+            full[i * dim + i] = one;
+        }
+        let corner = (dim - 2) * dim + dim - 2;
+        full[corner..corner + 2].copy_from_slice(&mat[0]);
+        full[corner + dim..corner + dim + 2].copy_from_slice(&mat[1]);
+        full
+    }
+
+    fn apply_nq_matrix(&mut self, qubits: &[usize], matrix: Vec<Complex64>) {
+        let in_legs: SmallVec<[LegId; 6]> = qubits.iter().map(|&q| self.output_legs[q]).collect();
+        let out_legs: SmallVec<[LegId; 6]> = (0..qubits.len()).map(|_| self.fresh_leg()).collect();
+        self.tensors
+            .push(gate_tensor(matrix, &out_legs, &in_legs, false));
+
+        for (i, &q) in qubits.iter().enumerate() {
+            self.output_legs[q] = out_legs[i];
+        }
+    }
+
+    fn apply_reset(&mut self, qubit: usize) -> Result<()> {
+        self.collapse_qubit(qubit, true)?;
+        Ok(())
+    }
+
+    /// Leg ids the bra copy uses, one entry per live ket leg.
+    ///
+    /// Every leg is shifted clear of the ket id space by [`Self::next_leg`], so a
+    /// bra tensor contracts only against other bra tensors. Callers then map back
+    /// to the ket id the legs they want summed over: an output leg mapped to
+    /// itself closes that qubit against its twin, which is a trace with identity.
+    fn bra_leg_map(&self) -> Vec<LegId> {
+        (0..self.next_leg).map(|leg| leg + self.next_leg).collect()
+    }
+
+    /// Pair every tensor with a conjugated twin whose legs are read off `bra_legs`.
+    fn double_through(&self, bra_legs: &[LegId]) -> Vec<Tensor> {
+        let mut network = Vec::with_capacity(self.tensors.len() * 2);
+        for tensor in &self.tensors {
+            network.push(tensor.clone());
+            network.push(Tensor {
+                data: tensor.data.iter().map(Complex64::conj).collect(),
+                shape: tensor.shape.clone(),
+                legs: tensor.legs.iter().map(|&leg| bra_legs[leg]).collect(),
+            });
+        }
+        network
+    }
+
+    /// Build the network for the partial trace of `|psi><psi|` over every qubit
+    /// outside `kept`, leaving each kept qubit's ket and bra indices open.
+    ///
+    /// A kept qubit's ket leg is its output leg and its bra leg is that id plus
+    /// [`Self::next_leg`].
+    fn double_for_partial_trace(&self, kept: &[usize]) -> Vec<Tensor> {
+        let mut bra_legs = self.bra_leg_map();
+        for (q, &leg) in self.output_legs.iter().enumerate() {
+            if !kept.contains(&q) {
+                bra_legs[leg] = leg;
+            }
+        }
+        self.double_through(&bra_legs)
+    }
+
+    /// Contract `tr_{q != qubit} |psi><psi|` to its four entries, replaying
+    /// or filling `plan` when the caller holds a cache slot.
+    fn marginal_1q(
+        &self,
+        qubit: usize,
+        plan: Option<&mut Option<CachedPlan>>,
+    ) -> Result<[[Complex64; 2]; 2]> {
+        let mut network = self.double_for_partial_trace(&[qubit]);
+        let ket_leg = self.output_legs[qubit];
+        let bra_leg = ket_leg + self.next_leg;
+        let operation = "reduced density matrix";
+        let rho = match plan {
+            Some(slot) => {
+                let plan = cached_plan(&network, slot);
+                contract_within(
+                    &mut network,
+                    plan,
+                    self.contraction_limits(),
+                    self.name(),
+                    operation,
+                )?
+            }
+            None => greedy_contract(
+                &mut network,
+                self.contraction_limits(),
+                self.name(),
+                operation,
+            )?,
+        };
+        self.book_truncation();
+
+        let axis = |leg: LegId| {
+            rho.legs
+                .iter()
+                .position(|&l| l == leg)
+                .expect("partial trace leaves both open legs on the result")
+        };
+        let ket_stride = if axis(ket_leg) == 0 { 2 } else { 1 };
+        let bra_stride = if axis(bra_leg) == 0 { 2 } else { 1 };
+
+        Ok([
+            [rho.data[0], rho.data[bra_stride]],
+            [rho.data[ket_stride], rho.data[ket_stride + bra_stride]],
+        ])
+    }
+
+    /// Contract `<psi|P|psi>` for one joint Pauli observable, unnormalized.
+    ///
+    /// Qubits the observable omits carry identity, and an identity factor is a
+    /// leg closed directly against its twin rather than a tensor appended, which
+    /// keeps `n - k` tensors out of the network for a weight-`k` observable.
+    fn contract_pauli_sandwich(&self, axes: &[Option<PauliAxis>]) -> Result<f64> {
+        let mut bra_legs = self.bra_leg_map();
+        for (q, axis) in axes.iter().enumerate() {
+            if axis.is_none() {
+                let leg = self.output_legs[q];
+                bra_legs[leg] = leg;
+            }
+        }
+
+        let mut network = self.double_through(&bra_legs);
+        for (q, &axis) in axes.iter().enumerate() {
+            if axis.is_some() {
+                let ket_leg = self.output_legs[q];
+                network.push(pauli_tensor(axis, bra_legs[ket_leg], ket_leg));
+            }
+        }
+
+        let result = greedy_contract(
+            &mut network,
+            self.contraction_limits(),
+            self.name(),
+            "pauli expectation",
+        )?;
+        self.book_truncation();
+        debug_assert!(result.legs.is_empty(), "sandwich leaves every leg paired");
+        Ok(result.data[0].re)
+    }
+
+    /// Contract the full network and return the amplitude vector in
+    /// computational basis order.
+    fn contract_to_statevector(&self) -> Result<Vec<Complex64>> {
+        dense_statevector_len(self.name(), "contraction", self.num_qubits, &self.limits)?;
+
+        let mut tensors = self.tensors.clone();
+        let result = greedy_contract(
+            &mut tensors,
+            self.contraction_limits(),
+            self.name(),
+            "contraction",
+        )?;
+        self.book_truncation();
+
+        // The result tensor's legs should be exactly the output_legs.
+        // PRISM-Q convention: q[0] = LSB of state index. In row-major
+        // tensor layout, the last axis is LSB. Use leg order
+        // [q_{n-1}, q_{n-2}, ..., q_0], reversed.
+        let target_order: Vec<LegId> = self.output_legs.iter().rev().copied().collect();
+        let perm: SmallVec<[usize; 6]> = target_order
+            .iter()
+            .map(|target_leg| {
+                result
+                    .legs
+                    .iter()
+                    .position(|l| l == target_leg)
+                    .expect("greedy_contract consumes every tensor, so output legs survive")
+            })
+            .collect();
+
+        let needs_perm = perm.iter().enumerate().any(|(i, &p)| i != p);
+        let ordered = if needs_perm {
+            transpose(&result, &perm)
+        } else {
+            result
+        };
+
+        Ok(ordered.data)
+    }
+
+    fn dispatch_gate(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
+        let num_qubits = self.num_qubits;
+        for_each_gate_tensor(gate, targets, num_qubits, |op| {
+            match op {
+                GateTensorOp::OneQ(q, mat) => self.append_1q_matrix(q, &mat),
+                GateTensorOp::TwoQ(q0, q1, mat) => self.apply_2q_matrix(q0, q1, &mat),
+                GateTensorOp::NQ(qubits, matrix) => self.apply_nq_matrix(qubits, matrix),
+            }
+            Ok(())
+        })
+    }
+}
+
+impl crate::backend::sealed::Sealed for TensorNetworkBackend {
+    fn limits(&self) -> crate::limits::ResolvedLimits {
+        self.limits
+    }
+}
+
+impl Backend for TensorNetworkBackend {
+    fn name(&self) -> &'static str {
+        "tensornetwork"
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn resolved(&self) -> crate::sim::ResolvedBackend {
+        crate::sim::ResolvedBackend::TensorNetwork
+    }
+
+    /// `Exact` without a tolerance, whatever the contraction did, since every
+    /// other route to the cap preserves the value. A tolerance reports
+    /// `Approximate` whether or not this run cut anything, since the route
+    /// could have.
+    ///
+    /// The bound is 1 minus the summed per-cut relative discarded weights: a
+    /// first-order truncation estimate, not a certificate. Errors compound
+    /// across cuts, and summing the weights understates the compounded error,
+    /// since the strict bound on the infidelity is the square of the summed
+    /// square roots. The two agree only when a single cut truncates. A
+    /// doubled contraction, which `pauli_expectations` and both reduced
+    /// density matrix methods run, cuts in the doubled space, so what the
+    /// bound describes there is the quadratic form rather than the state. A
+    /// truncated `reduced_density_matrix` is made Hermitian again by
+    /// averaging it with its conjugate transpose; positivity is not
+    /// restored.
+    fn exactness(&self) -> crate::sim::Exactness {
+        match self.tolerance {
+            Some(tolerance) if tolerance > 0.0 => crate::sim::Exactness::Approximate {
+                fidelity_lower_bound: Some((1.0 - self.truncation_discarded.get()).max(0.0)),
+            },
+            _ => crate::sim::Exactness::Exact,
+        }
+    }
+
+    fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
+        self.num_qubits = num_qubits;
+        self.tensors = Vec::new();
+        self.next_leg = 0;
+        self.truncation_discarded.set(0.0);
+        crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
+
+        self.output_legs = Vec::with_capacity(num_qubits);
+        for _ in 0..num_qubits {
+            let leg = self.fresh_leg();
+            self.output_legs.push(leg);
+            self.tensors.push(Tensor {
+                data: vec![Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+                shape: SmallVec::from_buf_and_len([2, 0, 0, 0, 0, 0], 1),
+                legs: SmallVec::from_buf_and_len([leg, 0, 0, 0, 0, 0], 1),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn apply(&mut self, instruction: &Instruction) -> Result<()> {
+        match instruction {
+            Instruction::Gate { gate, targets } => self.dispatch_gate(gate, targets)?,
+            Instruction::Measure {
+                qubit,
+                classical_bit,
+            } => {
+                let outcome = self.collapse_qubit(*qubit, false)?;
+                self.classical_bits[*classical_bit] = outcome;
+            }
+            Instruction::Reset { qubit } => {
+                self.apply_reset(*qubit)?;
+            }
+            Instruction::Barrier { .. } => {}
+            Instruction::Save { label, .. } => {
+                return Err(crate::backend::save_not_applied("TensorNetwork", label));
+            }
+            Instruction::Conditional {
+                condition,
+                gate,
+                targets,
+            } => {
+                if condition.evaluate(&self.classical_bits) {
+                    self.dispatch_gate(gate, targets)?;
+                }
+            }
+            Instruction::Region(region) => self.apply_region(region)?,
+        }
+        Ok(())
+    }
+
+    fn reset(&mut self, qubit: usize) -> Result<()> {
+        self.apply_reset(qubit)
+    }
+
+    fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
+        self.append_1q_matrix(qubit, matrix);
+        Ok(())
+    }
+
+    fn classical_results(&self) -> &[bool] {
+        &self.classical_bits
+    }
+
+    fn set_classical_bit(&mut self, bit: usize, value: bool) -> Result<()> {
+        self.classical_bits[bit] = value;
+        Ok(())
+    }
+
+    fn probabilities(&self) -> Result<Vec<f64>> {
+        tensor_probability_len(self.name(), self.num_qubits, &self.limits)?;
+        let amplitudes = self.contract_to_statevector()?;
+        let mut probs = vec![0.0_f64; amplitudes.len()];
+        #[cfg(feature = "parallel")]
+        if amplitudes.len() >= MIN_PAR_ELEMS {
+            amplitudes
+                .par_chunks(MIN_PAR_ELEMS)
+                .zip(probs.par_chunks_mut(MIN_PAR_ELEMS))
+                .for_each(|(src, dst)| simd::norm_sqr_to_slice(src, dst));
+            return Ok(probs);
+        }
+        simd::norm_sqr_to_slice(&amplitudes, &mut probs);
+        Ok(probs)
+    }
+
+    fn supports_native_sampling(&self) -> bool {
+        true
+    }
+
+    /// Draw shots from the dense distribution below the ceiling and from the
+    /// qubit-by-qubit conditional sweep past it.
+    ///
+    /// One full-distribution contraction plus a draw per shot undercuts the
+    /// per-shot sweep by a measured 66x at 16 qubits and 32 shots on the
+    /// chain shape, so the dense arm answers wherever `probabilities()` can;
+    /// the sweep is the route that exists past that ceiling.
+    fn sample_basis_states(&mut self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
+        let n = self.num_qubits;
+        if n == 0 || num_shots == 0 {
+            return Ok(BasisSamples::new(num_shots, n));
+        }
+
+        if tensor_probability_len(self.name(), n, &self.limits).is_ok() {
+            use rand::RngExt;
+
+            let mut samples = BasisSamples::new(num_shots, n);
+            let cdf = crate::sim::shots::build_cdf(&self.probabilities()?);
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            for shot in 0..num_shots {
+                let r = rng.random::<f64>();
+                samples.set_index(shot, crate::sim::shots::sample_from_cdf(&cdf, r));
+            }
+            return Ok(samples);
+        }
+
+        self.sample_native(num_shots, seed)
+    }
+
+    fn num_qubits(&self) -> usize {
+        self.num_qubits
+    }
+
+    /// Contracts the network against its conjugate with every other qubit's
+    /// output leg closed, so the cost is set by the doubled network's treewidth
+    /// rather than by `2^n`.
+    ///
+    /// # Panics
+    ///
+    /// If `qubit` is outside the register.
+    fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {
+        self.marginal_1q(qubit, None)
+    }
+
+    /// One doubled contraction with the subsystem's ket and bra legs open, so
+    /// the cost follows the doubled network's treewidth, widened by those open
+    /// legs, rather than `2^n`.
+    fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
+        crate::backend::schmidt::validate_qubit_set(subsystem, self.num_qubits)?;
+        let k = subsystem.len();
+        let dim =
+            crate::backend::reduced_density::reduced_density_side(self.name(), k, &self.limits)?;
+
+        let mut network = self.double_for_partial_trace(subsystem);
+        let rho = greedy_contract(
+            &mut network,
+            self.contraction_limits(),
+            self.name(),
+            "reduced density matrix",
+        )?;
+        self.book_truncation();
+        debug_assert_eq!(rho.rank(), 2 * k);
+
+        // Row major with the last axis lowest, so `subsystem[0]` takes the last
+        // ket axis and the last bra axis: ket legs carry the row index.
+        let kets = subsystem.iter().rev().map(|&q| self.output_legs[q]);
+        let bras = kets.clone().map(|leg| leg + self.next_leg);
+        let perm: SmallVec<[usize; 6]> = kets
+            .chain(bras)
+            .map(|target| {
+                rho.legs
+                    .iter()
+                    .position(|&leg| leg == target)
+                    .expect("partial trace leaves every kept leg open on the result")
+            })
+            .collect();
+        let mut data = if perm.iter().enumerate().any(|(i, &p)| i != p) {
+            transpose(&rho, &perm).data
+        } else {
+            rho.data
+        };
+
+        if self.tolerance.is_some_and(|tolerance| tolerance > 0.0) {
+            for t in 0..dim {
+                data[t * dim + t].im = 0.0;
+                for tp in t + 1..dim {
+                    let mean = 0.5 * (data[t * dim + tp] + data[tp * dim + t].conj());
+                    data[t * dim + tp] = mean;
+                    data[tp * dim + t] = mean.conj();
+                }
+            }
+        }
+        crate::backend::reduced_density::normalize_trace(&mut data, dim);
+        Ok(data)
+    }
+
+    fn supports_two_qubit_kraus(&self) -> bool {
+        true
+    }
+
+    fn supports_pauli_expectation(&self) -> bool {
+        true
+    }
+
+    /// Contracts `<psi|P|psi>` directly, so no `2^n` vector is built and the
+    /// dense query ceiling does not apply.
+    ///
+    /// # Errors
+    ///
+    /// [`PrismError::InvalidQubit`](crate::PrismError::InvalidQubit) for a factor
+    /// outside the register, and
+    /// [`PrismError::InvalidParameter`](crate::PrismError::InvalidParameter) for two
+    /// factors on one qubit.
+    fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
+        let mut axes: Vec<Option<PauliAxis>> = vec![None; self.num_qubits];
+        let mut expectations = Vec::with_capacity(observables.len());
+        let norm_sq = self.contract_pauli_sandwich(&axes)?;
+
+        for observable in observables {
+            observable_axes(observable, &mut axes, "tensor-network")?;
+            expectations.push(self.contract_pauli_sandwich(&axes)? / norm_sq);
+        }
+
+        Ok(expectations)
+    }
+
+    fn supports_fused_gates(&self) -> bool {
+        true
+    }
+
+    fn export_statevector(&self) -> Result<Vec<Complex64>> {
+        self.contract_to_statevector()
+    }
+}
+
+#[cfg(test)]
+mod tests;

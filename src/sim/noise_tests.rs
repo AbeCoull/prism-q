@@ -2,6 +2,33 @@ use super::*;
 use crate::circuits;
 use crate::sim::{Engine, ResolvedBackend};
 
+/// Exact per-classical-bit measurement marginals under a noise model, evolved
+/// on the density-matrix backend. Measurements are read as `Tr(P_1 rho)` on the
+/// final state without collapse, so this assumes terminal (non-feedback)
+/// measurement, matching the domain of `noisy_marginals_analytical`.
+fn dm_noisy_marginals(circuit: &Circuit, noise: &NoiseModel, seed: u64) -> Result<Vec<f64>> {
+    let dm = evolve_density_matrix(
+        &BackendKind::DensityMatrix,
+        circuit,
+        Some(noise),
+        None,
+        seed,
+        &ResolvedLimits::process_default(),
+    )?;
+    let mut result = vec![0.5f64; circuit.num_classical_bits];
+    for inst in &circuit.instructions {
+        if let Instruction::Measure {
+            qubit,
+            classical_bit,
+        } = inst
+            && *classical_bit < result.len()
+        {
+            result[*classical_bit] = dm.qubit_probability(*qubit)?;
+        }
+    }
+    Ok(result)
+}
+
 type EngineFn = fn(&Circuit, &NoiseModel, usize, u64) -> Result<ShotsResult>;
 
 fn assert_ghz_noise_spread(run: EngineFn, n: usize, min_each: usize) {

@@ -1737,7 +1737,8 @@ fn ensure_exact_result(require_exact: bool, metadata: &RunMetadata) -> Result<()
     if require_exact && !metadata.is_exact() {
         return Err(PrismError::IncompatibleBackend {
             backend: format!("{:?}", metadata.backend),
-            reason: "require_exact rejects an approximate result; this engine discarded state                      weight while running, which the route could not predict"
+            reason: "require_exact rejects an approximate result; this engine discarded state \
+                     weight while running, which the route could not predict"
                 .into(),
         });
     }

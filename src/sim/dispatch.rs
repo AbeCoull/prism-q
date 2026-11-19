@@ -894,10 +894,6 @@ impl BackendPlan {
         }
     }
 
-    pub(super) fn supports_pauli_expectation(&self) -> bool {
-        true
-    }
-
     /// Engine this plan builds, for a shot request that runs the plan zero
     /// times and so has no backend to read provenance off.
     pub(super) fn resolved(&self) -> ResolvedBackend {

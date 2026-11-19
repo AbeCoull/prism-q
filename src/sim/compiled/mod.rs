@@ -418,6 +418,20 @@ fn scatter_meas_major_rows(
     }
 }
 
+/// Draw `num_shots` measurement-major shots of `block` from a stream seeded by `seed`.
+#[inline]
+fn sample_block(block: &ParityBlock, seed: u64, num_shots: usize) -> Vec<u64> {
+    let mut block_chacha = ChaCha8Rng::seed_from_u64(seed);
+    let mut block_rng = Xoshiro256PlusPlus::from_chacha(&mut block_chacha);
+    sample_bts_meas_major(
+        &block.sparse,
+        num_shots,
+        &block.ref_bits_packed,
+        &mut block_rng,
+        block.block_rank,
+    )
+}
+
 #[inline(always)]
 fn project_local_flip_row(local_row: &[u64], mapping: &[usize], m_words: usize) -> Vec<u64> {
     let mut global_row = vec![0u64; m_words];
@@ -976,14 +990,12 @@ impl CompiledSampler {
         let m_words = self.num_measurements.div_ceil(64);
         let s_words = num_shots.div_ceil(64);
         if num_shots == 0 || self.num_measurements == 0 {
-            return Ok(PackedShots {
-                data: Vec::new(),
+            return Ok(PackedShots::from_parts(
+                Vec::new(),
                 num_shots,
-                num_measurements: self.num_measurements,
-                m_words,
-                s_words,
-                layout: ShotLayout::ShotMajor,
-            });
+                self.num_measurements,
+                ShotLayout::ShotMajor,
+            ));
         }
         if self.rank == 0 {
             let mut data = vec![0u64; num_shots * m_words];
@@ -991,18 +1003,16 @@ impl CompiledSampler {
                 let base = s * m_words;
                 data[base..base + m_words].copy_from_slice(&self.ref_bits_packed);
             }
-            return Ok(PackedShots {
+            return Ok(PackedShots::from_parts(
                 data,
                 num_shots,
-                num_measurements: self.num_measurements,
-                m_words,
-                s_words,
-                layout: ShotLayout::ShotMajor,
-            });
+                self.num_measurements,
+                ShotLayout::ShotMajor,
+            ));
         }
 
         if self.should_use_bts(num_shots) {
-            return self.sample_bulk_packed_bts(num_shots, m_words, s_words, propagate_gpu_errors);
+            return self.sample_bulk_packed_bts(num_shots, s_words, propagate_gpu_errors);
         }
 
         let (mut data, _) = self.sample_bulk_words_shot_major(num_shots);
@@ -1010,20 +1020,17 @@ impl CompiledSampler {
             let base = s * m_words;
             xor_words(&mut data[base..base + m_words], &self.ref_bits_packed);
         }
-        Ok(PackedShots {
+        Ok(PackedShots::from_parts(
             data,
             num_shots,
-            num_measurements: self.num_measurements,
-            m_words,
-            s_words,
-            layout: ShotLayout::ShotMajor,
-        })
+            self.num_measurements,
+            ShotLayout::ShotMajor,
+        ))
     }
 
     fn sample_bulk_packed_bts(
         &mut self,
         num_shots: usize,
-        m_words: usize,
         s_words: usize,
         propagate_gpu_errors: bool,
     ) -> Result<PackedShots> {
@@ -1055,15 +1062,7 @@ impl CompiledSampler {
                         .par_iter()
                         .zip(block_seeds.par_iter())
                         .for_each(|(block, &seed)| {
-                            let mut block_chacha = ChaCha8Rng::seed_from_u64(seed);
-                            let mut block_rng = Xoshiro256PlusPlus::from_chacha(&mut block_chacha);
-                            let block_data = sample_bts_meas_major(
-                                &block.sparse,
-                                num_shots,
-                                &block.ref_bits_packed,
-                                &mut block_rng,
-                                block.block_rank,
-                            );
+                            let block_data = sample_block(block, seed, num_shots);
 
                             // SAFETY: Each parity block owns a disjoint set of global
                             // measurement rows, so these row copies target non-overlapping
@@ -1081,15 +1080,7 @@ impl CompiledSampler {
                 #[cfg(not(feature = "parallel"))]
                 {
                     for (block, &seed) in pb.blocks.iter().zip(block_seeds.iter()) {
-                        let mut block_chacha = ChaCha8Rng::seed_from_u64(seed);
-                        let mut block_rng = Xoshiro256PlusPlus::from_chacha(&mut block_chacha);
-                        let block_data = sample_bts_meas_major(
-                            &block.sparse,
-                            num_shots,
-                            &block.ref_bits_packed,
-                            &mut block_rng,
-                            block.block_rank,
-                        );
+                        let block_data = sample_block(block, seed, num_shots);
                         scatter_meas_major_rows(
                             &mut meas_major,
                             s_words,
@@ -1109,16 +1100,10 @@ impl CompiledSampler {
                         .par_iter()
                         .zip(block_seeds.par_iter())
                         .map(|(block, &seed)| {
-                            let mut block_chacha = ChaCha8Rng::seed_from_u64(seed);
-                            let mut block_rng = Xoshiro256PlusPlus::from_chacha(&mut block_chacha);
-                            let data = sample_bts_meas_major(
-                                &block.sparse,
-                                num_shots,
-                                &block.ref_bits_packed,
-                                &mut block_rng,
-                                block.block_rank,
-                            );
-                            (data, block.meas_indices.as_slice())
+                            (
+                                sample_block(block, seed, num_shots),
+                                block.meas_indices.as_slice(),
+                            )
                         })
                         .collect()
                 };
@@ -1129,16 +1114,10 @@ impl CompiledSampler {
                     .iter()
                     .zip(block_seeds.iter())
                     .map(|(block, &seed)| {
-                        let mut block_chacha = ChaCha8Rng::seed_from_u64(seed);
-                        let mut block_rng = Xoshiro256PlusPlus::from_chacha(&mut block_chacha);
-                        let data = sample_bts_meas_major(
-                            &block.sparse,
-                            num_shots,
-                            &block.ref_bits_packed,
-                            &mut block_rng,
-                            block.block_rank,
-                        );
-                        (data, block.meas_indices.as_slice())
+                        (
+                            sample_block(block, seed, num_shots),
+                            block.meas_indices.as_slice(),
+                        )
                     })
                     .collect();
 
@@ -1155,19 +1134,17 @@ impl CompiledSampler {
                 meas_major
             };
 
-            return Ok(PackedShots {
-                data: meas_major,
+            return Ok(PackedShots::from_parts(
+                meas_major,
                 num_shots,
-                num_measurements: num_meas,
-                m_words,
-                s_words,
-                layout: ShotLayout::MeasMajor,
-            });
+                num_meas,
+                ShotLayout::MeasMajor,
+            ));
         }
 
         #[cfg(feature = "gpu")]
         if self.should_use_gpu_bts(num_shots) {
-            match self.sample_bulk_packed_bts_gpu(num_shots, m_words, s_words) {
+            match self.sample_bulk_packed_bts_gpu(num_shots) {
                 Ok(packed) => return Ok(packed),
                 Err(e) if propagate_gpu_errors => return Err(e),
                 Err(_) => {}
@@ -1189,14 +1166,12 @@ impl CompiledSampler {
                 &mut fast_rng,
                 self.rank,
             );
-            return Ok(PackedShots {
+            return Ok(PackedShots::from_parts(
                 data,
                 num_shots,
-                num_measurements: num_meas,
-                m_words,
-                s_words,
-                layout: ShotLayout::MeasMajor,
-            });
+                num_meas,
+                ShotLayout::MeasMajor,
+            ));
         }
 
         let data = bts_batched(
@@ -1207,23 +1182,16 @@ impl CompiledSampler {
             &mut fast_rng,
             self.rank,
         );
-        Ok(PackedShots {
+        Ok(PackedShots::from_parts(
             data,
             num_shots,
-            num_measurements: num_meas,
-            m_words,
-            s_words,
-            layout: ShotLayout::MeasMajor,
-        })
+            num_meas,
+            ShotLayout::MeasMajor,
+        ))
     }
 
     #[cfg(feature = "gpu")]
-    fn sample_bulk_packed_bts_gpu(
-        &mut self,
-        num_shots: usize,
-        m_words: usize,
-        s_words: usize,
-    ) -> Result<PackedShots> {
+    fn sample_bulk_packed_bts_gpu(&mut self, num_shots: usize) -> Result<PackedShots> {
         let ctx = self
             .gpu_context
             .as_ref()
@@ -1239,14 +1207,12 @@ impl CompiledSampler {
             num_shots,
             cache,
         )?;
-        Ok(PackedShots {
+        Ok(PackedShots::from_parts(
             data,
             num_shots,
-            num_measurements: self.num_measurements,
-            m_words,
-            s_words,
-            layout: ShotLayout::MeasMajor,
-        })
+            self.num_measurements,
+            ShotLayout::MeasMajor,
+        ))
     }
 
     /// Stream `total_shots` through `acc` in [`default_chunk_size`] chunks,
@@ -1646,14 +1612,7 @@ impl CompiledSampler {
             }
         };
 
-        PackedShots {
-            data,
-            num_shots,
-            num_measurements: num_events,
-            m_words,
-            s_words,
-            layout: ShotLayout::MeasMajor,
-        }
+        PackedShots::from_parts(data, num_shots, num_events, ShotLayout::MeasMajor)
     }
 
     /// Exact outcome multiplicities over all `2^rank` equally likely
@@ -2169,20 +2128,39 @@ impl PackedShots {
         num_shots: usize,
         num_measurements: usize,
     ) -> Self {
+        Self::from_parts(data, num_shots, num_measurements, ShotLayout::MeasMajor)
+    }
+
+    /// Wrap words a sampler wrote in `layout` with clear padding. The length and padding
+    /// checks of the validated constructors run in debug builds only.
+    fn from_parts(
+        data: Vec<u64>,
+        num_shots: usize,
+        num_measurements: usize,
+        layout: ShotLayout,
+    ) -> Self {
+        let m_words = num_measurements.div_ceil(64);
         let s_words = num_shots.div_ceil(64);
-        debug_assert!(
-            validate_packed_len("measurement-major", data.len(), num_measurements, s_words).is_ok()
-        );
-        debug_assert!(
-            validate_meas_major_padding(&data, num_shots, num_measurements, s_words).is_ok()
-        );
+        debug_assert!(match layout {
+            ShotLayout::ShotMajor => {
+                validate_packed_len("shot-major", data.len(), num_shots, m_words).is_ok()
+                    && validate_shot_major_padding(&data, num_shots, num_measurements, m_words)
+                        .is_ok()
+            }
+            ShotLayout::MeasMajor => {
+                validate_packed_len("measurement-major", data.len(), num_measurements, s_words)
+                    .is_ok()
+                    && validate_meas_major_padding(&data, num_shots, num_measurements, s_words)
+                        .is_ok()
+            }
+        });
         Self {
             data,
             num_shots,
             num_measurements,
-            m_words: num_measurements.div_ceil(64),
+            m_words,
             s_words,
-            layout: ShotLayout::MeasMajor,
+            layout,
         }
     }
 

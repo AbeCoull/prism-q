@@ -1319,9 +1319,9 @@ fn statevector_cap(qubits: usize) -> Limits {
 
 #[test]
 fn auto_wide_register_past_its_cap_takes_the_tree() {
-    // One unit of 25 register qubits passes the widest table the split holds, so the
+    // One unit of 27 register qubits passes the widest table the split holds, so the
     // shots take the MPS the tree picks past the statevector cap.
-    let circuit = wide_register_circuit(25);
+    let circuit = wide_register_circuit(27);
     assert!(!decide_clifford_register(
         &circuit,
         &ResolvedLimits::resolve(Some(&statevector_cap(20)))
@@ -1345,7 +1345,7 @@ fn auto_wide_register_past_its_cap_takes_the_tree() {
 
 #[test]
 fn require_exact_rejects_a_wide_register_past_its_cap_before_running() {
-    let circuit = wide_register_circuit(25);
+    let circuit = wide_register_circuit(27);
     let plan = simulate(&circuit)
         .limits(statevector_cap(20))
         .plan(Query::Shots(64))
@@ -1585,10 +1585,10 @@ fn mid_circuit_route_declines_past_the_branch_bound() {
     );
 }
 
-/// [`wide_register_circuit`] over 25 qubits with a measurement of qubit 30 ahead of an `X`
-/// on qubit 29, then every qubit measured: the deferred register holds a unit of 25.
+/// [`wide_register_circuit`] over 27 qubits with a measurement of qubit 30 ahead of an `X`
+/// on qubit 29, then every qubit measured: the deferred register holds a unit of 27.
 fn wide_mid_circuit() -> Circuit {
-    let mut circuit = wide_register_circuit(25);
+    let mut circuit = wide_register_circuit(27);
     circuit
         .instructions
         .retain(|i| !matches!(i, Instruction::Measure { .. }));
@@ -1633,7 +1633,7 @@ fn wide_mid_circuit_past_the_register_takes_the_tree() {
         .unwrap_err();
     match err {
         PrismError::BackendUnsupported { operation, .. } => {
-            assert!(operation.contains("26 T gates"), "{operation}");
+            assert!(operation.contains("28 T gates"), "{operation}");
         }
         other => panic!("expected BackendUnsupported, got {other:?}"),
     }

@@ -4569,13 +4569,10 @@ fn bench_auto_clifford_t_price(c: &mut Criterion) {
         let id = format!("scrambled_{n}q_t{t}");
         shots_row("statevector", id, dense.clone(), scrambled(n, t), 1024);
     }
-    shots_row(
-        "auto",
-        "scrambled_22q_t20".into(),
-        BackendKind::Auto,
-        scrambled(22, 20),
-        1024,
-    );
+    for (n, t) in [(22, 20), (26, 30)] {
+        let id = format!("scrambled_{n}q_t{t}");
+        shots_row("auto", id, BackendKind::Auto, scrambled(n, t), 1024);
+    }
     for (arm, kind) in [("statevector", dense.clone()), ("auto", BackendKind::Auto)] {
         shots_row(arm, "layers_20q_t40".into(), kind, layers(20, 40), 1024);
     }

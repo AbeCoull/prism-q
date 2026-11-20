@@ -284,8 +284,8 @@ layout_warnings() {
                 printf "%s: new #[path] module; give the module a directory and a sibling tests.rs\n", k
         }' "$RECORDS" | sort
     # Exit 0 when line n sits at the arm depth of the innermost enclosing match and an
-    # earlier arm of that match opens with Gate::. Strings, chars and line comments are
-    # blanked first so their braces do not count.
+    # earlier arm pattern of that match opens with Gate::. Strings, chars and line
+    # comments are blanked first so their brackets do not count.
     gate_arm="$(cat <<'AWK'
 function strip(s) {
     gsub(sprintf("%c%c.", 92, 92), "", s)
@@ -297,10 +297,12 @@ function strip(s) {
 NR == n { hit = sp > 0 && body[sp] == depth && gate[sp]; done = 1; exit }
 {
     s = strip($0)
-    if (sp > 0 && depth == body[sp] && s ~ /^[[:space:]]*(\|[[:space:]]*)?&?(crate::gates::)?Gate::[A-Z]/) gate[sp] = 1
-    depth += gsub(/\{/, "{", s) - gsub(/\}/, "}", s)
+    if (sp > 0 && depth == body[sp] && !arrow \
+        && s ~ /^[[:space:]]*(\|[[:space:]]*)?&?([a-z_][a-z0-9_]*[[:space:]]*@[[:space:]]*)?(Some\([[:space:]]*)?&?((crate::)?gates::)?Gate::[A-Z]/) gate[sp] = 1
+    depth += gsub(/[{([]/, "&", s) - gsub(/[})\]]/, "&", s)
     while (sp > 0 && depth < body[sp]) sp--
     if (s ~ /(^|[^A-Za-z0-9_])match[[:space:]].*\{[[:space:]]*$/) { body[++sp] = depth; gate[sp] = 0 }
+    if (s ~ /[^[:space:]]/) arrow = s ~ /=>[[:space:]]*$/
 }
 END { exit !(done && hit) }
 AWK

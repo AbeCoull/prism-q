@@ -152,10 +152,10 @@ depth-10 circuit from 73 to 7. The tiles are FP64 bound on that card, so a dense
 still costs about half a sweep.
 
 The CUDA C source sits in `.cu` files beside the launchers and reaches
-`KERNEL_SOURCE_TEMPLATE` through `include_str!`. Placeholders such as `{{BP_TABLE_SIZE}}`
-and `{{TILE_Q}}` in `kernels/dense.cu` are filled at device construction from the
-constants in `src/backend/statevector/kernels/batch_tables.rs`, so CPU and GPU share one
-value.
+`KERNEL_SOURCE_TEMPLATE` through `include_str!`. Placeholders in `kernels/dense.cu` are
+filled at device construction. Batch table sizes such as `{{BP_TABLE_SIZE}}` come from the
+constants in `src/backend/statevector/kernels/batch_tables/mod.rs`, so CPU and GPU share
+one value; the tile width `{{TILE_Q}}` comes from the GPU tile constants.
 
 ## Correctness
 

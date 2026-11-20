@@ -929,5 +929,4 @@ fn apply_diagonal_batch_scalar(
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]
-#[path = "batch_tables_tests.rs"]
 mod tests;

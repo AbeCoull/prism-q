@@ -10,6 +10,6 @@
 2534 src/backend/statevector/tests.rs
 2273 src/sim/compiled/tests.rs
 2178 src/sim/compiled/mod.rs
-2158 src/backend/statevector/kernels/qft.rs
+2156 src/backend/statevector/kernels/qft/mod.rs
 2122 src/circuit/svg.rs
 2118 src/backend/mps/mod.rs

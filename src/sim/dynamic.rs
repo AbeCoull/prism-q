@@ -441,7 +441,7 @@ impl<'p> Prepared<'p> {
     }
 
     fn fold(&self, runs: impl IntoIterator<Item = Result<ShotRun>>) -> Result<ShotsResult> {
-        trajectory::collect_shots(
+        trajectory::collect_trajectory_shots(
             self.program.num_held_bits(),
             self.noise.as_ref().and_then(|noise| noise.memory),
             self.plan.resolved(),

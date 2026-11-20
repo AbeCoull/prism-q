@@ -1672,7 +1672,7 @@ fn run_serial(
         &mut ChaCha8Rng,
     ) -> Result<(Vec<bool>, Vec<bool>, crate::sim::RunMetadata)>,
 ) -> Result<ShotsResult> {
-    collect_shots(
+    collect_trajectory_shots(
         circuit.num_classical_bits,
         memory,
         route,
@@ -1686,7 +1686,7 @@ fn run_serial(
 
 /// Gather each shot's record, leak flags and metadata, in shot order, into a result
 /// over `num_bits` classical bits, returning the first shot error.
-pub(crate) fn collect_shots(
+pub(super) fn collect_trajectory_shots(
     num_bits: usize,
     memory: Option<MemorySpec>,
     route: crate::sim::ResolvedBackend,
@@ -1772,7 +1772,7 @@ fn run_trajectories_par(
             })
         })
         .collect();
-    collect_shots(
+    collect_trajectory_shots(
         circuit.num_classical_bits,
         memory,
         route,

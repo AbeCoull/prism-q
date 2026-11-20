@@ -2150,9 +2150,7 @@ impl StatevectorBackend {
 }
 
 #[cfg(test)]
-#[path = "qft_tests.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "qft_gather_tests.rs"]
 mod qft_gather_tests;

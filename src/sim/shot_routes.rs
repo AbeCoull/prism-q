@@ -794,11 +794,7 @@ pub(super) fn fold_shots(
     let mut metadata = RunMetadata::exact(route);
     for (i, run) in runs.enumerate() {
         let (bits, shot_metadata) = run?;
-        if i == 0 {
-            metadata = shot_metadata;
-        } else {
-            metadata.weaken_with(&shot_metadata);
-        }
+        metadata.fold(i, shot_metadata);
         shots.push(bits);
     }
     Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata))

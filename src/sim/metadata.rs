@@ -262,6 +262,17 @@ impl RunMetadata {
         }
     }
 
+    /// Fold in the metadata of shot `index`: shot 0 replaces the starting value, so an
+    /// empty run keeps it, and every later shot goes through [`Self::weaken_with`].
+    #[inline]
+    pub(crate) fn fold(&mut self, index: usize, shot: RunMetadata) {
+        if index == 0 {
+            *self = shot;
+        } else {
+            self.weaken_with(&shot);
+        }
+    }
+
     /// Metadata for a run whose blocks were evolved separately. Each block holds
     /// part of one state, so the bound is the product; exactness is the weakest
     /// of the parts and placement is `Device` only when every part was, so the

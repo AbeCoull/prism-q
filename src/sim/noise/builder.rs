@@ -938,19 +938,6 @@ fn over_rotation_channel(gate: &Gate, relative: f64) -> Option<NoiseChannel> {
     })
 }
 
-/// Qubits an instruction occupies. Empty for a barrier, which schedules
-/// rather than acts; [`idle_qubits_by_layer`] handles that case itself.
-fn instruction_qubits(instr: &Instruction) -> SmallVec<[usize; 4]> {
-    match instr {
-        Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } => {
-            targets.clone()
-        }
-        Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => smallvec![*qubit],
-        Instruction::Barrier { qubits } | Instruction::Save { qubits, .. } => qubits.clone(),
-        Instruction::Region(region) => region.qubits().iter().copied().collect(),
-    }
-}
-
 /// For the highest-indexed instruction of each layer, the qubits that layer
 /// left idle; empty everywhere else.
 ///
@@ -963,13 +950,13 @@ fn idle_qubits_by_layer(circuit: &Circuit) -> Vec<Vec<usize>> {
     let mut layers: Vec<(Vec<bool>, usize)> = Vec::new();
 
     for (idx, instr) in circuit.instructions.iter().enumerate() {
-        let qubits = instruction_qubits(instr);
+        let qubits = instr.qubits();
         if qubits.is_empty() {
             continue;
         }
         let layer = qubits.iter().map(|&q| qubit_depth[q]).max().unwrap_or(0);
         if matches!(instr, Instruction::Barrier { .. }) {
-            for &qubit in &qubits {
+            for &qubit in qubits {
                 qubit_depth[qubit] = layer;
             }
             continue;
@@ -978,7 +965,7 @@ fn idle_qubits_by_layer(circuit: &Circuit) -> Vec<Vec<usize>> {
             layers.push((vec![false; num_qubits], 0));
         }
         let (touched, last) = &mut layers[layer];
-        for &qubit in &qubits {
+        for &qubit in qubits {
             touched[qubit] = true;
             qubit_depth[qubit] = layer + 1;
         }
@@ -1032,13 +1019,13 @@ fn scheduled_layers(circuit: &Circuit, times: &GateTimes) -> ScheduledLayers {
     let final_slot = circuit.instructions.len().saturating_sub(1);
 
     for (idx, instr) in circuit.instructions.iter().enumerate() {
-        let qubits = instruction_qubits(instr);
+        let qubits = instr.qubits();
         if qubits.is_empty() {
             continue;
         }
         let layer = qubits.iter().map(|&q| qubit_depth[q]).max().unwrap_or(0);
         if matches!(instr, Instruction::Barrier { .. }) {
-            for &qubit in &qubits {
+            for &qubit in qubits {
                 qubit_depth[qubit] = layer;
             }
             continue;
@@ -1053,7 +1040,7 @@ fn scheduled_layers(circuit: &Circuit, times: &GateTimes) -> ScheduledLayers {
         }
         let duration = times.duration(instr);
         let entry = &mut layers[layer];
-        for &qubit in &qubits {
+        for &qubit in qubits {
             entry.busy[qubit] = entry.busy[qubit].max(duration);
             qubit_depth[qubit] = layer + 1;
             uses[qubit].push((layer, idx));

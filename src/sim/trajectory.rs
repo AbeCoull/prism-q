@@ -1672,30 +1672,44 @@ fn run_serial(
         &mut ChaCha8Rng,
     ) -> Result<(Vec<bool>, Vec<bool>, crate::sim::RunMetadata)>,
 ) -> Result<ShotsResult> {
-    let mut shots = Vec::with_capacity(num_shots);
-    let mut leaked = Vec::new();
+    collect_shots(
+        circuit.num_classical_bits,
+        memory,
+        route,
+        (0..num_shots).map(|i| {
+            let shot_seed = crate::sim::mix_seed(seed, i);
+            let mut rng = noise_rng(shot_seed);
+            shot(shot_seed, &mut rng)
+        }),
+    )
+}
+
+/// Gather each shot's record, leak flags and metadata, in shot order, into a result
+/// over `num_bits` classical bits, returning the first shot error.
+pub(crate) fn collect_shots(
+    num_bits: usize,
+    memory: Option<MemorySpec>,
+    route: crate::sim::ResolvedBackend,
+    runs: impl IntoIterator<Item = Result<(Vec<bool>, Vec<bool>, crate::sim::RunMetadata)>>,
+) -> Result<ShotsResult> {
+    let runs = runs.into_iter();
+    let mut shots = Vec::with_capacity(runs.size_hint().0);
+    let mut leaked = Vec::with_capacity(runs.size_hint().0);
     let mut metadata = crate::sim::RunMetadata::exact(route);
-    for i in 0..num_shots {
-        let shot_seed = crate::sim::mix_seed(seed, i);
-        let mut rng = noise_rng(shot_seed);
-        let (result, shot_leaked, shot_metadata) = shot(shot_seed, &mut rng)?;
-        if i == 0 {
-            metadata = shot_metadata;
-        } else {
-            metadata.weaken_with(&shot_metadata);
-        }
+    for (i, run) in runs.enumerate() {
+        let (result, shot_leaked, shot_metadata) = run?;
+        metadata.fold(i, shot_metadata);
         shots.push(result);
         leaked.push(shot_leaked);
     }
-
     Ok(with_leak_record(
-        ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata),
+        ShotsResult::from_shots(shots, num_bits).with_metadata(metadata),
         memory,
         leaked,
     ))
 }
 
-pub(crate) fn with_leak_record(
+fn with_leak_record(
     result: ShotsResult,
     memory: Option<MemorySpec>,
     leaked: Vec<Vec<bool>>,
@@ -1758,24 +1772,12 @@ fn run_trajectories_par(
             })
         })
         .collect();
-
-    let mut metadata = crate::sim::RunMetadata::exact(route);
-    let mut shots = Vec::with_capacity(num_shots);
-    let mut leaked = Vec::with_capacity(num_shots);
-    for (index, (bits, shot_leaked, shot_metadata)) in results?.into_iter().enumerate() {
-        if index == 0 {
-            metadata = shot_metadata;
-        } else {
-            metadata.weaken_with(&shot_metadata);
-        }
-        shots.push(bits);
-        leaked.push(shot_leaked);
-    }
-    Ok(with_leak_record(
-        ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata),
+    collect_shots(
+        circuit.num_classical_bits,
         memory,
-        leaked,
-    ))
+        route,
+        results?.into_iter().map(Ok),
+    )
 }
 
 /// One sampled Pauli error: the ordinal of the event that fired, counting the
@@ -2528,11 +2530,7 @@ fn collect_groups(
     let mut shots = vec![Vec::new(); groups.members.len()];
     let mut metadata = crate::sim::RunMetadata::exact(route);
     for (index, (group, records, group_metadata)) in runs.into_iter().enumerate() {
-        if index == 0 {
-            metadata = group_metadata;
-        } else {
-            metadata.weaken_with(&group_metadata);
-        }
+        metadata.fold(index, group_metadata);
         for (&shot, record) in groups.members(group).iter().zip(records) {
             shots[shot] = record;
         }

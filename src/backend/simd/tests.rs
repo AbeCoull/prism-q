@@ -970,7 +970,7 @@ fn target_feature_kernel_count_is_pinned() {
         ("src/backend/statevector/kernels/tiling.rs", 0),
         ("src/sim/compiled/accumulator.rs", 2),
         ("src/sim/compiled/bts.rs", 4),
-        ("src/sim/compiled/propagation.rs", 15),
+        ("src/sim/compiled/propagation.rs", 14),
         ("src/sim/compiled/rng.rs", 4),
     ];
     for (file, want) in expected {

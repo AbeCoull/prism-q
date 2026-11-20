@@ -384,49 +384,57 @@ fn colmajor_forward_sim_matches_stabilizer_tableau_with_late_fresh_qubits() {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
-#[test]
-fn rowmul_phase_masks_match_the_ag_phase_rule() {
-    for letters in 0..16u64 {
-        let bit = |k: u32| (letters >> k) & 1;
-        let (x1, z1, x2, z2) = (bit(0), bit(1), bit(2), bit(3));
-        let (plus, nonzero) = super::rowmul_spec::phase_masks(x1, z1, x2, z2);
-        let phase = 2 * (plus & 1) as i64 - (nonzero & 1) as i64;
-        assert_eq!(phase, super::rowmul_spec::ag_phase(x1, z1, x2, z2, 0));
+// Aaronson-Gottesman `g`: the phase exponent, in units of `i`, that the bit-`b` letters
+// contribute to the product of the source and destination rows.
+fn ag_phase(x1: u64, z1: u64, x2: u64, z2: u64, b: u32) -> i64 {
+    let bit = |w: u64| ((w >> b) & 1) as i64;
+    let (x2, z2) = (bit(x2), bit(z2));
+    match (bit(x1), bit(z1)) {
+        (0, 0) => 0,
+        (1, 1) => z2 - x2,
+        (1, 0) => z2 * (2 * x2 - 1),
+        _ => x2 * (1 - 2 * z2),
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+// Row lengths straddle each kernel tier threshold (NEON at 2 words, AVX2 at 4, AVX-512
+// at 8) and leave odd tails past each vector width.
 #[test]
-fn rowmul_avx2_matches_bitwise_phase_rule() {
+fn rowmul_phase_matches_ag_phase_rule() {
     use rand::{RngExt, SeedableRng};
 
-    fn run<const N: usize>(rng: &mut rand_chacha::ChaCha8Rng) {
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    for nw in [0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 35] {
         for _ in 0..64 {
-            let src: [u64; N] = rng.random();
-            let mut dst: [u64; N] = rng.random();
+            let mut src: Vec<u64> = (0..2 * nw).map(|_| rng.random()).collect();
+            let mut dst: Vec<u64> = (0..2 * nw).map(|_| rng.random()).collect();
             if rng.random_bool(0.25) {
-                dst = src;
+                dst.clone_from(&src);
             }
             if rng.random_bool(0.25) {
-                dst[..N / 2].fill(0);
+                dst[..nw].fill(0);
             }
-            super::rowmul_spec::check(src, dst, rng.random());
+            if nw > 0 && rng.random_bool(0.25) {
+                let start = rng.random_range(0..nw);
+                for half in [0, nw] {
+                    let words = half + start..half + (start + 8).min(nw);
+                    src[words.clone()].fill(0);
+                    dst[words].fill(0);
+                }
+            }
+            let (src_phase, dst_phase) = (rng.random_bool(0.5), rng.random_bool(0.5));
+            let mut exponent = 2 * i64::from(src_phase) + 2 * i64::from(dst_phase);
+            for w in 0..nw {
+                for b in 0..64 {
+                    exponent += ag_phase(src[w], src[nw + w], dst[w], dst[nw + w], b);
+                }
+            }
+            let product: Vec<u64> = src.iter().zip(&dst).map(|(s, d)| s ^ d).collect();
+            let phase = rowmul_phase(&src, &mut dst, nw, src_phase, dst_phase);
+            assert_eq!(phase, exponent.rem_euclid(4) >= 2, "{nw} words");
+            assert_eq!(dst, product, "{nw} words");
         }
     }
-
-    if !is_x86_feature_detected!("avx2") {
-        return;
-    }
-    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
-    run::<0>(&mut rng);
-    run::<2>(&mut rng);
-    run::<6>(&mut rng);
-    run::<8>(&mut rng);
-    run::<10>(&mut rng);
-    run::<14>(&mut rng);
-    run::<16>(&mut rng);
-    run::<18>(&mut rng);
 }
 
 // Each AVX-512 propagation kernel against its AVX2 counterpart on random rows, at
@@ -507,45 +515,6 @@ fn avx512_propagation_kernels_match_avx2() {
                 apply(&mut wide, kernel, true, m);
             }
             assert_eq!(wide, narrow, "kernel {kernel}, {m} words");
-        }
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[test]
-fn rowmul_avx512_matches_avx2() {
-    use rand::{RngExt, SeedableRng};
-    if !crate::backend::word_ops::avx512_test_host() {
-        return;
-    }
-    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
-    for nw in [8, 9, 15, 16, 17, 24, 35, 64] {
-        for _ in 0..32 {
-            let mut src: Vec<u64> = (0..2 * nw).map(|_| rng.random()).collect();
-            let mut dst: Vec<u64> = (0..2 * nw).map(|_| rng.random()).collect();
-            if rng.random_bool(0.25) {
-                dst.clone_from(&src);
-            }
-            if rng.random_bool(0.25) {
-                let start = rng.random_range(0..nw);
-                for half in [0, nw] {
-                    let words = half + start..half + (start + 8).min(nw);
-                    src[words.clone()].fill(0);
-                    dst[words].fill(0);
-                }
-            }
-            let initial_sum = rng.random_range(0..4);
-            let mut narrow = dst.clone();
-            let mut wide = dst;
-            // SAFETY: AVX-512F and VPOPCNTDQ detected; both buffers hold `2 * nw` words.
-            let (want, got) = unsafe {
-                (
-                    rowmul_avx2(src.as_ptr(), narrow.as_mut_ptr(), nw, initial_sum),
-                    rowmul_avx512(src.as_ptr(), wide.as_mut_ptr(), nw, initial_sum),
-                )
-            };
-            assert_eq!(got, want, "{nw} words");
-            assert_eq!(wide, narrow, "{nw} words");
         }
     }
 }

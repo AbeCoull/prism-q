@@ -20,7 +20,7 @@ use prism_q::sim;
 use prism_q::sim::gradient::{run_expectation_gradient, run_expectation_gradient_shift};
 use prism_q::sim::{run_expectation_values, run_observable_expectation};
 use prism_q::{
-    BackendKind, ClassicalCondition, DynamicProgram, DynamicProgramBuilder, Instruction,
+    BackendKind, ClassicalCondition, DynamicProgram, DynamicProgramBuilder, Instruction, Limits,
     MpsBackend, Parameters, PauliAxis, PauliObservable, PauliTerm, PreparedCircuit, TrotterOrder,
 };
 use rand::RngExt;
@@ -2423,21 +2423,29 @@ fn bench_tn_sliced_contraction(_c: &mut Criterion) {}
 /// caps multiply the work: `2^19` takes 16 slices at 5.6x and `2^18` takes 128
 /// at 23x. The cap and budget are arguments rather than
 /// environment variables so the rest of the process keeps the real ceiling.
+///
+/// `40_cap18` runs 40 qubits at a `2^18` cap, a quarter of that tree's
+/// 1048576-element peak. It takes 16 slices, and which legs they fix sets the
+/// work: the legs a search ranked on intermediate size picks cost 3.3x the
+/// whole contraction's planned multiply-adds, while another set of 16 slices
+/// costs 2.7x. A change to the slice chooser moves this row through the legs
+/// it lands on.
 #[cfg(feature = "bench-internal")]
 fn bench_tn_sliced_contraction(c: &mut Criterion) {
     let mut group = c.benchmark_group("tn/sliced_hea_l7");
     configure_group(&mut group);
 
-    let n = 50;
-    let circuit = circuits::hardware_efficient_ansatz(n, 7, SEED);
-    let observable = [PauliTerm::z(0), PauliTerm::z(n / 2)];
-    group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
-        b.iter(|| {
-            black_box(
-                scalar_expectation_capped(circ, &observable, 1 << 20, 1 << 10, None).unwrap(),
-            );
+    for (label, n, cap) in [("50", 50, 1 << 20), ("40_cap18", 40, 1 << 18)] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 7, SEED);
+        let observable = [PauliTerm::z(0), PauliTerm::z(n / 2)];
+        group.bench_with_input(BenchmarkId::from_parameter(label), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    scalar_expectation_capped(circ, &observable, cap, 1 << 10, None).unwrap(),
+                );
+            });
         });
-    });
+    }
     group.finish();
 }
 
@@ -2629,6 +2637,48 @@ fn bench_tn_sample_chain(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
                 run_shots_with(BackendKind::TensorNetwork, circ, 32, 42).unwrap();
+            });
+        });
+    }
+    group.finish();
+}
+
+/// Terminal shot sampling with the tensor-network peak cap below the largest
+/// intermediate of the doubled marginals, so the sweep slices them.
+///
+/// The probability ceiling is lowered to 8 qubits so the 16-qubit circuit takes
+/// the conditional sweep rather than the dense arm. Every shot contracts one
+/// marginal per qubit, so a slice search that reruns on each contraction is
+/// paid qubits times shots over. `bounded` sets a `1e-3` tolerance, so a
+/// marginal over the cap is truncated before whatever remains is sliced.
+fn bench_tn_sample_capped(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tn/sample_capped_hea_l4");
+    configure_group(&mut group);
+
+    let mut circuit = circuits::hardware_efficient_ansatz(16, 4, SEED);
+    circuit.measure_all();
+    let rows = [
+        ("16_cap12", BackendKind::TensorNetwork, 12),
+        (
+            "16_cap12_bounded",
+            BackendKind::TensorNetworkBounded { tolerance: 1e-3 },
+            12,
+        ),
+    ];
+    for (label, kind, cap) in rows {
+        let limits = Limits::new()
+            .max_probability_qubits(8)
+            .max_tn_peak_qubits(cap);
+        group.bench_with_input(BenchmarkId::from_parameter(label), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(kind.clone())
+                        .limits(limits)
+                        .seed(42)
+                        .shots(8)
+                        .unwrap(),
+                )
             });
         });
     }
@@ -6393,6 +6443,7 @@ criterion_group! {
     bench_tn_midmeasure_chain,
     bench_tn_noisy_chain,
     bench_tn_sample_chain,
+    bench_tn_sample_capped,
     // Auto dispatch
     bench_auto_expectation,
     bench_auto_expectation_above_cap,

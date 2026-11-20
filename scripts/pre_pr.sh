@@ -9,6 +9,10 @@
 #
 # Checks and what triggers them:
 #
+#   audit-layout       every run; warns, never fails. A source file over the line
+#                      budget (scripts/pre_pr_layout_baseline.txt lists the files
+#                      already over it), a new #[path] module attribute, or a `_ =>`
+#                      arm added to a match over Gate variants.
 #   audit-*            every run. Added lines with an em dash; a bench_variant switch
 #                      left in src/ or benches/; an edit to CHANGELOG.md, which
 #                      git-cliff writes at release; and, when the checkout carries the
@@ -252,6 +256,42 @@ audit_changelog() {
     return 1
 }
 
+LINE_BUDGET=2000
+
+# Warnings for the code organization rules, one per line. Never fails the run.
+layout_warnings() {
+    local f lines base n text start
+    for f in "${CHANGED[@]}"; do
+        [[ "$f" == src/*.rs && -f "$f" ]] || continue
+        lines="$(wc -l < "$f")"
+        (( lines > LINE_BUDGET )) || continue
+        base="$(awk -v f="$f" '$2 == f { print $1 }' scripts/pre_pr_layout_baseline.txt)"
+        if [[ -z "$base" ]]; then
+            echo "$f: $lines lines, over the $LINE_BUDGET line budget; split it along its seams"
+        elif (( lines > base )); then
+            echo "$f: grew from $base to $lines lines, already over the $LINE_BUDGET line budget"
+        fi
+    done
+    # A #[path] line counts as new unless the same text was removed elsewhere (a move).
+    LC_ALL=C awk -F $'\x1f' '
+        $5 !~ /#\[path[[:space:]]*=/ || $2 !~ /^src\/.*\.rs$/ { next }
+        { t = $5; gsub(/^[[:space:]]+|[[:space:]]+$/, "", t) }
+        $1 == "-" { gone[t] = 1; next }
+        { added[$2 ":" $3] = t }
+        END {
+            for (k in added) if (!(added[k] in gone))
+                printf "%s: new #[path] module; give the module a directory and a sibling tests.rs\n", k
+        }' "$RECORDS" | sort
+    LC_ALL=C awk -F $'\x1f' '$1 == "+" && $2 ~ /^src\/.*\.rs$/ && $5 ~ /^[[:space:]]*_[[:space:]]*=>/ {
+        print $2 " " $3 }' "$RECORDS" | while read -r f n; do
+        start=$(( n > 40 ? n - 40 : 1 ))
+        text="$(sed -n "${start},$(( n - 1 ))p" "$f")"
+        if grep -q 'match ' <<< "$text" && grep -qE '(^|[^A-Za-z_])Gate::[A-Z]' <<< "$text"; then
+            echo "$f:$n: \`_ =>\` arm in a match over Gate; list the variants so a new one fails to compile"
+        fi
+    done
+}
+
 check_fmt()          { cargo fmt --all -- --check; }
 check_clippy()       { cargo clippy --all-targets --features parallel "${LINT[@]}"; }
 check_nextest()      { cargo nextest run --features parallel; }
@@ -275,7 +315,7 @@ check_doc_pulse() {
 # toolchain for it. On Windows the clang and llvm-ar that Visual Studio bundles serve.
 check_cross() {
     local tools=() bin var="${1//-/_}"
-    for bin in "/c/Program Files/Microsoft Visual Studio"/*/*/VC/Tools/Llvm/x64/bin; do
+    for bin in "/c/Program Files"{," (x86)"}/"Microsoft Visual Studio"/*/*/VC/Tools/Llvm/x64/bin; do
         [[ -x "$bin/clang.exe" ]] && tools=("CC_$var=$bin/clang.exe" "AR_$var=$bin/llvm-ar.exe")
     done
     env "${tools[@]}" cargo clippy --target "$1" --lib --features parallel "${LINT[@]}"
@@ -351,6 +391,12 @@ else
 fi
 add audit-bench-switch run "every run" audit_bench_switch
 run_if audit-changelog "$(first_file '^CHANGELOG\.md$')" "CHANGELOG.md untouched" audit_changelog
+LAYOUT_WARNINGS="$(layout_warnings)"
+if [[ -n "$LAYOUT_WARNINGS" ]]; then
+    add audit-layout warn "$(grep -c . <<< "$LAYOUT_WARNINGS") code organization warning(s), listed above the summary"
+else
+    add audit-layout skip "no code organization warning"
+fi
 
 RS_FILE="$(first_file '\.rs$')"
 RUST_INPUT="$(printf '%s\n' "${CHANGED[@]}" | grep -v -E '\.md$' \
@@ -465,7 +511,7 @@ run_if sh-syntax "${SH_FILES[0]:-}" "no shell script changed" check_sh_syntax
 GPU_HIT="$(first_file '^src/gpu/')"
 [[ -n "$GPU_HIT" ]] && add owed-gpu owed "$GPU_HIT" \
     "scripts/test-gpu.ps1 on a host with a card; the GPU goldens fail without one"
-MPI_HIT="$(first_file '^src/.*mpi[^/]*$|^tools/dist_mpi_check\.rs$')"
+MPI_HIT="$(first_file '^src/(.*/)?([^/]*_)?mpi[^/]*$|^tools/dist_mpi_check\.rs$')"
 MPI_HIT="${MPI_HIT:-$(first_hit '^[+-]$' '\.(rs|toml)$' 'MpiComm|distributed-mpi')}"
 [[ -n "$MPI_HIT" ]] && add owed-mpi owed "$MPI_HIT" \
     "--all-features clippy and nextest after . scripts/mpi-env.ps1, then scripts/test-mpi.ps1"
@@ -483,6 +529,13 @@ if [[ -n "$CROSS_UNBUILT" ]]; then
     echo "  A platform gate outside src/ is changed, which --lib does not build. Read its arms:"
     echo "    $CROSS_UNBUILT"
 fi
+print_layout_warnings() {
+    [[ -z "$LAYOUT_WARNINGS" ]] && return 0
+    echo ""
+    echo "  Code organization warnings (do not fail the run):"
+    sed 's/^/    /' <<< "$LAYOUT_WARNINGS"
+}
+print_layout_warnings
 [[ -n "$PLAN" ]] && exit 0
 
 # --- Run ---
@@ -513,6 +566,7 @@ for (( i = 0; i < ${#NAMES[@]}; i++ )); do
     TIMES+=("$(fmt_time $(( SECONDS - start )))")
 done
 
+print_layout_warnings
 echo ""
 echo "=== Summary ==="
 for (( i = 0; i < ${#NAMES[@]}; i++ )); do

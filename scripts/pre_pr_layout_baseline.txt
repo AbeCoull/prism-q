@@ -1,0 +1,15 @@
+# Source files already over the pre_pr.sh line budget, with their line counts when
+# the budget was set. pre_pr.sh warns when one of these grows or a new file crosses
+# the budget. Lower a count, or drop a line, when a split shrinks the file.
+3395 src/backend/mps/mps_tests.rs
+3077 src/sim/tests.rs
+3056 src/backend/distributed_statevector/tests.rs
+3009 src/sim/route_ledger_tests.rs
+2898 src/sim/trajectory.rs
+2556 src/sim/noise/tests.rs
+2534 src/backend/statevector/tests.rs
+2273 src/sim/compiled/tests.rs
+2178 src/sim/compiled/mod.rs
+2158 src/backend/statevector/kernels/qft.rs
+2122 src/circuit/svg.rs
+2118 src/backend/mps/mod.rs

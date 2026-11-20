@@ -446,11 +446,7 @@ pub(crate) fn plan_bounded_expectations(
             return Some(Err(e));
         }
         let network = ScalarExpectationNetwork::for_observable(&circuit, observable).ok()?;
-        let slots: Vec<Option<TensorMeta>> = network
-            .tensors
-            .iter()
-            .map(|t| Some(TensorMeta::of(t)))
-            .collect();
+        let slots: Vec<TensorMeta> = network.tensors.iter().map(TensorMeta::of).collect();
         let plan = plan_pairs(slots, None, peak_bound, budget - spent)?;
         spent += plan.total;
         planned.push((network, plan, None));

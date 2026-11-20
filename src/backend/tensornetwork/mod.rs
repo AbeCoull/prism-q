@@ -311,8 +311,7 @@ impl TensorNetworkBackend {
         let mut samples = BasisSamples::new(num_shots, n);
 
         let network = self.double_for_partial_trace(&[0]);
-        let slots: Vec<Option<TensorMeta>> =
-            network.iter().map(|t| Some(TensorMeta::of(t))).collect();
+        let slots: Vec<TensorMeta> = network.iter().map(TensorMeta::of).collect();
         let plan =
             plan_pairs(slots, None, usize::MAX, usize::MAX).expect("unbounded pass completes");
         let mut probe: Vec<Complex64> = Vec::new();

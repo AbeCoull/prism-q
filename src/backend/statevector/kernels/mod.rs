@@ -467,6 +467,494 @@ pub(crate) fn par_apply_unitary(state: &mut [Complex64], targets: &[usize], mat:
         });
 }
 
+/// `Rzz(theta)` phases on even and odd parity: `e^{-i theta/2}` and `e^{i theta/2}`.
+#[inline(always)]
+pub(crate) fn rzz_phases(theta: f64) -> (Complex64, Complex64) {
+    (
+        Complex64::from_polar(1.0, -theta / 2.0),
+        Complex64::from_polar(1.0, theta / 2.0),
+    )
+}
+
+#[cfg_attr(not(feature = "parallel"), allow(unused_variables))]
+#[inline(always)]
+pub(crate) fn apply_diagonal(
+    state: &mut [Complex64],
+    num_qubits: usize,
+    target: usize,
+    d0: Complex64,
+    d1: Complex64,
+) {
+    let skip_lo = is_phase_one(d0);
+    #[cfg(feature = "parallel")]
+    if num_qubits >= kernel_parallel_qubits() {
+        apply_diagonal_par(state, target, d0, d1, skip_lo);
+        return;
+    }
+    simd::apply_diagonal_sequential(state, target, d0, d1, skip_lo);
+}
+
+#[cfg(feature = "parallel")]
+#[inline(always)]
+fn apply_diagonal_par(
+    state: &mut [Complex64],
+    target: usize,
+    d0: Complex64,
+    d1: Complex64,
+    skip_lo: bool,
+) {
+    let half = 1usize << target;
+    let block_size = half << 1;
+    let num_blocks = state.len() / block_size;
+
+    if num_blocks < 4 {
+        apply_diagonal_high_target_par(state, target, d0, d1, skip_lo);
+        return;
+    }
+
+    const MIN_TILE: usize = 8192;
+    let tile_size = MIN_TILE.max(block_size);
+    state.par_chunks_mut(tile_size).for_each(|tile| {
+        simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
+    });
+}
+
+#[inline(always)]
+pub(crate) fn apply_cx(state: &mut [Complex64], num_qubits: usize, control: usize, target: usize) {
+    let ctrl_half = 1usize << control;
+    let tgt_half = 1usize << target;
+    if control > target {
+        let tgt_block = tgt_half << 1;
+        for_each_hi_half(state, num_qubits, ctrl_half, tgt_block, |hi| {
+            for sub in hi.chunks_mut(tgt_block) {
+                let (sub_lo, sub_hi) = sub.split_at_mut(tgt_half);
+                simd::swap_slices(sub_lo, sub_hi);
+            }
+        });
+    } else {
+        let ctrl_block = ctrl_half << 1;
+        for_each_half_pair(state, num_qubits, tgt_half, ctrl_block, |lo, hi| {
+            for (lo_sub, hi_sub) in lo.chunks_mut(ctrl_block).zip(hi.chunks_mut(ctrl_block)) {
+                let (_, lo_active) = lo_sub.split_at_mut(ctrl_half);
+                let (_, hi_active) = hi_sub.split_at_mut(ctrl_half);
+                simd::swap_slices(lo_active, hi_active);
+            }
+        });
+    }
+}
+
+#[inline(always)]
+pub(crate) fn apply_cz(state: &mut [Complex64], num_qubits: usize, q0: usize, q1: usize) {
+    let (lo_q, hi_q) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
+    let lo_half = 1usize << lo_q;
+    let lo_block = lo_half << 1;
+    for_each_hi_half(state, num_qubits, 1usize << hi_q, lo_block, |hi_group| {
+        for sub in hi_group.chunks_mut(lo_block) {
+            simd::negate_slice(&mut sub[lo_half..]);
+        }
+    });
+}
+
+/// Multiply each amplitude by `same` where bits `q0` and `q1` agree and by `diff`
+/// where they differ.
+#[cfg_attr(not(feature = "parallel"), allow(unused_variables))]
+#[inline(always)]
+pub(crate) fn apply_parity2q(
+    state: &mut [Complex64],
+    num_qubits: usize,
+    q0: usize,
+    q1: usize,
+    same: Complex64,
+    diff: Complex64,
+) {
+    #[cfg(feature = "parallel")]
+    if num_qubits >= kernel_parallel_qubits() {
+        apply_parity2q_par(state, q0, q1, same, diff);
+        return;
+    }
+
+    let phases = [same, diff];
+    for (i, amp) in state.iter_mut().enumerate() {
+        let parity = ((i >> q0) ^ (i >> q1)) & 1;
+        *amp *= phases[parity];
+    }
+}
+
+#[cfg(feature = "parallel")]
+#[inline(always)]
+fn apply_parity2q_par(
+    state: &mut [Complex64],
+    q0: usize,
+    q1: usize,
+    same: Complex64,
+    diff: Complex64,
+) {
+    let phases = [same, diff];
+    state
+        .par_chunks_mut(MIN_PAR_ELEMS)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            let base = chunk_idx * MIN_PAR_ELEMS;
+            for (j, amp) in chunk.iter_mut().enumerate() {
+                let i = base + j;
+                let parity = ((i >> q0) ^ (i >> q1)) & 1;
+                *amp *= phases[parity];
+            }
+        });
+}
+
+#[inline(always)]
+pub(crate) fn apply_cu(
+    state: &mut [Complex64],
+    num_qubits: usize,
+    control: usize,
+    target: usize,
+    mat: [[Complex64; 2]; 2],
+) {
+    let prepared = simd::PreparedGate1q::new(&mat);
+    let ctrl_half = 1usize << control;
+    let tgt_half = 1usize << target;
+    if control > target {
+        for_each_hi_half(state, num_qubits, ctrl_half, tgt_half << 1, |hi| {
+            prepared.apply_full_sequential(hi, target)
+        });
+    } else {
+        let ctrl_block = ctrl_half << 1;
+        for_each_half_pair(state, num_qubits, tgt_half, ctrl_block, |lo, hi| {
+            for (lo_sub, hi_sub) in lo.chunks_mut(ctrl_block).zip(hi.chunks_mut(ctrl_block)) {
+                let (_, lo_active) = lo_sub.split_at_mut(ctrl_half);
+                let (_, hi_active) = hi_sub.split_at_mut(ctrl_half);
+                prepared.apply(lo_active, hi_active);
+            }
+        });
+    }
+}
+
+#[inline(always)]
+pub(crate) fn apply_mcu(
+    state: &mut [Complex64],
+    num_qubits: usize,
+    controls: &[usize],
+    target: usize,
+    mat: [[Complex64; 2]; 2],
+) {
+    #[cfg(feature = "parallel")]
+    if num_qubits >= kernel_parallel_qubits() {
+        apply_mcu_par(state, num_qubits, controls, target, mat);
+        return;
+    }
+
+    let ctrl_mask: usize = controls.iter().map(|&q| 1usize << q).fold(0, |a, b| a | b);
+    let tgt_mask = 1usize << target;
+    let mut sorted_buf = [0usize; MCU_QUBIT_BUF];
+    let num_special = sorted_mcu_qubits(controls, target, &mut sorted_buf);
+    let sorted = &sorted_buf[..num_special];
+
+    let num_iters = 1usize << (num_qubits - num_special);
+    let prepared = simd::PreparedGate1q::new(&mat);
+    let base_ptr = state.as_mut_ptr() as *mut f64;
+
+    for i in 0..num_iters {
+        let mut base = i;
+        for &q in sorted {
+            base = insert_zero_bit(base, q);
+        }
+        let idx0 = base | ctrl_mask;
+        let idx1 = idx0 | tgt_mask;
+        // SAFETY: indices from insert_zero_bit bijection are in-bounds and disjoint.
+        unsafe {
+            prepared.apply_pair_ptr(base_ptr.add(idx0 * 2), base_ptr.add(idx1 * 2));
+        }
+    }
+}
+
+#[cfg(feature = "parallel")]
+#[inline(always)]
+fn apply_mcu_par(
+    state: &mut [Complex64],
+    num_qubits: usize,
+    controls: &[usize],
+    target: usize,
+    mat: [[Complex64; 2]; 2],
+) {
+    let ctrl_mask: usize = controls.iter().map(|&q| 1usize << q).fold(0, |a, b| a | b);
+    let tgt_mask = 1usize << target;
+    let mut sorted_buf = [0usize; MCU_QUBIT_BUF];
+    let num_special = sorted_mcu_qubits(controls, target, &mut sorted_buf);
+    let sorted = &sorted_buf[..num_special];
+
+    let num_iters = 1usize << (num_qubits - num_special);
+    let ptr = SendPtr(state.as_mut_ptr());
+    let prepared = simd::PreparedGate1q::new(&mat);
+
+    // SAFETY: insert_zero_bit bijection gives disjoint index pairs per iteration.
+    (0..num_iters)
+        .into_par_iter()
+        .with_min_len(MIN_PAR_ITERS)
+        .for_each(move |i| {
+            let mut base = i;
+            for &q in sorted {
+                base = insert_zero_bit(base, q);
+            }
+            let idx0 = base | ctrl_mask;
+            let idx1 = idx0 | tgt_mask;
+            // SAFETY: idx0 and idx1 are in bounds and unique for this iteration.
+            // The outer iterator maps every pair once, so Rayon tasks do not alias.
+            unsafe {
+                let fp = ptr.as_f64_ptr();
+                prepared.apply_pair_ptr(fp.add(idx0 * 2), fp.add(idx1 * 2));
+            }
+        });
+}
+
+#[inline(always)]
+pub(crate) fn apply_cu_phase(
+    state: &mut [Complex64],
+    num_qubits: usize,
+    control: usize,
+    target: usize,
+    phase: Complex64,
+) {
+    let (lo, hi) = if control < target {
+        (control, target)
+    } else {
+        (target, control)
+    };
+    let lo_half = 1usize << lo;
+    let lo_block = lo_half << 1;
+    for_each_hi_half(state, num_qubits, 1usize << hi, lo_block, |hi_group| {
+        for sub in hi_group.chunks_mut(lo_block) {
+            simd::scale_complex_slice(&mut sub[lo_half..], phase);
+        }
+    });
+}
+
+#[inline(always)]
+pub(crate) fn apply_mcu_phase(
+    state: &mut [Complex64],
+    num_qubits: usize,
+    controls: &[usize],
+    target: usize,
+    phase: Complex64,
+) {
+    #[cfg(feature = "parallel")]
+    if num_qubits >= kernel_parallel_qubits() {
+        apply_mcu_phase_par(state, num_qubits, controls, target, phase);
+        return;
+    }
+
+    let all_mask: usize = controls
+        .iter()
+        .chain(std::iter::once(&target))
+        .map(|&q| 1usize << q)
+        .fold(0, |a, b| a | b);
+    let mut sorted_buf = [0usize; MCU_QUBIT_BUF];
+    let num_special = sorted_mcu_qubits(controls, target, &mut sorted_buf);
+    let sorted = &sorted_buf[..num_special];
+
+    let num_iters = 1usize << (num_qubits - num_special);
+    for i in 0..num_iters {
+        let mut base = i;
+        for &q in sorted {
+            base = insert_zero_bit(base, q);
+        }
+        state[base | all_mask] *= phase;
+    }
+}
+
+#[cfg(feature = "parallel")]
+#[inline(always)]
+fn apply_mcu_phase_par(
+    state: &mut [Complex64],
+    num_qubits: usize,
+    controls: &[usize],
+    target: usize,
+    phase: Complex64,
+) {
+    let all_mask: usize = controls
+        .iter()
+        .chain(std::iter::once(&target))
+        .map(|&q| 1usize << q)
+        .fold(0, |a, b| a | b);
+    let mut sorted_buf = [0usize; MCU_QUBIT_BUF];
+    let num_special = sorted_mcu_qubits(controls, target, &mut sorted_buf);
+    let sorted = &sorted_buf[..num_special];
+
+    let num_iters = 1usize << (num_qubits - num_special);
+    let ptr = SendPtr(state.as_mut_ptr());
+
+    // SAFETY: insert_zero_bit bijection gives disjoint indices per iteration.
+    (0..num_iters)
+        .into_par_iter()
+        .with_min_len(MIN_PAR_ITERS)
+        .for_each(move |i| {
+            let mut base = i;
+            for &q in sorted {
+                base = insert_zero_bit(base, q);
+            }
+            let idx = base | all_mask;
+            // SAFETY: idx is in bounds and unique for this iteration. The
+            // insert_zero_bit mapping excludes all special qubits before masks are set.
+            unsafe {
+                let val = ptr.load(idx);
+                ptr.store(idx, val * phase);
+            }
+        });
+}
+
+#[inline(always)]
+pub(crate) fn apply_swap(state: &mut [Complex64], num_qubits: usize, q0: usize, q1: usize) {
+    let (lo, hi) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
+    let lo_half = 1usize << lo;
+    let lo_block = lo_half << 1;
+    for_each_half_pair(
+        state,
+        num_qubits,
+        1usize << hi,
+        lo_block,
+        |lo_group, hi_group| {
+            for (lo_sub, hi_sub) in lo_group
+                .chunks_mut(lo_block)
+                .zip(hi_group.chunks_mut(lo_block))
+            {
+                let (_, lo_sub_hi) = lo_sub.split_at_mut(lo_half);
+                let (hi_sub_lo, _) = hi_sub.split_at_mut(lo_half);
+                simd::swap_slices(lo_sub_hi, hi_sub_lo);
+            }
+        },
+    );
+}
+
+#[inline(always)]
+pub(crate) fn apply_fused_2q(
+    state: &mut [Complex64],
+    num_qubits: usize,
+    q0: usize,
+    q1: usize,
+    mat: &[[Complex64; 4]; 4],
+) {
+    if q0.max(q1) - q0.min(q1) == 1 {
+        #[cfg(feature = "parallel")]
+        if num_qubits >= kernel_parallel_qubits() {
+            apply_fused_2q_adjacent_par(state, q0, q1, mat);
+            return;
+        }
+
+        apply_fused_2q_adjacent(state, q0, q1, mat);
+        return;
+    }
+
+    #[cfg(feature = "parallel")]
+    if num_qubits >= kernel_parallel_qubits() {
+        apply_fused_2q_par(state, num_qubits, q0, q1, mat);
+        return;
+    }
+
+    let prepared = simd::PreparedGate2q::new(mat);
+    prepared.apply_full(state, num_qubits, q0, q1);
+}
+
+#[inline(always)]
+fn apply_fused_2q_adjacent(
+    state: &mut [Complex64],
+    q0: usize,
+    q1: usize,
+    mat: &[[Complex64; 4]; 4],
+) {
+    let lo = q0.min(q1);
+    let stride = 1usize << lo;
+    let block_size = stride << 2;
+    let q0_is_lo = q0 == lo;
+    let prepared = simd::PreparedGate2q::new(mat);
+
+    for chunk in state.chunks_mut(block_size) {
+        let ptr = chunk.as_mut_ptr() as *mut f64;
+        for offset in 0..stride {
+            let i = adjacent_2q_indices(offset, stride, q0_is_lo);
+            // SAFETY: each offset maps to one disjoint 4-amplitude group in
+            // this chunk, and all indices are below block_size.
+            unsafe {
+                prepared.apply_group_ptr(ptr, i);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "parallel")]
+#[inline(always)]
+fn apply_fused_2q_adjacent_group(
+    ptr: SendPtr,
+    group: usize,
+    lo: usize,
+    stride: usize,
+    block_size: usize,
+    q0_is_lo: bool,
+    prepared: &simd::PreparedGate2q,
+) {
+    let block = group >> lo;
+    let offset = group & (stride - 1);
+    let base = block * block_size;
+    let local = adjacent_2q_indices(offset, stride, q0_is_lo);
+    let i = [
+        base + local[0],
+        base + local[1],
+        base + local[2],
+        base + local[3],
+    ];
+    // SAFETY: adjacent group mapping partitions the state into disjoint
+    // 4-amplitude groups, and group < state.len() / 4.
+    unsafe {
+        prepared.apply_group_ptr(ptr.as_f64_ptr(), i);
+    }
+}
+
+#[cfg(feature = "parallel")]
+#[inline(always)]
+fn apply_fused_2q_par(
+    state: &mut [Complex64],
+    num_qubits: usize,
+    q0: usize,
+    q1: usize,
+    mat: &[[Complex64; 4]; 4],
+) {
+    let n_iter = 1usize << (num_qubits - 2);
+    let tile = MIN_PAR_ITERS.min(n_iter);
+    let ptr = SendPtr(state.as_mut_ptr());
+    let prepared = simd::PreparedGate2q::new(mat);
+
+    (0..n_iter / tile).into_par_iter().for_each(move |t| {
+        // SAFETY: aligned runs of the group order are disjoint and each
+        // lies inside the state.
+        unsafe {
+            prepared.apply_groups_ptr(ptr.as_f64_ptr(), t * tile, tile, q0, q1);
+        }
+    });
+}
+
+#[cfg(feature = "parallel")]
+#[inline(always)]
+fn apply_fused_2q_adjacent_par(
+    state: &mut [Complex64],
+    q0: usize,
+    q1: usize,
+    mat: &[[Complex64; 4]; 4],
+) {
+    let lo = q0.min(q1);
+    let stride = 1usize << lo;
+    let block_size = stride << 2;
+    let q0_is_lo = q0 == lo;
+    let n_groups = state.len() >> 2;
+    let ptr = SendPtr(state.as_mut_ptr());
+    let prepared = simd::PreparedGate2q::new(mat);
+
+    (0..n_groups)
+        .into_par_iter()
+        .with_min_len(MIN_PAR_ITERS)
+        .for_each(move |group| {
+            apply_fused_2q_adjacent_group(ptr, group, lo, stride, block_size, q0_is_lo, &prepared);
+        });
+}
+
 impl StatevectorBackend {
     #[inline(always)]
     pub(super) fn apply_single_gate(&mut self, target: usize, mat: [[Complex64; 2]; 2]) {
@@ -486,168 +974,36 @@ impl StatevectorBackend {
     pub(super) fn apply_diagonal_gate(&mut self, target: usize, d0: Complex64, d1: Complex64) {
         #[cfg(test)]
         super::sweeps::tick();
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= kernel_parallel_qubits() {
-            self.apply_diagonal_gate_par(target, d0, d1);
-            return;
-        }
-
-        let skip_lo = is_phase_one(d0);
-        simd::apply_diagonal_sequential(&mut self.state, target, d0, d1, skip_lo);
-    }
-
-    #[cfg(feature = "parallel")]
-    #[inline(always)]
-    fn apply_diagonal_gate_par(&mut self, target: usize, d0: Complex64, d1: Complex64) {
-        let skip_lo = is_phase_one(d0);
-
-        let half = 1usize << target;
-        let block_size = half << 1;
-        let num_blocks = self.state.len() / block_size;
-
-        if num_blocks < 4 {
-            apply_diagonal_high_target_par(&mut self.state, target, d0, d1, skip_lo);
-            return;
-        }
-
-        const MIN_TILE: usize = 8192;
-        let tile_size = MIN_TILE.max(block_size);
-        self.state.par_chunks_mut(tile_size).for_each(|tile| {
-            simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
-        });
+        apply_diagonal(&mut self.state, self.num_qubits, target, d0, d1);
     }
 
     #[inline(always)]
     pub(super) fn apply_cx(&mut self, control: usize, target: usize) {
         #[cfg(test)]
         super::sweeps::tick();
-        let ctrl_half = 1usize << control;
-        let tgt_half = 1usize << target;
-        if control > target {
-            let tgt_block = tgt_half << 1;
-            for_each_hi_half(
-                &mut self.state,
-                self.num_qubits,
-                ctrl_half,
-                tgt_block,
-                |hi| {
-                    for sub in hi.chunks_mut(tgt_block) {
-                        let (sub_lo, sub_hi) = sub.split_at_mut(tgt_half);
-                        simd::swap_slices(sub_lo, sub_hi);
-                    }
-                },
-            );
-        } else {
-            let ctrl_block = ctrl_half << 1;
-            for_each_half_pair(
-                &mut self.state,
-                self.num_qubits,
-                tgt_half,
-                ctrl_block,
-                |lo, hi| {
-                    for (lo_sub, hi_sub) in lo.chunks_mut(ctrl_block).zip(hi.chunks_mut(ctrl_block))
-                    {
-                        let (_, lo_active) = lo_sub.split_at_mut(ctrl_half);
-                        let (_, hi_active) = hi_sub.split_at_mut(ctrl_half);
-                        simd::swap_slices(lo_active, hi_active);
-                    }
-                },
-            );
-        }
+        apply_cx(&mut self.state, self.num_qubits, control, target);
     }
 
     #[inline(always)]
     pub(super) fn apply_cz(&mut self, q0: usize, q1: usize) {
         #[cfg(test)]
         super::sweeps::tick();
-        let (lo_q, hi_q) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
-        let lo_half = 1usize << lo_q;
-        let lo_block = lo_half << 1;
-        for_each_hi_half(
-            &mut self.state,
-            self.num_qubits,
-            1usize << hi_q,
-            lo_block,
-            |hi_group| {
-                for sub in hi_group.chunks_mut(lo_block) {
-                    simd::negate_slice(&mut sub[lo_half..]);
-                }
-            },
-        );
+        apply_cz(&mut self.state, self.num_qubits, q0, q1);
     }
 
     #[inline(always)]
     pub(super) fn apply_rzz(&mut self, q0: usize, q1: usize, theta: f64) {
         #[cfg(test)]
         super::sweeps::tick();
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= kernel_parallel_qubits() {
-            self.apply_rzz_par(q0, q1, theta);
-            return;
-        }
-
-        let phase_same = Complex64::from_polar(1.0, -theta / 2.0);
-        let phase_diff = Complex64::from_polar(1.0, theta / 2.0);
-        let phases = [phase_same, phase_diff];
-
-        for (i, amp) in self.state.iter_mut().enumerate() {
-            let parity = ((i >> q0) ^ (i >> q1)) & 1;
-            *amp *= phases[parity];
-        }
-    }
-
-    #[cfg(feature = "parallel")]
-    #[inline(always)]
-    fn apply_rzz_par(&mut self, q0: usize, q1: usize, theta: f64) {
-        let phase_same = Complex64::from_polar(1.0, -theta / 2.0);
-        let phase_diff = Complex64::from_polar(1.0, theta / 2.0);
-        let phases = [phase_same, phase_diff];
-
-        self.state
-            .par_chunks_mut(MIN_PAR_ELEMS)
-            .enumerate()
-            .for_each(|(chunk_idx, chunk)| {
-                let base = chunk_idx * MIN_PAR_ELEMS;
-                for (j, amp) in chunk.iter_mut().enumerate() {
-                    let i = base + j;
-                    let parity = ((i >> q0) ^ (i >> q1)) & 1;
-                    *amp *= phases[parity];
-                }
-            });
+        let (same, diff) = rzz_phases(theta);
+        apply_parity2q(&mut self.state, self.num_qubits, q0, q1, same, diff);
     }
 
     #[inline(always)]
     pub(super) fn apply_cu(&mut self, control: usize, target: usize, mat: [[Complex64; 2]; 2]) {
         #[cfg(test)]
         super::sweeps::tick();
-        let prepared = simd::PreparedGate1q::new(&mat);
-        let ctrl_half = 1usize << control;
-        let tgt_half = 1usize << target;
-        if control > target {
-            for_each_hi_half(
-                &mut self.state,
-                self.num_qubits,
-                ctrl_half,
-                tgt_half << 1,
-                |hi| prepared.apply_full_sequential(hi, target),
-            );
-        } else {
-            let ctrl_block = ctrl_half << 1;
-            for_each_half_pair(
-                &mut self.state,
-                self.num_qubits,
-                tgt_half,
-                ctrl_block,
-                |lo, hi| {
-                    for (lo_sub, hi_sub) in lo.chunks_mut(ctrl_block).zip(hi.chunks_mut(ctrl_block))
-                    {
-                        let (_, lo_active) = lo_sub.split_at_mut(ctrl_half);
-                        let (_, hi_active) = hi_sub.split_at_mut(ctrl_half);
-                        prepared.apply(lo_active, hi_active);
-                    }
-                },
-            );
-        }
+        apply_cu(&mut self.state, self.num_qubits, control, target, mat);
     }
 
     #[inline(always)]
@@ -671,291 +1027,35 @@ impl StatevectorBackend {
     ) {
         #[cfg(test)]
         super::sweeps::tick();
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= kernel_parallel_qubits() {
-            self.apply_mcu_par(controls, target, mat);
-            return;
-        }
-
-        let ctrl_mask: usize = controls.iter().map(|&q| 1usize << q).fold(0, |a, b| a | b);
-        let tgt_mask = 1usize << target;
-        let mut sorted_buf = [0usize; MCU_QUBIT_BUF];
-        let num_special = sorted_mcu_qubits(controls, target, &mut sorted_buf);
-        let sorted = &sorted_buf[..num_special];
-
-        let num_iters = 1usize << (self.num_qubits - num_special);
-        let prepared = simd::PreparedGate1q::new(&mat);
-        let base_ptr = self.state.as_mut_ptr() as *mut f64;
-
-        for i in 0..num_iters {
-            let mut base = i;
-            for &q in sorted {
-                base = insert_zero_bit(base, q);
-            }
-            let idx0 = base | ctrl_mask;
-            let idx1 = idx0 | tgt_mask;
-            // SAFETY: indices from insert_zero_bit bijection are in-bounds and disjoint.
-            unsafe {
-                prepared.apply_pair_ptr(base_ptr.add(idx0 * 2), base_ptr.add(idx1 * 2));
-            }
-        }
-    }
-
-    #[cfg(feature = "parallel")]
-    #[inline(always)]
-    fn apply_mcu_par(&mut self, controls: &[usize], target: usize, mat: [[Complex64; 2]; 2]) {
-        let ctrl_mask: usize = controls.iter().map(|&q| 1usize << q).fold(0, |a, b| a | b);
-        let tgt_mask = 1usize << target;
-        let mut sorted_buf = [0usize; MCU_QUBIT_BUF];
-        let num_special = sorted_mcu_qubits(controls, target, &mut sorted_buf);
-        let sorted = &sorted_buf[..num_special];
-
-        let num_iters = 1usize << (self.num_qubits - num_special);
-        let ptr = SendPtr(self.state.as_mut_ptr());
-        let prepared = simd::PreparedGate1q::new(&mat);
-
-        // SAFETY: insert_zero_bit bijection gives disjoint index pairs per iteration.
-        (0..num_iters)
-            .into_par_iter()
-            .with_min_len(MIN_PAR_ITERS)
-            .for_each(move |i| {
-                let mut base = i;
-                for &q in sorted {
-                    base = insert_zero_bit(base, q);
-                }
-                let idx0 = base | ctrl_mask;
-                let idx1 = idx0 | tgt_mask;
-                // SAFETY: idx0 and idx1 are in bounds and unique for this iteration.
-                // The outer iterator maps every pair once, so Rayon tasks do not alias.
-                unsafe {
-                    let fp = ptr.as_f64_ptr();
-                    prepared.apply_pair_ptr(fp.add(idx0 * 2), fp.add(idx1 * 2));
-                }
-            });
+        apply_mcu(&mut self.state, self.num_qubits, controls, target, mat);
     }
 
     #[inline(always)]
     pub(super) fn apply_cu_phase(&mut self, control: usize, target: usize, phase: Complex64) {
         #[cfg(test)]
         super::sweeps::tick();
-        let (lo, hi) = if control < target {
-            (control, target)
-        } else {
-            (target, control)
-        };
-        let lo_half = 1usize << lo;
-        let lo_block = lo_half << 1;
-        for_each_hi_half(
-            &mut self.state,
-            self.num_qubits,
-            1usize << hi,
-            lo_block,
-            |hi_group| {
-                for sub in hi_group.chunks_mut(lo_block) {
-                    simd::scale_complex_slice(&mut sub[lo_half..], phase);
-                }
-            },
-        );
+        apply_cu_phase(&mut self.state, self.num_qubits, control, target, phase);
     }
 
     #[inline(always)]
     pub(super) fn apply_mcu_phase(&mut self, controls: &[usize], target: usize, phase: Complex64) {
         #[cfg(test)]
         super::sweeps::tick();
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= kernel_parallel_qubits() {
-            self.apply_mcu_phase_par(controls, target, phase);
-            return;
-        }
-
-        let all_mask: usize = controls
-            .iter()
-            .chain(std::iter::once(&target))
-            .map(|&q| 1usize << q)
-            .fold(0, |a, b| a | b);
-        let mut sorted_buf = [0usize; MCU_QUBIT_BUF];
-        let num_special = sorted_mcu_qubits(controls, target, &mut sorted_buf);
-        let sorted = &sorted_buf[..num_special];
-
-        let num_iters = 1usize << (self.num_qubits - num_special);
-        for i in 0..num_iters {
-            let mut base = i;
-            for &q in sorted {
-                base = insert_zero_bit(base, q);
-            }
-            self.state[base | all_mask] *= phase;
-        }
-    }
-
-    #[cfg(feature = "parallel")]
-    #[inline(always)]
-    fn apply_mcu_phase_par(&mut self, controls: &[usize], target: usize, phase: Complex64) {
-        let all_mask: usize = controls
-            .iter()
-            .chain(std::iter::once(&target))
-            .map(|&q| 1usize << q)
-            .fold(0, |a, b| a | b);
-        let mut sorted_buf = [0usize; MCU_QUBIT_BUF];
-        let num_special = sorted_mcu_qubits(controls, target, &mut sorted_buf);
-        let sorted = &sorted_buf[..num_special];
-
-        let num_iters = 1usize << (self.num_qubits - num_special);
-        let ptr = SendPtr(self.state.as_mut_ptr());
-
-        // SAFETY: insert_zero_bit bijection gives disjoint indices per iteration.
-        (0..num_iters)
-            .into_par_iter()
-            .with_min_len(MIN_PAR_ITERS)
-            .for_each(move |i| {
-                let mut base = i;
-                for &q in sorted {
-                    base = insert_zero_bit(base, q);
-                }
-                let idx = base | all_mask;
-                // SAFETY: idx is in bounds and unique for this iteration. The
-                // insert_zero_bit mapping excludes all special qubits before masks are set.
-                unsafe {
-                    let val = ptr.load(idx);
-                    ptr.store(idx, val * phase);
-                }
-            });
+        apply_mcu_phase(&mut self.state, self.num_qubits, controls, target, phase);
     }
 
     #[inline(always)]
     pub(super) fn apply_swap(&mut self, q0: usize, q1: usize) {
         #[cfg(test)]
         super::sweeps::tick();
-        let (lo, hi) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
-        let lo_half = 1usize << lo;
-        let lo_block = lo_half << 1;
-        for_each_half_pair(
-            &mut self.state,
-            self.num_qubits,
-            1usize << hi,
-            lo_block,
-            |lo_group, hi_group| {
-                for (lo_sub, hi_sub) in lo_group
-                    .chunks_mut(lo_block)
-                    .zip(hi_group.chunks_mut(lo_block))
-                {
-                    let (_, lo_sub_hi) = lo_sub.split_at_mut(lo_half);
-                    let (hi_sub_lo, _) = hi_sub.split_at_mut(lo_half);
-                    simd::swap_slices(lo_sub_hi, hi_sub_lo);
-                }
-            },
-        );
+        apply_swap(&mut self.state, self.num_qubits, q0, q1);
     }
 
     #[inline(always)]
     pub(crate) fn apply_fused_2q(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
         #[cfg(test)]
         super::sweeps::tick();
-        if q0.max(q1) - q0.min(q1) == 1 {
-            #[cfg(feature = "parallel")]
-            if self.num_qubits >= kernel_parallel_qubits() {
-                self.apply_fused_2q_adjacent_par(q0, q1, mat);
-                return;
-            }
-
-            self.apply_fused_2q_adjacent(q0, q1, mat);
-            return;
-        }
-
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= kernel_parallel_qubits() {
-            self.apply_fused_2q_par(q0, q1, mat);
-            return;
-        }
-
-        let prepared = simd::PreparedGate2q::new(mat);
-        prepared.apply_full(&mut self.state, self.num_qubits, q0, q1);
-    }
-
-    #[inline(always)]
-    fn apply_fused_2q_adjacent(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
-        let lo = q0.min(q1);
-        let stride = 1usize << lo;
-        let block_size = stride << 2;
-        let q0_is_lo = q0 == lo;
-        let prepared = simd::PreparedGate2q::new(mat);
-
-        for chunk in self.state.chunks_mut(block_size) {
-            let ptr = chunk.as_mut_ptr() as *mut f64;
-            for offset in 0..stride {
-                let i = adjacent_2q_indices(offset, stride, q0_is_lo);
-                // SAFETY: each offset maps to one disjoint 4-amplitude group in
-                // this chunk, and all indices are below block_size.
-                unsafe {
-                    prepared.apply_group_ptr(ptr, i);
-                }
-            }
-        }
-    }
-
-    #[cfg(feature = "parallel")]
-    #[inline(always)]
-    fn apply_fused_2q_adjacent_group(
-        ptr: SendPtr,
-        group: usize,
-        lo: usize,
-        stride: usize,
-        block_size: usize,
-        q0_is_lo: bool,
-        prepared: &simd::PreparedGate2q,
-    ) {
-        let block = group >> lo;
-        let offset = group & (stride - 1);
-        let base = block * block_size;
-        let local = adjacent_2q_indices(offset, stride, q0_is_lo);
-        let i = [
-            base + local[0],
-            base + local[1],
-            base + local[2],
-            base + local[3],
-        ];
-        // SAFETY: adjacent group mapping partitions the state into disjoint
-        // 4-amplitude groups, and group < state.len() / 4.
-        unsafe {
-            prepared.apply_group_ptr(ptr.as_f64_ptr(), i);
-        }
-    }
-
-    #[cfg(feature = "parallel")]
-    #[inline(always)]
-    fn apply_fused_2q_par(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
-        let n_iter = 1usize << (self.num_qubits - 2);
-        let tile = MIN_PAR_ITERS.min(n_iter);
-        let ptr = SendPtr(self.state.as_mut_ptr());
-        let prepared = simd::PreparedGate2q::new(mat);
-
-        (0..n_iter / tile).into_par_iter().for_each(move |t| {
-            // SAFETY: aligned runs of the group order are disjoint and each
-            // lies inside the state.
-            unsafe {
-                prepared.apply_groups_ptr(ptr.as_f64_ptr(), t * tile, tile, q0, q1);
-            }
-        });
-    }
-
-    #[cfg(feature = "parallel")]
-    #[inline(always)]
-    fn apply_fused_2q_adjacent_par(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
-        let lo = q0.min(q1);
-        let stride = 1usize << lo;
-        let block_size = stride << 2;
-        let q0_is_lo = q0 == lo;
-        let n_groups = self.state.len() >> 2;
-        let ptr = SendPtr(self.state.as_mut_ptr());
-        let prepared = simd::PreparedGate2q::new(mat);
-
-        (0..n_groups)
-            .into_par_iter()
-            .with_min_len(MIN_PAR_ITERS)
-            .for_each(move |group| {
-                Self::apply_fused_2q_adjacent_group(
-                    ptr, group, lo, stride, block_size, q0_is_lo, &prepared,
-                );
-            });
+        apply_fused_2q(&mut self.state, self.num_qubits, q0, q1, mat);
     }
 
     #[inline(always)]

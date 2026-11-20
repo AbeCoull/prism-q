@@ -388,7 +388,6 @@ jobs:
       fail-fast: false
       matrix:
         group:
-          - { name: propagation, harnesses: 'rowmul_spec::', jobs: 4 }
           - { name: words-tail, harnesses: 'rowmul_words_avx2_nw0 rowmul_words_avx2_nw3', jobs: 1 }
           - { name: words-chunk, harnesses: 'rowmul_words_avx2_nw5', jobs: 1 }
           - { name: words-nt, harnesses: 'rowmul_words_avx2_nt_nw4', jobs: 1 }

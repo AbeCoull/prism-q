@@ -151,16 +151,14 @@ pub(crate) fn geometric_sample_xoshiro(
     (u.ln() / ln_1mp) as usize
 }
 
-/// RNG source for [`fill_one_event`]. Bundles uniform and geometric draws
+/// RNG source for [`for_each_event_shot`]. Bundles uniform and geometric draws
 /// onto a single trait so the shared body can use one `&mut` borrow instead
 /// of two concurrent closures over the underlying generator.
-#[cfg(feature = "gpu")]
-trait EventRng {
+pub(super) trait EventRng {
     fn uniform(&mut self) -> f64;
     fn geom(&mut self, ln_1mp: f64) -> usize;
 }
 
-#[cfg(feature = "gpu")]
 impl EventRng for ChaCha8Rng {
     #[inline(always)]
     fn uniform(&mut self) -> f64 {
@@ -184,9 +182,114 @@ impl EventRng for crate::sim::compiled::rng::Xoshiro256PlusPlus {
     }
 }
 
+/// Draw an event of total rate `p` over the shots `[start, end)`, handing
+/// `hit(state, shot, r, dense)` the uniform `r` drawn for each visited shot.
+///
+/// A dense sweep (`dense` true) visits every shot and leaves the `r < p` test
+/// to `hit`; it runs for `p >= 0.5` or fewer than 32 shots, where skipping
+/// saves too little to pay for its logarithms. Otherwise geometric skips visit
+/// only the shots that fire, and `r` is uniform on `[0, 1)` given the event fired.
+#[inline(always)]
+pub(super) fn for_each_event_shot<S: ?Sized>(
+    rng: &mut impl EventRng,
+    p: f64,
+    start: usize,
+    end: usize,
+    state: &mut S,
+    hit: impl Fn(&mut S, usize, f64, bool),
+) {
+    if p >= 0.5 || end - start < 32 {
+        for shot in start..end {
+            let r = rng.uniform();
+            hit(state, shot, r, true);
+        }
+        return;
+    }
+
+    let ln_1mp = (-p).ln_1p();
+    let mut shot = start + rng.geom(ln_1mp);
+    while shot < end {
+        let r = rng.uniform();
+        hit(state, shot, r, false);
+        shot += 1 + rng.geom(ln_1mp);
+    }
+}
+
+/// Thresholds that pick a single-qubit Pauli event's letter from a draw of
+/// [`for_each_event_shot`]: the cumulative rates for a dense draw, and the
+/// same rates over the event's total for a draw that already fired.
+#[derive(Clone, Copy)]
+pub(super) struct PauliSplit {
+    px: f64,
+    pxy: f64,
+    p_event: f64,
+    px_frac: f64,
+    pxy_frac: f64,
+}
+
+impl PauliSplit {
+    /// `None` when the event never fires.
+    #[inline(always)]
+    pub(super) fn new(px: f64, py: f64, pz: f64) -> Option<Self> {
+        let p_event = px + py + pz;
+        if p_event == 0.0 {
+            return None;
+        }
+        let pxy = px + py;
+        Some(Self {
+            px,
+            pxy,
+            p_event,
+            px_frac: px / p_event,
+            pxy_frac: pxy / p_event,
+        })
+    }
+
+    #[inline(always)]
+    pub(super) fn p_event(&self) -> f64 {
+        self.p_event
+    }
+
+    /// The letter for draw `r`, as 0 for none through 3 for Z.
+    #[inline(always)]
+    pub(super) fn letter(&self, r: f64, dense: bool) -> usize {
+        if dense {
+            if r < self.px {
+                1
+            } else if r < self.pxy {
+                2
+            } else if r < self.p_event {
+                3
+            } else {
+                0
+            }
+        } else if r < self.px_frac {
+            1
+        } else if r < self.pxy_frac {
+            2
+        } else {
+            3
+        }
+    }
+}
+
+/// Set `bit` of word `idx` in the masks one Pauli letter flips, with the
+/// letter convention of [`xor_pair_letter`].
+#[inline(always)]
+fn or_pauli_letter(x: &mut [u64], z: &mut [u64], idx: usize, bit: u64, letter: usize) {
+    match letter {
+        1 => z[idx] |= bit,
+        2 => {
+            z[idx] |= bit;
+            x[idx] |= bit;
+        }
+        3 => x[idx] |= bit,
+        _ => {}
+    }
+}
+
 /// Fill one event's portion of the noise masks. Shared by the serial master
-/// ChaCha path and the parallel per-event Xoshiro path, so the bernoulli
-/// and geometric branches live in exactly one place.
+/// ChaCha path and the parallel per-event Xoshiro path.
 #[cfg(feature = "gpu")]
 #[inline]
 fn fill_one_event(
@@ -197,51 +300,19 @@ fn fill_one_event(
     rng: &mut impl EventRng,
 ) {
     let [px, py, pz] = probs;
-    let p_event = px + py + pz;
-    if p_event == 0.0 {
+    let Some(split) = PauliSplit::new(px, py, pz) else {
         return;
-    }
-    let pxy = px + py;
-
-    // High-p or tiny chunk: a per-shot bernoulli sweep dominates geometric
-    // skipping overhead because most shots flip anyway.
-    if p_event >= 0.5 || chunk_shots < 32 {
-        for s in 0..chunk_shots {
-            let r = rng.uniform();
-            let slot_idx = s / 64;
-            let bit = 1u64 << (s % 64);
-            if r < px {
-                z_slot[slot_idx] |= bit;
-            } else if r < pxy {
-                z_slot[slot_idx] |= bit;
-                x_slot[slot_idx] |= bit;
-            } else if r < p_event {
-                x_slot[slot_idx] |= bit;
-            }
-        }
-        return;
-    }
-
-    // Low-p: skip inactive shots via geometric sampling. `px_frac` / `pxy_frac`
-    // rescale to the conditional distribution given an event fired.
-    let ln_1mp = (-p_event).ln_1p();
-    let px_frac = px / p_event;
-    let pxy_frac = pxy / p_event;
-    let mut pos = rng.geom(ln_1mp);
-    while pos < chunk_shots {
-        let r = rng.uniform();
-        let slot_idx = pos / 64;
-        let bit = 1u64 << (pos % 64);
-        if r < px_frac {
-            z_slot[slot_idx] |= bit;
-        } else if r < pxy_frac {
-            z_slot[slot_idx] |= bit;
-            x_slot[slot_idx] |= bit;
-        } else {
-            x_slot[slot_idx] |= bit;
-        }
-        pos += 1 + rng.geom(ln_1mp);
-    }
+    };
+    for_each_event_shot(
+        rng,
+        split.p_event(),
+        0,
+        chunk_shots,
+        &mut (x_slot, z_slot),
+        |(x, z), shot, r, dense| {
+            or_pauli_letter(x, z, shot / 64, 1u64 << (shot % 64), split.letter(r, dense));
+        },
+    );
 }
 
 const NOISE_LUT_MIN_EVENTS: usize = 16;
@@ -1077,51 +1148,26 @@ impl NoisyCompiledSampler {
         m_words: usize,
         rng: &mut ChaCha8Rng,
     ) {
-        let ne = events.len();
-        let num_shots = end - start;
-
-        for i in 0..ne {
+        for i in 0..events.len() {
             let [px, py, pz] = events.probs[i];
-            let p_event = px + py + pz;
-            if p_event == 0.0 {
+            let Some(split) = PauliSplit::new(px, py, pz) else {
                 continue;
-            }
-
-            if p_event >= 0.5 || num_shots < 32 {
-                for s in start..end {
-                    let r: f64 = rand::RngExt::random(rng);
-                    if r < px {
-                        let b = s * m_words;
-                        xor_words(&mut accum[b..b + m_words], events.z_flip(i));
-                    } else if r < px + py {
-                        let b = s * m_words;
-                        xor_words(&mut accum[b..b + m_words], events.x_flip(i));
-                        xor_words(&mut accum[b..b + m_words], events.z_flip(i));
-                    } else if r < p_event {
-                        let b = s * m_words;
-                        xor_words(&mut accum[b..b + m_words], events.x_flip(i));
+            };
+            let (x_row, z_row) = (events.x_flip(i), events.z_flip(i));
+            for_each_event_shot(
+                rng,
+                split.p_event(),
+                start,
+                end,
+                accum,
+                |accum, shot, r, dense| {
+                    let letter = split.letter(r, dense);
+                    if letter != 0 {
+                        let b = shot * m_words;
+                        xor_pair_letter(&mut accum[b..b + m_words], x_row, z_row, letter);
                     }
-                }
-            } else {
-                let ln_1mp = (-p_event).ln_1p();
-                let px_frac = px / p_event;
-                let pxy_frac = (px + py) / p_event;
-
-                let mut pos = start + geometric_sample(rng, ln_1mp);
-                while pos < end {
-                    let r: f64 = rand::RngExt::random(rng);
-                    let b = pos * m_words;
-                    if r < px_frac {
-                        xor_words(&mut accum[b..b + m_words], events.z_flip(i));
-                    } else if r < pxy_frac {
-                        xor_words(&mut accum[b..b + m_words], events.x_flip(i));
-                        xor_words(&mut accum[b..b + m_words], events.z_flip(i));
-                    } else {
-                        xor_words(&mut accum[b..b + m_words], events.x_flip(i));
-                    }
-                    pos += 1 + geometric_sample(rng, ln_1mp);
-                }
-            }
+                },
+            );
         }
     }
 
@@ -1136,32 +1182,19 @@ impl NoisyCompiledSampler {
         m_words: usize,
         rng: &mut ChaCha8Rng,
     ) {
-        let num_shots = end - start;
-
         for i in 0..events.pair_probs.len() {
             let p = events.pair_probs[i];
             if p == 0.0 {
                 continue;
             }
-
-            if p >= 0.5 || num_shots < 32 {
-                for s in start..end {
-                    let r: f64 = rand::RngExt::random(rng);
-                    if r < p {
-                        let b = s * m_words;
-                        xor_pair_branch(events, i, r / p, &mut accum[b..b + m_words]);
-                    }
+            for_each_event_shot(rng, p, start, end, accum, |accum, shot, r, dense| {
+                if dense && r >= p {
+                    return;
                 }
-            } else {
-                let ln_1mp = (-p).ln_1p();
-                let mut pos = start + geometric_sample(rng, ln_1mp);
-                while pos < end {
-                    let r: f64 = rand::RngExt::random(rng);
-                    let b = pos * m_words;
-                    xor_pair_branch(events, i, r, &mut accum[b..b + m_words]);
-                    pos += 1 + geometric_sample(rng, ln_1mp);
-                }
-            }
+                let u = if dense { r / p } else { r };
+                let b = shot * m_words;
+                xor_pair_branch(events, i, u, &mut accum[b..b + m_words]);
+            });
         }
     }
 
@@ -1178,45 +1211,23 @@ impl NoisyCompiledSampler {
 
             for i in 0..num_events {
                 let [px, py, pz] = self.events.probs[i];
-                let p_event = px + py + pz;
-                if p_event == 0.0 {
+                let Some(split) = PauliSplit::new(px, py, pz) else {
                     continue;
-                }
+                };
 
                 let ew = i / 64;
                 let eb = 1u64 << (i % 64);
 
-                if p_event >= 0.5 || tile_n < 32 {
-                    for s in 0..tile_n {
-                        let r: f64 = rand::RngExt::random(&mut self.rng);
-                        if r < px {
-                            z_mask[s * e_words + ew] |= eb;
-                        } else if r < px + py {
-                            z_mask[s * e_words + ew] |= eb;
-                            x_mask[s * e_words + ew] |= eb;
-                        } else if r < p_event {
-                            x_mask[s * e_words + ew] |= eb;
-                        }
-                    }
-                } else {
-                    let ln_1mp = (-p_event).ln_1p();
-                    let px_frac = px / p_event;
-                    let pxy_frac = (px + py) / p_event;
-
-                    let mut pos = geometric_sample(&mut self.rng, ln_1mp);
-                    while pos < tile_n {
-                        let r: f64 = rand::RngExt::random(&mut self.rng);
-                        if r < px_frac {
-                            z_mask[pos * e_words + ew] |= eb;
-                        } else if r < pxy_frac {
-                            z_mask[pos * e_words + ew] |= eb;
-                            x_mask[pos * e_words + ew] |= eb;
-                        } else {
-                            x_mask[pos * e_words + ew] |= eb;
-                        }
-                        pos += 1 + geometric_sample(&mut self.rng, ln_1mp);
-                    }
-                }
+                for_each_event_shot(
+                    &mut self.rng,
+                    split.p_event(),
+                    0,
+                    tile_n,
+                    &mut (x_mask.as_mut_slice(), z_mask.as_mut_slice()),
+                    |(x, z), shot, r, dense| {
+                        or_pauli_letter(x, z, shot * e_words + ew, eb, split.letter(r, dense));
+                    },
+                );
             }
 
             let z_lut = self.z_lut.as_ref().unwrap();

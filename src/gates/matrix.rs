@@ -16,8 +16,8 @@ pub(crate) fn cu_matrix_4x4(mat: &[[Complex64; 2]; 2]) -> [[Complex64; 4]; 4] {
     ]
 }
 
-/// Row-major `2^n` by `2^n` matrix of a gate applying `mat` to the target when all
-/// `num_controls` controls are set, with `n = num_controls + 1`: the controls on the high
+/// Row-major `2^m` by `2^m` matrix of a gate applying `mat` to the target when all
+/// `num_controls` controls are set, with `m = num_controls + 1`: the controls on the high
 /// bits of the basis index and the target on bit 0.
 pub(crate) fn mcu_matrix(num_controls: usize, mat: &[[Complex64; 2]; 2]) -> Vec<Complex64> {
     let m = num_controls + 1;

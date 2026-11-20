@@ -425,6 +425,12 @@ impl NoiseFlipLut {
 
     #[inline(always)]
     fn apply_masked(&self, accum: &mut [u64], mask: &[u64]) {
+        const {
+            assert!(
+                LUT_GROUP_SIZE == 8,
+                "the group index below reads one mask byte per group"
+            )
+        };
         for g in 0..self.total_groups() {
             let byte = ((mask[g / 8] >> ((g % 8) * 8)) & 0xFF) as usize;
             if byte != 0 {

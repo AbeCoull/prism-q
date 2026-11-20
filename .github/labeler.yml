@@ -4,7 +4,7 @@ backend:
 
 simd:
   - changed-files:
-    - any-glob-to-any-file: 'src/backend/simd.rs'
+    - any-glob-to-any-file: 'src/backend/simd/**/*'
 
 statevector:
   - changed-files:
@@ -12,11 +12,11 @@ statevector:
 
 stabilizer:
   - changed-files:
-    - any-glob-to-any-file: 'src/backend/stabilizer.rs'
+    - any-glob-to-any-file: 'src/backend/stabilizer/**/*'
 
 mps:
   - changed-files:
-    - any-glob-to-any-file: 'src/backend/mps.rs'
+    - any-glob-to-any-file: 'src/backend/mps/**/*'
 
 parser:
   - changed-files:

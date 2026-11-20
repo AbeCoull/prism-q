@@ -5,11 +5,11 @@
 //! state vector.
 //!
 //! Z-axis rotations (`T`, `Tdg`, `Rz`, `P`) and the two-qubit `Rzz` branch
-//! natively, as do `Rx` and `Ry` in SPD and the Pauli path engine; SPP's `Rx`
-//! and `Ry`, and multi-qubit `PauliRot` strings everywhere, lower to Clifford
-//! conjugation around one `Rz` before the run, a `Fused` matrix lowers to the
-//! named gate it equals up to phase or to its ZYZ Euler triple, and a `Cu` with
-//! a diagonal or Pauli target lowers to Z rotations and Cliffords.
+//! natively, as do `Rx`, `Ry` and multi-qubit `PauliRot` strings in SPD and the
+//! Pauli path engine; SPP lowers those three to Clifford conjugation around one
+//! `Rz` before the run, a `Fused` matrix lowers to the named gate it equals up
+//! to phase or to its ZYZ Euler triple, and a `Cu` with a diagonal or Pauli
+//! target lowers to Z rotations and Cliffords.
 
 use num_complex::Complex64;
 
@@ -90,7 +90,7 @@ fn zz_rotation_angle(gate: &Gate) -> Option<f64> {
 
 /// Validate the circuit and lower every gate `native` rejects in one walk.
 ///
-/// Multi-qubit `PauliRot` strings, and `Rx` and `Ry` unless `native` keeps them,
+/// Multi-qubit `PauliRot` strings, `Rx` and `Ry`, unless `native` keeps them,
 /// expand through the shared CNOT-ladder lowering into Clifford conjugation
 /// around one `Rz`, and `Fused` matrices and `Cu` gates take the forms
 /// `lower_to_pauli_forms` documents; `Rzz` stays native and branches directly on
@@ -157,9 +157,9 @@ fn validate_and_lower<'c>(
 }
 
 /// Gates the deterministic engines take without lowering: the shared native set
-/// plus `Rx` and `Ry`, which branch on their own axis.
+/// plus `Rx`, `Ry` and `PauliRot`, which branch on their own Pauli string.
 fn is_spd_native(gate: &Gate) -> bool {
-    is_pauli_native(gate) || matches!(gate, Gate::Rx(_) | Gate::Ry(_))
+    is_pauli_native(gate) || matches!(gate, Gate::Rx(_) | Gate::Ry(_) | Gate::PauliRot(_))
 }
 
 fn count_branching_gates(circuit: &Circuit) -> usize {
@@ -170,7 +170,7 @@ fn count_branching_gates(circuit: &Circuit) -> usize {
             Instruction::Gate { gate, .. } => {
                 z_rotation_angle(gate).is_some()
                     || zz_rotation_angle(gate).is_some()
-                    || matches!(gate, Gate::Rx(_) | Gate::Ry(_))
+                    || matches!(gate, Gate::Rx(_) | Gate::Ry(_) | Gate::PauliRot(_))
             }
             _ => false,
         })

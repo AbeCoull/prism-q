@@ -269,8 +269,8 @@ pub struct PauliPathResult {
 /// Pauli propagation with coefficient truncation.
 ///
 /// The observable propagates back through the circuit as a weighted Pauli sum:
-/// Clifford gates conjugate it, `Rz`, `Rzz`, `Rx` and `Ry` split each
-/// anticommuting term in two, and every noise channel scales the terms by the
+/// Clifford gates conjugate it, `Rz`, `Rzz`, `Rx`, `Ry` and `PauliRot` split
+/// each anticommuting term in two, and every noise channel scales the terms by the
 /// channel's Pauli eigenvalues. Noise shrinks coefficients while rotations grow
 /// the term count, so the sum stays small whenever noise outpaces the branching
 /// rotations.

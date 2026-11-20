@@ -1089,3 +1089,227 @@ fn branching_gate_count_is_unchanged_by_native_axis_rotations() {
     );
     assert_eq!(run_spp(&circuit, 16, 42).unwrap().t_count, 5);
 }
+
+fn pauli_string_rotation(theta: f64, letters: &[(usize, PauliAxis)]) -> (Gate, Vec<usize>) {
+    let targets = letters.iter().map(|&(q, _)| q).collect();
+    let axes = letters.iter().map(|&(_, axis)| axis).collect();
+    (
+        Gate::PauliRot(Box::new(crate::gates::PauliRotData { theta, axes })),
+        targets,
+    )
+}
+
+/// Clifford layers between `PauliRot` strings of weight 1 to 5 on shuffled targets,
+/// with angles drawn from `(-pi, pi)` and pinned near `0`, `pi/2` and `+-pi`.
+fn random_pauli_string_circuit(n: usize, rotations: usize, seed: u64) -> Circuit {
+    use rand::RngExt;
+    use rand::seq::SliceRandom;
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let edge_angles = [
+        std::f64::consts::PI - 1e-3,
+        -std::f64::consts::PI + 1e-7,
+        std::f64::consts::PI,
+        std::f64::consts::FRAC_PI_2,
+        -2e-9,
+    ];
+    let letters = [PauliAxis::X, PauliAxis::Y, PauliAxis::Z];
+    let cliffords = [Gate::H, Gate::S, Gate::Sdg, Gate::SX, Gate::X];
+    let mut c = Circuit::new(n, 0);
+    let mut qubits: Vec<usize> = (0..n).collect();
+    for k in 0..rotations {
+        for q in 0..n {
+            c.add_gate(
+                cliffords[rng.random_range(0..cliffords.len())].clone(),
+                &[q],
+            );
+        }
+        qubits.shuffle(&mut rng);
+        c.add_gate(Gate::Cx, &[qubits[0], qubits[1]]);
+        let weight = 1 + k % 5.min(n);
+        qubits.shuffle(&mut rng);
+        let string: Vec<(usize, PauliAxis)> = qubits[..weight]
+            .iter()
+            .map(|&q| (q, letters[rng.random_range(0..3)]))
+            .collect();
+        let theta = if k % 4 == 3 {
+            edge_angles[(k / 4) % edge_angles.len()]
+        } else {
+            rng.random_range(-std::f64::consts::PI..std::f64::consts::PI)
+        };
+        let (gate, targets) = pauli_string_rotation(theta, &string);
+        c.add_gate(gate, &targets);
+        if k % 3 == 1 {
+            c.add_gate(Gate::Rx(rng.random_range(-1.0..1.0)), &[qubits[0]]);
+        }
+    }
+    c
+}
+
+#[test]
+fn pauli_string_rotations_match_the_statevector_and_their_lowering() {
+    let n = 6;
+    let mut observables: Vec<Vec<PauliTerm>> = (0..n)
+        .flat_map(|q| [PauliTerm::x(q), PauliTerm::y(q), PauliTerm::z(q)])
+        .map(|term| vec![term])
+        .collect();
+    observables.push(vec![PauliTerm::x(0), PauliTerm::y(2), PauliTerm::z(5)]);
+    observables.push(vec![PauliTerm::y(1), PauliTerm::y(4)]);
+    let mut nonzero = 0;
+    for seed in 0..12u64 {
+        let circuit = random_pauli_string_circuit(n, 15, 42 + seed);
+        let lowered = crate::circuit::expand_pauli_rotations(&circuit).into_owned();
+        assert!(!lowered.instructions.iter().any(|inst| matches!(
+            inst,
+            Instruction::Gate {
+                gate: Gate::PauliRot(_),
+                ..
+            }
+        )));
+        let want = reference_expectations(
+            &circuit,
+            crate::sim::BackendKind::Statevector,
+            None,
+            &observables,
+        );
+        let noise = NoiseModel::with_amplitude_damping(&circuit, 0.0);
+        for (obs, want) in observables.iter().zip(&want) {
+            let native = run_spd_observable(&circuit, obs, 0.0, 0).unwrap();
+            let ladder = run_spd_observable(&lowered, obs, 0.0, 0).unwrap();
+            let cone = run_spd_observable_light_cone(&circuit, obs, 0.0, 0)
+                .unwrap()
+                .mean;
+            let path = run_pauli_path_observable(&circuit, &noise, obs, 0.0, 0)
+                .unwrap()
+                .mean;
+            for (label, got) in [
+                ("spd", native.mean),
+                ("ladder", ladder.mean),
+                ("light cone", cone),
+                ("path", path),
+            ] {
+                assert!(
+                    (got - want).abs() < 1e-10,
+                    "seed {seed} {label} {obs:?}: {got} vs {want}"
+                );
+            }
+            assert_eq!(native.peak_terms, ladder.peak_terms, "seed {seed} {obs:?}");
+            nonzero += usize::from(want.abs() > 1e-3);
+        }
+        let marginals = run_spd(&circuit, 0.0, 0).unwrap();
+        let ladder_marginals = run_spd(&lowered, 0.0, 0).unwrap();
+        assert_eq!(marginals.t_count, ladder_marginals.t_count);
+        assert_eq!(marginals.max_terms, ladder_marginals.max_terms);
+        for q in 0..n {
+            let want = want[3 * q + 2];
+            let got = marginals.expectations[q];
+            assert!(
+                (got - want).abs() < 1e-10,
+                "seed {seed} qubit {q}: {got} vs {want}"
+            );
+        }
+    }
+    assert!(nonzero > 40, "only {nonzero} observables away from zero");
+}
+
+#[test]
+fn pauli_string_rotations_match_the_density_matrix_under_noise() {
+    let circuit = random_pauli_string_circuit(4, 10, 7);
+    let noise = NoiseModel::with_amplitude_damping(&circuit, 0.04);
+    let observables = native_axis_observables();
+    let want = reference_expectations(
+        &circuit,
+        crate::sim::BackendKind::DensityMatrix,
+        Some(&noise),
+        &observables,
+    );
+    for (obs, want) in observables.iter().zip(&want) {
+        let got = run_pauli_path_observable(&circuit, &noise, obs, 0.0, 0)
+            .unwrap()
+            .mean;
+        assert!((got - want).abs() < 1e-12, "{obs:?}: {got} vs {want}");
+    }
+    assert!(want.iter().filter(|v| v.abs() > 1e-3).count() > 4);
+}
+
+#[test]
+fn consecutive_pauli_string_rotations_merge_each_flip_into_a_term_already_present() {
+    let (a, b) = (0.37, -1.1);
+    let string = [(0, PauliAxis::Y), (1, PauliAxis::X), (2, PauliAxis::Z)];
+    let mut split = Circuit::new(3, 0);
+    let mut joined = Circuit::new(3, 0);
+    for (circuit, angles) in [(&mut split, &[a, b][..]), (&mut joined, &[a + b][..])] {
+        for &theta in angles {
+            let (gate, targets) = pauli_string_rotation(theta, &string);
+            circuit.add_gate(gate, &targets);
+        }
+    }
+    for obs in [
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::y(1), PauliTerm::z(2)],
+        vec![PauliTerm::z(0), PauliTerm::z(1), PauliTerm::y(2)],
+    ] {
+        let split = run_spd_observable(&split, &obs, 0.0, 0).unwrap();
+        let joined = run_spd_observable(&joined, &obs, 0.0, 0).unwrap();
+        assert_eq!(split.peak_terms, 2, "{obs:?}");
+        assert!((split.mean - joined.mean).abs() < 1e-12, "{obs:?}");
+    }
+    // The flip of Z_0 carries an X letter, so only the cos branch survives on |000>.
+    let z = run_spd_observable(&split, &[PauliTerm::z(0)], 0.0, 0).unwrap();
+    assert!((z.mean - (a + b).cos()).abs() < 1e-12);
+}
+
+#[test]
+fn pauli_string_rotations_agree_across_key_widths() {
+    let layouts: [(usize, [usize; 5]); 3] = [
+        (5, [0, 1, 2, 3, 4]),
+        (128, [3, 63, 64, 100, 127]),
+        (200, [63, 64, 128, 150, 199]),
+    ];
+    let small = random_pauli_string_circuit(5, 12, 11);
+    let mut reference: Option<[f64; 4]> = None;
+    for (n, qubits) in layouts {
+        let mut circuit = Circuit::new(n, 0);
+        for inst in &small.instructions {
+            let Instruction::Gate { gate, targets } = inst else {
+                unreachable!()
+            };
+            let mapped: Vec<usize> = targets.iter().map(|&q| qubits[q]).collect();
+            circuit.add_gate(gate.clone(), &mapped);
+        }
+        let obs = [PauliTerm::x(qubits[1]), PauliTerm::z(qubits[3])];
+        let exact = run_spd_observable(&circuit, &obs, 0.0, 0).unwrap().mean;
+        let cone = run_spd_observable_light_cone(&circuit, &obs, 0.0, 0)
+            .unwrap()
+            .mean;
+        let marginals = run_spd(&circuit, 0.0, 0).unwrap().expectations;
+        let values = [exact, cone, marginals[qubits[0]], marginals[qubits[4]]];
+        match reference {
+            None => reference = Some(values),
+            Some(expected) => {
+                for (got, want) in values.iter().zip(expected) {
+                    assert!((got - want).abs() < 1e-12, "{n} qubits: {got} vs {want}");
+                }
+            }
+        }
+    }
+    assert!(reference.unwrap().iter().all(|v| v.abs() > 1e-6));
+}
+
+#[test]
+fn a_pauli_string_rotation_counts_as_one_branching_gate() {
+    let mut circuit = Circuit::new(4, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    let (gate, targets) = pauli_string_rotation(
+        0.4,
+        &[(0, PauliAxis::X), (2, PauliAxis::Y), (3, PauliAxis::Z)],
+    );
+    circuit.add_gate(gate, &targets);
+    circuit.add_gate(Gate::T, &[1]);
+    let obs = [PauliTerm::z(0)];
+    assert_eq!(run_spd(&circuit, 0.0, 0).unwrap().t_count, 2);
+    assert_eq!(
+        run_spd_observable(&circuit, &obs, 0.0, 0).unwrap().t_count,
+        2
+    );
+    assert_eq!(run_spp(&circuit, 16, 42).unwrap().t_count, 2);
+}

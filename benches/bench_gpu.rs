@@ -397,6 +397,61 @@ fn bench_gpu_floor(c: &mut Criterion) {
     group.finish();
 }
 
+// `gpu/readout` times reading results back to the host above the 22 qubit ceiling of
+// the dispatched sweeps. `probabilities` and `export` read one resident state per row
+// and free the returned vector inside the timer; `e2e_qft` runs a QFT through `run()`,
+// where allocation, setup and the probability readback outweigh the gates.
+
+fn bench_gpu_readout(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let mut group = c.benchmark_group("gpu/readout");
+    let fast = is_fast();
+    let probability_sizes: &[usize] = if fast { &[24] } else { &[24, 26, 28] };
+    let e2e_sizes: &[usize] = if fast { &[26] } else { &[26, 28] };
+    let export_sizes: &[usize] = if fast { &[24] } else { &[24, 26] };
+    let h = [Instruction::Gate {
+        gate: Gate::H,
+        targets: smallvec![0],
+    }];
+
+    for &n in probability_sizes {
+        let Some(mut backend) = resident_backend(&ctx, n) else {
+            continue;
+        };
+        backend.apply_instructions(&h).unwrap();
+        configure_width(&mut group, n);
+        group.bench_function(BenchmarkId::new("probabilities", n), |b| {
+            b.iter(|| backend.probabilities().unwrap());
+        });
+    }
+
+    let kind = gpu_kind(&ctx);
+    for &n in e2e_sizes {
+        if !ctx.fits_statevector_with_scratch(n).unwrap_or(false) {
+            eprintln!("SKIP: {n} qubits do not fit free VRAM");
+            continue;
+        }
+        let circuit = circuits::qft_circuit(n);
+        configure_width(&mut group, n);
+        group.bench_function(BenchmarkId::new("e2e_qft", n), |b| {
+            b.iter(|| run_with(kind.clone(), &circuit, 42).unwrap());
+        });
+    }
+
+    for &n in export_sizes {
+        let Some(mut backend) = resident_backend(&ctx, n) else {
+            continue;
+        };
+        backend.apply_instructions(&h).unwrap();
+        configure_width(&mut group, n);
+        group.bench_function(BenchmarkId::new("export", n), |b| {
+            b.iter(|| backend.export_statevector().unwrap());
+        });
+    }
+
+    group.finish();
+}
+
 // ============================================================================
 // Noisy trajectory (general noise on the GPU statevector)
 // ============================================================================
@@ -1481,6 +1536,7 @@ criterion_group! {
     bench_gpu_export,
     bench_gpu_throughput,
     bench_gpu_floor,
+    bench_gpu_readout,
     bench_gpu_noisy_kraus,
     bench_gpu_noisy_kraus_mid_measure,
     bench_cpu_noisy_kraus,

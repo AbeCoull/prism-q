@@ -759,10 +759,6 @@ impl CompiledSampler {
         self.num_measurements
     }
 
-    pub fn sparse(&self) -> Option<&SparseParity> {
-        self.sparse.as_ref()
-    }
-
     pub fn parity_stats(&self) -> Option<ParityStats> {
         self.sparse.as_ref().map(|s| s.stats())
     }

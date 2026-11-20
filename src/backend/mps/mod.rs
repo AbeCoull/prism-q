@@ -65,7 +65,7 @@ mod nsite;
 mod sample;
 mod svd;
 
-pub use env::MpsPauliAxis;
+pub(crate) use env::MpsPauliAxis;
 use env::mps_pauli_factors;
 use linalg::{cu_phase_swap_matrix, mcu_matrix, swap_gate_qubits};
 
@@ -370,14 +370,14 @@ impl MpsBackend {
     /// mapping: non-adjacent two-qubit gates run as chains of nearest-neighbour
     /// SWAPs and grow bond dimension in proportion to site distance. CAMPS
     /// anchor selection uses this to score candidate cascades.
-    pub fn site_for_qubit(&self, q: usize) -> usize {
+    pub(crate) fn site_for_qubit(&self, q: usize) -> usize {
         self.logical_to_site[q]
     }
 
     /// Whether `P(q = |1⟩) = (1 − Re⟨Z_q⟩)/2` is below `tol`. For a qubit just
     /// disentangled by an OFD cascade, this is the qubit being in the pure `|0⟩`
     /// state on its site.
-    pub fn is_qubit_in_zero_state(&self, q: usize, tol: f64) -> Result<bool> {
+    pub(crate) fn is_qubit_in_zero_state(&self, q: usize, tol: f64) -> Result<bool> {
         let z = self.pauli_expectation(&[(q, MpsPauliAxis::Z)])?;
         let p_one = 0.5 * (1.0 - z.re);
         Ok(p_one < tol)

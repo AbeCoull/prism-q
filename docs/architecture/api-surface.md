@@ -110,6 +110,6 @@ outside code reads it rather than building it.
 what every consumer handles, so adding one is a breaking change.
 
 Enums mirroring a closed mathematical set stay exhaustive as well, since a wildcard arm
-the caller can never reach buys nothing: `PauliAxis`, `MpsPauliAxis` and `QecBasis` are
-X, Y and Z, `GeneratorKind` and `DiagEntry` are gate-algebra shapes, and
-`QftTextbookStep` is a fixed decomposition.
+the caller can never reach buys nothing: `PauliAxis` and `QecBasis` are X, Y and Z,
+`GeneratorKind` and `DiagEntry` are gate-algebra shapes, and `QftTextbookStep` is a fixed
+decomposition.

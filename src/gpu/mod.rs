@@ -239,7 +239,7 @@ impl GpuContext {
     }
 
     /// Whether the currently-available VRAM holds a stabilizer tableau for
-    /// `num_qubits`, matching the device layout in [`GpuTableau`].
+    /// `num_qubits`.
     ///
     /// The tableau stores `(2n+1)` rows of `2 * ceil(n/64)` u64 words plus one
     /// phase byte per row; the fixed measurement scratch is negligible. Used as
@@ -332,7 +332,7 @@ impl std::ops::Sub for GpuPassCensus {
 /// As on the CPU statevector backend, measurement collapse accumulates into
 /// `pending_norm`, applied at `export_statevector` or `probabilities` time.
 #[derive(Debug)]
-pub struct GpuState {
+pub(crate) struct GpuState {
     context: Arc<GpuContext>,
     buffer: GpuBuffer<f64>,
     num_qubits: usize,
@@ -354,7 +354,7 @@ impl GpuState {
     /// Rejects `num_qubits` at or above `usize::BITS - 4`, the bound
     /// [`GpuContext::fits_statevector`] uses, where the 16 bytes per amplitude
     /// overflow `usize`.
-    pub fn new(context: Arc<GpuContext>, num_qubits: usize) -> Result<Self> {
+    pub(crate) fn new(context: Arc<GpuContext>, num_qubits: usize) -> Result<Self> {
         if num_qubits >= usize::BITS as usize - 4 {
             return Err(crate::error::PrismError::InvalidParameter {
                 message: format!("num_qubits={num_qubits} overflows addressable memory"),
@@ -378,7 +378,10 @@ impl GpuState {
     /// Allocate a device state initialized from host amplitudes. The slice
     /// length must be a power of two of at least 2; callers validate before
     /// converting.
-    pub fn from_host_amplitudes(context: Arc<GpuContext>, amps: &[Complex64]) -> Result<Self> {
+    pub(crate) fn from_host_amplitudes(
+        context: Arc<GpuContext>,
+        amps: &[Complex64],
+    ) -> Result<Self> {
         debug_assert!(amps.len().is_power_of_two() && amps.len() >= 2);
         let num_qubits = amps.len().trailing_zeros() as usize;
         let buffer = GpuBuffer::<f64>::from_host(context.device(), complex_as_interleaved(amps))?;
@@ -409,12 +412,12 @@ impl GpuState {
         })
     }
 
-    pub fn num_qubits(&self) -> usize {
+    pub(crate) fn num_qubits(&self) -> usize {
         self.num_qubits
     }
 
     /// Multiplicative norm correction deferred from measurement collapse.
-    pub fn pending_norm(&self) -> f64 {
+    pub(crate) fn pending_norm(&self) -> f64 {
         debug_assert!(
             !self.norm_in_log,
             "pending norm read while the measure log holds it"
@@ -424,7 +427,7 @@ impl GpuState {
 
     /// Read the amplitudes with `pending_norm` applied. The device copy lands in the
     /// returned vector's own storage, with no second host copy.
-    pub fn export_statevector(&self) -> Result<Vec<Complex64>> {
+    pub(crate) fn export_statevector(&self) -> Result<Vec<Complex64>> {
         let mut raw = vec![0.0_f64; self.buffer.len()];
         self.buffer.copy_to_host(self.context.device(), &mut raw)?;
         let mut out = interleaved_into_complex(raw);
@@ -437,7 +440,7 @@ impl GpuState {
 
     /// Compute per-basis-state probabilities with `pending_norm²` scaling, via a GPU
     /// reduction kernel. Only `2^n` f64s cross PCIe (vs `2·2^n` for raw amplitudes).
-    pub fn probabilities(&self) -> Result<Vec<f64>> {
+    pub(crate) fn probabilities(&self) -> Result<Vec<f64>> {
         kernels::dense::launch_compute_probabilities(&self.context, self)
     }
 
@@ -522,7 +525,7 @@ fn driver_err(op: &str, err: impl std::fmt::Display) -> crate::error::PrismError
 /// `num_words = ceil(n / 64)`. The scratch row at index `2n` is reserved for
 /// measurement computations.
 #[derive(Debug)]
-pub struct GpuTableau {
+pub(crate) struct GpuTableau {
     context: Arc<GpuContext>,
     xz: GpuBuffer<u64>,
     phase: GpuBuffer<u8>,
@@ -545,7 +548,7 @@ pub(crate) struct MeasureRunBuffers {
 
 impl GpuTableau {
     /// Allocate a fresh identity tableau on the device bound to `context`.
-    pub fn new(context: Arc<GpuContext>, num_qubits: usize) -> Result<Self> {
+    pub(crate) fn new(context: Arc<GpuContext>, num_qubits: usize) -> Result<Self> {
         let num_words = num_qubits.div_ceil(64);
         let total_rows = 2 * num_qubits + 1;
         let xz_len = total_rows * 2 * num_words.max(1);
@@ -570,12 +573,12 @@ impl GpuTableau {
         Ok(tableau)
     }
 
-    pub fn num_qubits(&self) -> usize {
+    pub(crate) fn num_qubits(&self) -> usize {
         self.num_qubits
     }
 
     /// Number of u64 words per bit-packed row half (ceil(n / 64)).
-    pub fn num_words(&self) -> usize {
+    pub(crate) fn num_words(&self) -> usize {
         self.num_words
     }
 
@@ -641,7 +644,7 @@ impl GpuTableau {
 
     /// Copy the tableau to host in the CPU `StabilizerBackend` layout, reading each phase
     /// byte as `b != 0`.
-    pub fn copy_to_host(&self) -> Result<(Vec<u64>, Vec<bool>)> {
+    pub(crate) fn copy_to_host(&self) -> Result<(Vec<u64>, Vec<bool>)> {
         let device = self.context.device();
         let mut xz = vec![0u64; self.xz.len()];
         self.xz.copy_to_host(device, &mut xz)?;
@@ -653,7 +656,7 @@ impl GpuTableau {
 
     /// Upload host `xz` and `phase` buffers, in the `copy_to_host` layout,
     /// into the device tableau.
-    pub fn copy_from_host(&mut self, xz: &[u64], phase: &[bool]) -> Result<()> {
+    pub(crate) fn copy_from_host(&mut self, xz: &[u64], phase: &[bool]) -> Result<()> {
         let device = self.context.device();
         self.xz.copy_from_host(device, xz)?;
         let phase_bytes: Vec<u8> = phase.iter().map(|&b| u8::from(b)).collect();

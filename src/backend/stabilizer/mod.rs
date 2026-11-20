@@ -361,8 +361,9 @@ impl StabilizerBackend {
         )
     }
 
-    /// Create a backend that starts in lazy destabilizer mode (see
-    /// [`Self::enable_lazy_destab`]).
+    /// Create a backend that starts in lazy destabilizer mode: gates update only
+    /// the stabilizer rows until a measurement or reset materializes the
+    /// destabilizers.
     pub fn new_lazy(seed: u64) -> Self {
         Self::new(seed).with_lazy_destab()
     }
@@ -381,7 +382,7 @@ impl StabilizerBackend {
     /// Call this on a freshly initialized tableau: the sparse generator index
     /// it installs takes the identity generators' supports as read rather than
     /// scanning the rows.
-    pub fn enable_lazy_destab(&mut self) {
+    pub(crate) fn enable_lazy_destab(&mut self) {
         if self.lazy_destab || self.n == 0 {
             return;
         }
@@ -419,7 +420,7 @@ impl StabilizerBackend {
         }
     }
 
-    pub fn raw_tableau(&self) -> (&[u64], &[bool]) {
+    pub(crate) fn raw_tableau(&self) -> (&[u64], &[bool]) {
         (&self.xz, &self.phase)
     }
 
@@ -486,7 +487,7 @@ impl StabilizerBackend {
     /// # Errors
     /// A guarded region can hold a measurement or reset, which this path drops
     /// by contract, so one is rejected rather than silently skipped.
-    pub fn apply_gates_only(&mut self, instructions: &[Instruction]) -> Result<()> {
+    pub(crate) fn apply_gates_only(&mut self, instructions: &[Instruction]) -> Result<()> {
         if instructions
             .iter()
             .any(|inst| matches!(inst, Instruction::Region(_)))

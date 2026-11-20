@@ -794,7 +794,7 @@ fn sparse_parity_ghz() {
     }
     let sampler = compile_forward(&c, 42).unwrap();
 
-    let sp = sampler.sparse().expect("sparse should be Some");
+    let sp = sampler.sparse.as_ref().expect("sparse should be Some");
     assert_eq!(sp.num_rows, 4);
 
     let stats = sp.stats();
@@ -816,7 +816,7 @@ fn sparse_parity_matches_flip_rows() {
     }
     let sampler = compile_forward(&c, 42).unwrap();
 
-    let sp = sampler.sparse().unwrap();
+    let sp = sampler.sparse.as_ref().unwrap();
     let stats = sampler.parity_stats().unwrap();
     assert_eq!(stats.min_weight, sp.stats().min_weight);
     assert_eq!(stats.max_weight, sp.stats().max_weight);
@@ -826,7 +826,7 @@ fn sparse_parity_matches_flip_rows() {
 fn sparse_parity_empty_circuit() {
     let c = Circuit::new(2, 0);
     let sampler = compile_forward(&c, 42).unwrap();
-    assert!(sampler.sparse().is_none());
+    assert!(sampler.sparse.as_ref().is_none());
 }
 
 #[test]

@@ -351,7 +351,6 @@ exclude = [
 "CompiledSampler::sample_counts" = "CompiledSampler.sample_counts"
 "CompiledSampler::sample_detection_events" = { rust_only = "detector sampling; Python samples detectors through QecProgram" }
 "CompiledSampler::sample_marginals" = "CompiledSampler.marginals"
-"CompiledSampler::sparse" = { rust_only = "internal parity representation" }
 "CompiledSampler::try_sample_bulk_packed" = "CompiledSampler.sample_packed"
 "CompiledSampler::try_sample_counts" = "CompiledSampler.sample_counts"
 "CompiledSampler::try_sample_marginals" = "CompiledSampler.marginals"

@@ -206,6 +206,51 @@ fn sum_hi_halves_mut(
     sum
 }
 
+/// Reduce `f` under `add` over the `(lo, hi)` halves of every `2 * half` block of
+/// `state`, split as [`sum_hi_halves`] splits, with both halves tiled in step.
+#[cfg_attr(not(feature = "parallel"), allow(unused_variables))]
+#[inline(always)]
+fn reduce_half_pairs<T: Send>(
+    state: &[Complex64],
+    num_qubits: usize,
+    half: usize,
+    zero: impl Fn() -> T + Sync + Send,
+    add: impl Fn(T, T) -> T + Sync + Send,
+    f: impl Fn(&[Complex64], &[Complex64]) -> T + Sync,
+) -> T {
+    let block_size = half << 1;
+    #[cfg(feature = "parallel")]
+    if num_qubits >= kernel_parallel_qubits() {
+        return if state.len() / block_size >= 4 {
+            state
+                .par_chunks(block_size)
+                .with_min_len(chunk_min_len(block_size))
+                .map(|chunk| {
+                    let (lo, hi) = chunk.split_at(half);
+                    f(lo, hi)
+                })
+                .reduce(&zero, &add)
+        } else {
+            state
+                .chunks(block_size)
+                .map(|chunk| {
+                    let (lo, hi) = chunk.split_at(half);
+                    lo.par_chunks(MIN_PAR_ELEMS)
+                        .zip(hi.par_chunks(MIN_PAR_ELEMS))
+                        .map(|(lo_tile, hi_tile)| f(lo_tile, hi_tile))
+                        .reduce(&zero, &add)
+                })
+                .fold(zero(), &add)
+        };
+    }
+    let mut acc = zero();
+    for chunk in state.chunks(block_size) {
+        let (lo, hi) = chunk.split_at(half);
+        acc = add(acc, f(lo, hi));
+    }
+    acc
+}
+
 /// Run `f` on each `tile_size` tile of `state`, as Rayon tasks when `parallel`.
 #[cfg_attr(not(feature = "parallel"), allow(unused_variables))]
 #[inline(always)]
@@ -1002,24 +1047,15 @@ impl StatevectorBackend {
 
     #[inline(always)]
     pub(super) fn reduced_density_matrix_one(&self, qubit: usize) -> [[Complex64; 2]; 2] {
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= kernel_parallel_qubits() {
-            return self.reduced_density_matrix_one_par(qubit);
-        }
-
-        let half = 1usize << qubit;
-        let block_size = half << 1;
         let norm_sq = self.pending_norm * self.pending_norm;
-
-        let mut p0 = 0.0f64;
-        let mut p1 = 0.0f64;
-        let mut r = Complex64::new(0.0, 0.0);
-        for block in self.state.chunks(block_size) {
-            let (b0, b1, br) = super::rdm_block_sums(block, half);
-            p0 += b0;
-            p1 += b1;
-            r += br;
-        }
+        let (p0, p1, r) = reduce_half_pairs(
+            &self.state,
+            self.num_qubits,
+            1usize << qubit,
+            || (0.0, 0.0, Complex64::new(0.0, 0.0)),
+            super::rdm_sum_add,
+            super::rdm_pair_sums,
+        );
 
         let scale = Complex64::new(norm_sq, 0.0);
         let r = r * scale;
@@ -1088,41 +1124,6 @@ impl StatevectorBackend {
             }
         }
         rho
-    }
-
-    #[cfg(feature = "parallel")]
-    fn reduced_density_matrix_one_par(&self, qubit: usize) -> [[Complex64; 2]; 2] {
-        let half = 1usize << qubit;
-        let block_size = half << 1;
-        let norm_sq = self.pending_norm * self.pending_norm;
-        let num_blocks = self.state.len() / block_size;
-        let zero_sums = || (0.0, 0.0, Complex64::new(0.0, 0.0));
-
-        let (p0, p1, r) = if num_blocks >= 4 {
-            self.state
-                .par_chunks(block_size)
-                .with_min_len(chunk_min_len(block_size))
-                .map(|block| super::rdm_block_sums(block, half))
-                .reduce(zero_sums, super::rdm_sum_add)
-        } else {
-            self.state
-                .chunks(block_size)
-                .map(|block| {
-                    let (lo, hi) = block.split_at(half);
-                    lo.par_chunks(MIN_PAR_ELEMS)
-                        .zip(hi.par_chunks(MIN_PAR_ELEMS))
-                        .map(|(lo_t, hi_t)| super::rdm_pair_sums(lo_t, hi_t))
-                        .reduce(zero_sums, super::rdm_sum_add)
-                })
-                .fold(zero_sums(), super::rdm_sum_add)
-        };
-
-        let scale = Complex64::new(norm_sq, 0.0);
-        let r = r * scale;
-        [
-            [Complex64::new(p0 * norm_sq, 0.0), r.conj()],
-            [r, Complex64::new(p1 * norm_sq, 0.0)],
-        ]
     }
 
     #[inline(always)]

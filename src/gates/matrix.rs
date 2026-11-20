@@ -16,6 +16,24 @@ pub(crate) fn cu_matrix_4x4(mat: &[[Complex64; 2]; 2]) -> [[Complex64; 4]; 4] {
     ]
 }
 
+/// Row-major `2^n` by `2^n` matrix of a gate applying `mat` to the target when all
+/// `num_controls` controls are set, with `n = num_controls + 1`: the controls on the high
+/// bits of the basis index and the target on bit 0.
+pub(crate) fn mcu_matrix(num_controls: usize, mat: &[[Complex64; 2]; 2]) -> Vec<Complex64> {
+    let m = num_controls + 1;
+    let dim = 1usize << m;
+    let zero = Complex64::new(0.0, 0.0);
+    let one = Complex64::new(1.0, 0.0);
+    let mut full = vec![zero; dim * dim];
+    for i in 0..dim - 2 {
+        full[i * dim + i] = one;
+    }
+    let corner = (dim - 2) * dim + dim - 2;
+    full[corner..corner + 2].copy_from_slice(&mat[0]);
+    full[corner + dim..corner + dim + 2].copy_from_slice(&mat[1]);
+    full
+}
+
 /// Kronecker product of two 2×2 matrices: A ⊗ B → 4×4.
 ///
 /// Result indices: `(i*2+j, k*2+l) = A[i][k] * B[j][l]`

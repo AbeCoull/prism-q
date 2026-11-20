@@ -8,19 +8,19 @@ use smallvec::SmallVec;
 use crate::backend::tensor_peak_error;
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
-use crate::gates::Gate;
+use crate::gates::{Gate, mcu_matrix};
 #[cfg(feature = "bench-internal")]
 use crate::limits::LimitSource;
 use crate::limits::ResolvedLimits;
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
+use super::LegId;
 use super::plan::{ContractionPlan, TensorMeta, plan_pairs, plan_with_restarts};
 use super::slice::{
     ContractionLimits, LAST_DISCARDED, LAST_SLICE_COUNT, SlicePlan, choose_slices, contract_slices,
     contract_within,
 };
 use super::tensor::Tensor;
-use super::{LegId, TensorNetworkBackend};
 
 /// Rank-`2k` tensor of a `k`-qubit gate on legs `[out.., in..]`, conjugated for
 /// the bra copy when `conjugate` is set.
@@ -596,8 +596,9 @@ where
 /// Decompose `gate` into the elementary 1q/2q/nq matrix operations a tensor
 /// network applies, invoking `emit` once per operation in application order.
 ///
-/// Shared by the deferred-contraction backend ([`TensorNetworkBackend`], which
-/// appends ket tensors only) and the scalar-expectation network
+/// Shared by the deferred-contraction backend
+/// ([`TensorNetworkBackend`](super::TensorNetworkBackend), which appends ket tensors
+/// only) and the scalar-expectation network
 /// ([`ScalarExpectationNetwork`], which appends a conjugated ket+bra pair). The
 /// two differ only in their sink, so routing both through this keeps their gate
 /// coverage and matrices identical.
@@ -644,7 +645,7 @@ where
         }
         Gate::Mcu(data) => {
             check_arity(data.num_controls as usize + 1)?;
-            let full = TensorNetworkBackend::mcu_full_matrix(data.num_controls as usize, &data.mat);
+            let full = mcu_matrix(data.num_controls as usize, &data.mat);
             emit(GateTensorOp::NQ(targets, full))
         }
         Gate::Unitary(data) => {

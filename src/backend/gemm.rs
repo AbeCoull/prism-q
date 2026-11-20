@@ -8,10 +8,12 @@ const ZERO: Complex64 = Complex64::new(0.0, 0.0);
 const ONE: Complex64 = Complex64::new(1.0, 0.0);
 
 /// `m * k * n` at or above which a product multiplies through faer rather than
-/// the scalar loops: the floor `tensornetwork/tensor.rs` measured for the same call,
-/// which one pass of an MPS environment step clears at bond 64 and not at 32.
+/// the scalar loops: a 64-cubed complex product, which one pass of an MPS environment
+/// step clears at bond 64 and not at 32. Routing every tensor network contraction to
+/// faer instead costs 23% on `tn/scalar_depth_20q/4`, where the operands are too small
+/// to cover its packing.
 #[cfg(feature = "parallel")]
-const MIN_FAER_GEMM_WORK: usize = 1 << 18;
+pub(crate) const MIN_FAER_GEMM_WORK: usize = 1 << 18;
 
 /// `out = xᵀ · y` over row-major `x` (`r` by `m`), `y` (`r` by `n`) and
 /// `out` (`m` by `n`), with `y` conjugated when `CONJ_Y`.
@@ -61,16 +63,7 @@ pub(crate) fn gemm_nn(
     debug_assert_eq!((x.len(), y.len(), out.len()), (m * k, k * n, m * n));
     #[cfg(feature = "parallel")]
     if m * k * n >= MIN_FAER_GEMM_WORK {
-        use faer::linalg::matmul::matmul;
-        use faer::{Accum, MatMut, MatRef, Par};
-        matmul(
-            MatMut::from_column_major_slice_mut(out, n, m),
-            Accum::Replace,
-            MatRef::from_column_major_slice(y, n, k),
-            MatRef::from_column_major_slice(x, k, m),
-            ONE,
-            Par::rayon(0),
-        );
+        faer_gemm_nn(out, x, y, m, k, n);
         return;
     }
     out.fill(ZERO);
@@ -81,6 +74,31 @@ pub(crate) fn gemm_nn(
             }
         }
     }
+}
+
+/// [`gemm_nn`] through faer at any size, overwriting `out`.
+///
+/// A row-major array is its own transpose read column-major, so `out = x · y` is
+/// issued as `outᵀ = yᵀ · xᵀ` over the same buffers with no repacking.
+#[cfg(feature = "parallel")]
+pub(crate) fn faer_gemm_nn(
+    out: &mut [Complex64],
+    x: &[Complex64],
+    y: &[Complex64],
+    m: usize,
+    k: usize,
+    n: usize,
+) {
+    use faer::linalg::matmul::matmul;
+    use faer::{Accum, MatMut, MatRef, Par};
+    matmul(
+        MatMut::from_column_major_slice_mut(out, n, m),
+        Accum::Replace,
+        MatRef::from_column_major_slice(y, n, k),
+        MatRef::from_column_major_slice(x, k, m),
+        ONE,
+        Par::rayon(0),
+    );
 }
 
 /// `out = x · yᴴ` over row-major `x` (`m` by `k`), `y` (`n` by `k`) and `out`

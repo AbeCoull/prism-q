@@ -1,5 +1,5 @@
 //! Dense gate matrices the MPS chain builds before a contraction: the phase and
-//! swap forms of a two-qubit gate, and the full matrix of a multi-controlled gate.
+//! swap forms of a two-qubit gate.
 
 use num_complex::Complex64;
 
@@ -25,45 +25,4 @@ pub(super) fn swap_gate_qubits(g: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
         }
     }
     out
-}
-
-/// Build a 2^N × 2^N MCU gate matrix (row-major, flattened).
-///
-/// `qubit_order[i]` maps block-position `i` to the MCU role index:
-/// roles 0..num_controls are controls, role num_controls is the target.
-/// The matrix is identity except when all controls are |1⟩, where `mat` is
-/// applied to the target qubit.
-pub(super) fn mcu_matrix(
-    num_controls: usize,
-    mat: &[[Complex64; 2]; 2],
-    qubit_order: &[usize],
-) -> Vec<Complex64> {
-    let n = num_controls + 1;
-    let dim = 1usize << n;
-    let mut gate = vec![ZERO; dim * dim];
-
-    // Block position p → bit (n-1-p) in state index (MSB = leftmost).
-    let mut ctrl_mask: usize = 0;
-    let mut tgt_bit: usize = 0;
-    for (pos, &role) in qubit_order.iter().enumerate() {
-        let bit = n - 1 - pos;
-        if role < num_controls {
-            ctrl_mask |= 1 << bit;
-        } else {
-            tgt_bit = bit;
-        }
-    }
-
-    for s_in in 0..dim {
-        if (s_in & ctrl_mask) == ctrl_mask {
-            let t_in = (s_in >> tgt_bit) & 1;
-            for (t_out, row) in mat.iter().enumerate() {
-                let s_out = (s_in & !(1 << tgt_bit)) | (t_out << tgt_bit);
-                gate[s_out * dim + s_in] = row[t_in];
-            }
-        } else {
-            gate[s_in * dim + s_in] = ONE;
-        }
-    }
-    gate
 }

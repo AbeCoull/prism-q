@@ -861,8 +861,7 @@ fn test_probabilities_cap() {
 #[test]
 fn test_mcu_matrix_toffoli() {
     let x_mat = Gate::X.matrix_2x2();
-    let order = vec![0, 1, 2]; // ctrl0, ctrl1, target, identity order
-    let gate = mcu_matrix(2, &x_mat, &order);
+    let gate = mcu_matrix(2, &x_mat);
     // 8×8 matrix: identity for states 0..5, then X on target for states 6,7
     // state 6 = |110⟩, state 7 = |111⟩ → swap these
     assert!((gate[6 * 8 + 6] - ZERO).norm() < 1e-12); // 6→6 should be 0

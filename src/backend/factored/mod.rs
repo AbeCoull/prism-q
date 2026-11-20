@@ -105,6 +105,24 @@ pub struct FactoredBackend {
     limits: ResolvedLimits,
 }
 
+/// Apply a fused 2q gate to one sub-state, keeping the general `PreparedGate2q` sweep below
+/// the parallel threshold: the statevector kernel's adjacent pair path costs more per call
+/// on the small sub-states a factored run grows through.
+#[inline(always)]
+fn apply_fused_2q_substate(
+    state: &mut [Complex64],
+    num_qubits: usize,
+    q0: usize,
+    q1: usize,
+    mat: &[[Complex64; 4]; 4],
+) {
+    if num_qubits < PARALLEL_THRESHOLD_QUBITS {
+        simd::PreparedGate2q::new(mat).apply_full(state, num_qubits, q0, q1);
+    } else {
+        apply_fused_2q(state, num_qubits, q0, q1, mat);
+    }
+}
+
 impl FactoredBackend {
     /// Backend under the process default [`Limits`](crate::Limits).
     pub fn new(seed: u64) -> Self {
@@ -279,7 +297,7 @@ impl FactoredBackend {
                 let n = sub.qubits.len();
                 let lq0 = Self::local_qubit(sub, q0);
                 let lq1 = Self::local_qubit(sub, q1);
-                apply_fused_2q(&mut sub.state, n, lq0, lq1, mat);
+                apply_fused_2q_substate(&mut sub.state, n, lq0, lq1, mat);
             }
             return Ok(());
         }
@@ -412,7 +430,7 @@ impl FactoredBackend {
                 let sub = self.substates[ss_idx].as_mut().unwrap();
                 let q0 = Self::local_qubit(sub, targets[0]);
                 let q1 = Self::local_qubit(sub, targets[1]);
-                apply_fused_2q(&mut sub.state, sub.qubits.len(), q0, q1, mat);
+                apply_fused_2q_substate(&mut sub.state, sub.qubits.len(), q0, q1, mat);
             }
             Gate::MultiFused(_) | Gate::Multi2q(_) | Gate::BatchRzz(_) | Gate::DiagonalBatch(_) => {
                 unreachable!()

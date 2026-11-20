@@ -45,6 +45,8 @@ enum DeviceInner {
         stream: Arc<CudaStream>,
         _module: Arc<CudaModule>,
         functions: HashMap<&'static str, CudaFunction>,
+        #[cfg(feature = "parallel")]
+        staging: Mutex<Option<super::memory::HostStaging>>,
     },
     #[cfg_attr(not(test), allow(dead_code))]
     Stub,
@@ -87,6 +89,8 @@ impl GpuDevice {
                 stream,
                 _module: module,
                 functions,
+                #[cfg(feature = "parallel")]
+                staging: Mutex::new(None),
             },
             #[cfg(feature = "bench-internal")]
             census: PassCounters::default(),
@@ -215,6 +219,40 @@ impl GpuDevice {
         match &self.inner {
             DeviceInner::Real { stream, .. } => Ok(stream),
             DeviceInner::Stub => Err(Self::stub_unsupported("stream access")),
+        }
+    }
+
+    /// Run `f` on the pinned readback slots, allocating them on first use. A failed
+    /// pinned allocation returns its error, and the next call allocates again.
+    #[cfg(feature = "parallel")]
+    pub(crate) fn with_staging<R>(
+        &self,
+        f: impl FnOnce(&mut super::memory::HostStaging) -> Result<R>,
+    ) -> Result<R> {
+        match &self.inner {
+            DeviceInner::Real {
+                stream, staging, ..
+            } => {
+                let mut slot = staging.lock().unwrap_or_else(PoisonError::into_inner);
+                if slot.is_none() {
+                    *slot = Some(super::memory::HostStaging::new(stream)?);
+                }
+                f(slot.as_mut().unwrap())
+            }
+            DeviceInner::Stub => Err(Self::stub_unsupported("staged readback")),
+        }
+    }
+
+    /// Chunks enqueued through the pinned readback slots since the device opened.
+    #[cfg(all(test, feature = "parallel"))]
+    pub(crate) fn staged_chunks(&self) -> usize {
+        match &self.inner {
+            DeviceInner::Real { staging, .. } => staging
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .map_or(0, |staging| staging.chunks),
+            DeviceInner::Stub => 0,
         }
     }
 

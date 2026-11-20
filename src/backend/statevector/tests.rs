@@ -1799,6 +1799,52 @@ mod gpu_scaffold {
         }
     }
 
+    // Above the staging threshold a readback cycles through two pinned slots. The
+    // lengths cover one partial chunk, an exact multiple of the slot, and full chunks
+    // ending in a partial one. Each length carries its own pattern, so a slot read
+    // before its copy completes returns the previous readback's words and fails, and
+    // a destination longer than the buffer keeps its tail.
+    #[test]
+    fn staged_readback_matches_the_uploaded_buffer() {
+        use crate::gpu::GpuBuffer;
+        let Some(ctx) = device_or_skip() else {
+            return;
+        };
+        let device = ctx.device();
+        const SLOT_WORDS: usize = (64 << 20) / 8;
+        let cases = [
+            ((5 << 20) / 8 + 3, 0),
+            (2 * SLOT_WORDS, 7),
+            ((160 << 20) / 8 + 5, 0),
+            ((6 << 20) / 8, 1),
+        ];
+        for (case, &(len, spare)) in cases.iter().enumerate() {
+            let salt = (case as u64 + 1).wrapping_mul(0xD6E8_FEB8_6659_FD93);
+            let host: Vec<u64> = (0..len as u64)
+                .map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ salt)
+                .collect();
+            let buffer = GpuBuffer::<u64>::from_host(device, &host).unwrap();
+            let mut back = vec![u64::MAX; len + spare];
+            #[cfg(feature = "parallel")]
+            let chunks_before = device.staged_chunks();
+            buffer.copy_to_host(device, &mut back).unwrap();
+            #[cfg(feature = "parallel")]
+            assert_eq!(
+                device.staged_chunks() - chunks_before,
+                (len * 8).div_ceil(64 << 20),
+                "readback of {len} words skipped the staged path"
+            );
+            assert!(
+                back[..len] == host,
+                "staged readback of {len} words differs"
+            );
+            assert!(
+                back[len..].iter().all(|&w| w == u64::MAX),
+                "staged readback wrote past {len} words"
+            );
+        }
+    }
+
     // An upload from pageable memory is staged and returns without waiting for the
     // stream; a readback waits for it. The pass census counts drains on that basis.
     #[test]

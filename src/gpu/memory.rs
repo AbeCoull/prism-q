@@ -61,7 +61,7 @@ impl<T: DeviceRepr> GpuBuffer<T> {
     pub fn copy_to_host(&self, device: &GpuDevice, host: &mut [T]) -> Result<()> {
         let stream = device.stream()?;
         stream
-            .memcpy_dtoh(&self.slice, host)
+            .memcpy_dtoh(&self.slice, &mut host[..self.slice.len()])
             .map_err(|e| driver_err("copy_to_host", e))?;
         device.count_drain();
         Ok(())

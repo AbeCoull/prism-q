@@ -241,6 +241,83 @@ pub(super) fn with_subcube_tile<R>(tile_bits: usize, f: impl FnOnce(&mut [Comple
     })
 }
 
+/// Offset of the subcube `outer` selects: bit `j` of `outer` lands on qubit `rest[j]`.
+#[inline(always)]
+fn subcube_base(rest: &[usize], outer: usize) -> usize {
+    let mut base = 0usize;
+    for (j, &p) in rest.iter().enumerate() {
+        base |= ((outer >> j) & 1) << p;
+    }
+    base
+}
+
+/// Offset of run `c` of the subcube at `base`: bit `j` of `c` lands on `plan.high[j]`.
+#[inline(always)]
+fn subcube_run_offset(plan: &SubcubePlan, base: usize, c: usize) -> usize {
+    let mut off = base;
+    for (j, &h) in plan.high.iter().enumerate() {
+        off |= ((c >> j) & 1) << h;
+    }
+    off
+}
+
+/// Gather the subcube at `base` into `tile`, run `c` at `[c << low, (c + 1) << low)`.
+/// Returns false when every gathered amplitude is zero: a zero subcube stays zero under
+/// any unitary, so it needs no gates and no write back. Early in a circuit most subcubes
+/// are zero; a dense one exits the scan at its first amplitude.
+///
+/// # Safety
+/// `state` must hold the subcube at `base` laid out for `plan`, `tile` must hold
+/// `2^plan.tile_bits` amplitudes, and no other access to this subcube may overlap.
+#[inline(always)]
+unsafe fn gather_subcube(
+    state: *const Complex64,
+    tile: &mut [Complex64],
+    plan: &SubcubePlan,
+    base: usize,
+) -> bool {
+    let run = 1usize << plan.low;
+    let runs = 1usize << plan.high.len();
+    for c in 0..runs {
+        // SAFETY: same contract as the enclosing unsafe fn; the run is
+        // inside the subcube and the tile holds `runs << low` elements.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                state.add(subcube_run_offset(plan, base, c)),
+                tile.as_mut_ptr().add(c << plan.low),
+                run,
+            );
+        }
+    }
+    !tile[..runs << plan.low]
+        .iter()
+        .all(|a| a.re == 0.0 && a.im == 0.0)
+}
+
+/// Write `tile` back over the subcube at `base`, the inverse of [`gather_subcube`].
+///
+/// # Safety
+/// The contract of [`gather_subcube`].
+#[inline(always)]
+unsafe fn scatter_subcube(
+    tile: &[Complex64],
+    state: *mut Complex64,
+    plan: &SubcubePlan,
+    base: usize,
+) {
+    let run = 1usize << plan.low;
+    for c in 0..1usize << plan.high.len() {
+        // SAFETY: same contract as the enclosing unsafe fn.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                tile.as_ptr().add(c << plan.low),
+                state.add(subcube_run_offset(plan, base, c)),
+                run,
+            );
+        }
+    }
+}
+
 /// Gather the subcube `outer` selects into this thread's tile, apply `gates`
 /// there in order through the contiguous tiled kernel, and scatter it back.
 /// Applying in place across the runs instead was measured slower at every
@@ -256,59 +333,24 @@ unsafe fn apply_subcube(
     outer: usize,
     gates: &[(usize, usize, simd::PreparedGate2q)],
 ) {
-    let run = 1usize << plan.low;
-    let mut base = 0usize;
-    for (j, &p) in rest.iter().enumerate() {
-        base |= ((outer >> j) & 1) << p;
-    }
-    let run_offset = |c: usize| {
-        let mut off = base;
-        for (j, &h) in plan.high.iter().enumerate() {
-            off |= ((c >> j) & 1) << h;
-        }
-        off
-    };
-    let runs = 1usize << plan.high.len();
+    let base = subcube_base(rest, outer);
     with_subcube_tile(plan.tile_bits, |tile| {
-        for c in 0..runs {
-            // SAFETY: same contract as the enclosing unsafe fn; the run is
-            // inside the subcube and the tile holds `runs << low` elements.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    state.add(run_offset(c)),
-                    tile.as_mut_ptr().add(c << plan.low),
-                    run,
-                );
-            }
-        }
-        // A zero subcube stays zero under any unitary, so it needs no gates and no
-        // write back. Early in a circuit most subcubes are zero; a dense one exits
-        // this scan at its first amplitude.
-        if tile[..runs << plan.low]
-            .iter()
-            .all(|a| a.re == 0.0 && a.im == 0.0)
-        {
+        // SAFETY: same contract as the enclosing unsafe fn.
+        if !unsafe { gather_subcube(state, tile, plan, base) } {
             return;
         }
         for &(q0, q1, ref prepared) in gates {
             prepared.apply_tiled(tile, plan.tile_bits, plan.map[q0], plan.map[q1]);
         }
-        for c in 0..runs {
-            // SAFETY: same contract as the enclosing unsafe fn.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    tile.as_ptr().add(c << plan.low),
-                    state.add(run_offset(c)),
-                    run,
-                );
-            }
-        }
+        // SAFETY: same contract as the enclosing unsafe fn.
+        unsafe { scatter_subcube(tile, state, plan, base) };
     });
 }
 
 /// [`apply_subcube`] for a `MultiPauliRot` batch: gather the subcube, apply
-/// `rotations` there in order, and scatter it back. Kept apart from the `Multi2q`
-/// gather: one generic body for both read 5% slower on `statevector/qv/16`.
+/// `rotations` there in order, and scatter it back. The body stays apart from the
+/// `Multi2q` one, sharing only the gather and scatter: one generic body for both read
+/// 5% slower on `statevector/qv/16`.
 ///
 /// # Safety
 /// `state` must point at `2^num_qubits` amplitudes laid out for `plan` and
@@ -320,58 +362,22 @@ pub(super) unsafe fn apply_pauli_rot_subcube(
     outer: usize,
     rotations: &[TiledPauliRot],
 ) {
-    let run = 1usize << plan.low;
-    let mut base = 0usize;
-    for (j, &p) in rest.iter().enumerate() {
-        base |= ((outer >> j) & 1) << p;
-    }
-    let run_offset = |c: usize| {
-        let mut off = base;
-        for (j, &h) in plan.high.iter().enumerate() {
-            off |= ((c >> j) & 1) << h;
-        }
-        off
-    };
-    let runs = 1usize << plan.high.len();
+    let base = subcube_base(rest, outer);
     with_subcube_tile(plan.tile_bits, |tile| {
-        for c in 0..runs {
-            // SAFETY: same contract as the enclosing unsafe fn; the run is
-            // inside the subcube and the tile holds `runs << low` elements.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    state.add(run_offset(c)),
-                    tile.as_mut_ptr().add(c << plan.low),
-                    run,
-                );
-            }
-        }
-        // A zero subcube stays zero under any unitary, so it needs no gates and no
-        // write back. Early in a circuit most subcubes are zero; a dense one exits
-        // this scan at its first amplitude.
-        if tile[..runs << plan.low]
-            .iter()
-            .all(|a| a.re == 0.0 && a.im == 0.0)
-        {
+        // SAFETY: same contract as the enclosing unsafe fn.
+        if !unsafe { gather_subcube(state, tile, plan, base) } {
             return;
         }
         for rotation in rotations {
             rotation.apply(tile, base);
         }
-        for c in 0..runs {
-            // SAFETY: same contract as the enclosing unsafe fn.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    tile.as_ptr().add(c << plan.low),
-                    state.add(run_offset(c)),
-                    run,
-                );
-            }
-        }
+        // SAFETY: same contract as the enclosing unsafe fn.
+        unsafe { scatter_subcube(tile, state, plan, base) };
     });
 }
 
 /// [`apply_subcube`] for a `MultiFused` batch, each gate keyed by its bit in the
-/// gathered tile. Kept apart from the `Multi2q` gather for the reason
+/// gathered tile. Kept apart from the `Multi2q` body for the reason
 /// [`apply_pauli_rot_subcube`] gives.
 ///
 /// # Safety
@@ -384,51 +390,17 @@ unsafe fn apply_multi_1q_subcube(
     outer: usize,
     gates: &[(usize, simd::PreparedGate1q)],
 ) {
-    let run = 1usize << plan.low;
-    let mut base = 0usize;
-    for (j, &p) in rest.iter().enumerate() {
-        base |= ((outer >> j) & 1) << p;
-    }
-    let run_offset = |c: usize| {
-        let mut off = base;
-        for (j, &h) in plan.high.iter().enumerate() {
-            off |= ((c >> j) & 1) << h;
-        }
-        off
-    };
-    let runs = 1usize << plan.high.len();
+    let base = subcube_base(rest, outer);
     with_subcube_tile(plan.tile_bits, |tile| {
-        for c in 0..runs {
-            // SAFETY: same contract as the enclosing unsafe fn; the run is
-            // inside the subcube and the tile holds `runs << low` elements.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    state.add(run_offset(c)),
-                    tile.as_mut_ptr().add(c << plan.low),
-                    run,
-                );
-            }
-        }
-        // A zero subcube stays zero under any unitary.
-        if tile[..runs << plan.low]
-            .iter()
-            .all(|a| a.re == 0.0 && a.im == 0.0)
-        {
+        // SAFETY: same contract as the enclosing unsafe fn.
+        if !unsafe { gather_subcube(state, tile, plan, base) } {
             return;
         }
         for &(bit, ref prepared) in gates {
             prepared.apply_tiled(tile, bit);
         }
-        for c in 0..runs {
-            // SAFETY: same contract as the enclosing unsafe fn.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    tile.as_ptr().add(c << plan.low),
-                    state.add(run_offset(c)),
-                    run,
-                );
-            }
-        }
+        // SAFETY: same contract as the enclosing unsafe fn.
+        unsafe { scatter_subcube(tile, state, plan, base) };
     });
 }
 

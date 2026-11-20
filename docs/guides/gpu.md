@@ -107,7 +107,7 @@ feature, and `pip install "prism-q[cuda12]"` adds NVRTC from PyPI. See
 
 | File | Role |
 | ---- | ---- |
-| `mod.rs` | `GpuContext`, `GpuState` and `GpuTableau` public entry points, crossover knobs, `GpuPassCensus` (`bench-internal`) |
+| `mod.rs` | `GpuContext` public entry point, the `GpuState` and `GpuTableau` device buffers (private to the crate), crossover knobs, `GpuPassCensus` (`bench-internal`) |
 | `device.rs` | `GpuDevice`: cudarc wrapper, compiles the kernel image at device construction |
 | `memory.rs` | `GpuBuffer`: device `Complex64` storage |
 | `tiles.rs` | Lowering of a fused stream to mixed tile ops and the tile planner |

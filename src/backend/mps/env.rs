@@ -15,7 +15,7 @@ const DENSE_ENV_MAX_BONDS: usize = 4;
 /// Pauli axis for [`MpsBackend::pauli_expectation`]. Identity factors
 /// are conveyed by omission from the factor list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MpsPauliAxis {
+pub(crate) enum MpsPauliAxis {
     X,
     Y,
     Z,
@@ -166,7 +166,10 @@ impl MpsBackend {
     /// (`O(N·χ³)`) and applies each site's Pauli matrix inline, with no MPS
     /// clone and no gate apply pass.
     /// Duplicate factors on the same qubit are rejected.
-    pub fn pauli_expectation(&self, pauli_factors: &[(usize, MpsPauliAxis)]) -> Result<Complex64> {
+    pub(crate) fn pauli_expectation(
+        &self,
+        pauli_factors: &[(usize, MpsPauliAxis)],
+    ) -> Result<Complex64> {
         if self.num_qubits == 0 {
             return Ok(ONE);
         }

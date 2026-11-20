@@ -186,22 +186,15 @@ pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::support
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::supports_qft_block(&self) -> bool
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::supports_two_qubit_kraus(&self) -> bool
 pub mod prism_q::backend::mps
-pub enum prism_q::backend::mps::MpsPauliAxis
-pub prism_q::backend::mps::MpsPauliAxis::X
-pub prism_q::backend::mps::MpsPauliAxis::Y
-pub prism_q::backend::mps::MpsPauliAxis::Z
 pub struct prism_q::backend::mps::MpsBackend
 impl prism_q::backend::mps::MpsBackend
 pub fn prism_q::backend::mps::MpsBackend::current_max_bond_dim(&self) -> usize
-pub fn prism_q::backend::mps::MpsBackend::is_qubit_in_zero_state(&self, usize, f64) -> prism_q::error::Result<bool>
 pub fn prism_q::backend::mps::MpsBackend::new(u64, usize) -> Self
 pub fn prism_q::backend::mps::MpsBackend::reset_truncation_tracking(&mut self)
 pub fn prism_q::backend::mps::MpsBackend::set_svd_epsilon(&mut self, f64)
-pub fn prism_q::backend::mps::MpsBackend::site_for_qubit(&self, usize) -> usize
 pub fn prism_q::backend::mps::MpsBackend::truncation_discarded(&self) -> f64
 impl prism_q::backend::mps::MpsBackend
 pub fn prism_q::backend::mps::MpsBackend::inner_product(&self, &Self) -> prism_q::error::Result<num_complex::Complex64>
-pub fn prism_q::backend::mps::MpsBackend::pauli_expectation(&self, &[(usize, prism_q::backend::mps::MpsPauliAxis)]) -> prism_q::error::Result<num_complex::Complex64>
 impl core::clone::Clone for prism_q::backend::mps::MpsBackend
 pub fn prism_q::backend::mps::MpsBackend::clone(&self) -> Self
 impl prism_q::backend::Backend for prism_q::backend::mps::MpsBackend
@@ -333,14 +326,11 @@ pub fn prism_q::backend::sparse::SparseBackend::supports_two_qubit_kraus(&self) 
 pub mod prism_q::backend::stabilizer
 pub struct prism_q::backend::stabilizer::StabilizerBackend
 impl prism_q::backend::stabilizer::StabilizerBackend
-pub fn prism_q::backend::stabilizer::StabilizerBackend::apply_gates_only(&mut self, &[prism_q::circuit::Instruction]) -> prism_q::error::Result<()>
-pub fn prism_q::backend::stabilizer::StabilizerBackend::enable_lazy_destab(&mut self)
 pub fn prism_q::backend::stabilizer::StabilizerBackend::export_statevector(&self) -> prism_q::error::Result<alloc::vec::Vec<num_complex::Complex64>>
 pub fn prism_q::backend::stabilizer::StabilizerBackend::export_tableau(&self) -> prism_q::error::Result<(alloc::vec::Vec<u64>, alloc::vec::Vec<bool>)>
 pub fn prism_q::backend::stabilizer::StabilizerBackend::init_from_tableau(&mut self, usize, alloc::vec::Vec<u64>, alloc::vec::Vec<bool>, usize) -> prism_q::error::Result<()>
 pub fn prism_q::backend::stabilizer::StabilizerBackend::new(u64) -> Self
 pub fn prism_q::backend::stabilizer::StabilizerBackend::new_lazy(u64) -> Self
-pub fn prism_q::backend::stabilizer::StabilizerBackend::raw_tableau(&self) -> (&[u64], &[bool])
 impl prism_q::backend::stabilizer::StabilizerBackend
 pub fn prism_q::backend::stabilizer::StabilizerBackend::with_gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
 pub fn prism_q::backend::stabilizer::StabilizerBackend::with_gpu_auto(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
@@ -1732,21 +1722,6 @@ pub fn prism_q::gpu::GpuContext::vram_available(&self) -> prism_q::error::Result
 pub fn prism_q::gpu::GpuContext::vram_bytes(&self) -> prism_q::error::Result<usize>
 impl core::fmt::Debug for prism_q::gpu::GpuContext
 pub fn prism_q::gpu::GpuContext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub struct prism_q::gpu::GpuState
-impl prism_q::gpu::GpuState
-pub fn prism_q::gpu::GpuState::export_statevector(&self) -> prism_q::error::Result<alloc::vec::Vec<num_complex::Complex64>>
-pub fn prism_q::gpu::GpuState::from_host_amplitudes(alloc::sync::Arc<prism_q::gpu::GpuContext>, &[num_complex::Complex64]) -> prism_q::error::Result<Self>
-pub fn prism_q::gpu::GpuState::new(alloc::sync::Arc<prism_q::gpu::GpuContext>, usize) -> prism_q::error::Result<Self>
-pub fn prism_q::gpu::GpuState::num_qubits(&self) -> usize
-pub fn prism_q::gpu::GpuState::pending_norm(&self) -> f64
-pub fn prism_q::gpu::GpuState::probabilities(&self) -> prism_q::error::Result<alloc::vec::Vec<f64>>
-pub struct prism_q::gpu::GpuTableau
-impl prism_q::gpu::GpuTableau
-pub fn prism_q::gpu::GpuTableau::copy_from_host(&mut self, &[u64], &[bool]) -> prism_q::error::Result<()>
-pub fn prism_q::gpu::GpuTableau::copy_to_host(&self) -> prism_q::error::Result<(alloc::vec::Vec<u64>, alloc::vec::Vec<bool>)>
-pub fn prism_q::gpu::GpuTableau::new(alloc::sync::Arc<prism_q::gpu::GpuContext>, usize) -> prism_q::error::Result<Self>
-pub fn prism_q::gpu::GpuTableau::num_qubits(&self) -> usize
-pub fn prism_q::gpu::GpuTableau::num_words(&self) -> usize
 pub const prism_q::gpu::BTS_MIN_RANK_DEFAULT: usize
 pub const prism_q::gpu::BTS_MIN_SHOTS_DEFAULT: usize
 pub const prism_q::gpu::BTS_MIN_WEIGHT_FACTOR_DEFAULT: usize
@@ -2125,7 +2100,6 @@ pub fn prism_q::sim::compiled::CompiledSampler::sample_chunked_with_size<A: pris
 pub fn prism_q::sim::compiled::CompiledSampler::sample_counts(&mut self, usize) -> std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>
 pub fn prism_q::sim::compiled::CompiledSampler::sample_detection_events(&mut self, &[(usize, usize)], usize) -> prism_q::PackedShots
 pub fn prism_q::sim::compiled::CompiledSampler::sample_marginals(&mut self, usize) -> alloc::vec::Vec<f64>
-pub fn prism_q::sim::compiled::CompiledSampler::sparse(&self) -> core::option::Option<&prism_q::sim::compiled::parity::SparseParity>
 pub fn prism_q::sim::compiled::CompiledSampler::try_sample_bulk_packed(&mut self, usize) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::sim::compiled::CompiledSampler::try_sample_counts(&mut self, usize) -> prism_q::error::Result<std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>>
 pub fn prism_q::sim::compiled::CompiledSampler::try_sample_marginals(&mut self, usize) -> prism_q::error::Result<alloc::vec::Vec<f64>>
@@ -3381,7 +3355,6 @@ pub fn prism_q::sim::compiled::CompiledSampler::sample_chunked_with_size<A: pris
 pub fn prism_q::sim::compiled::CompiledSampler::sample_counts(&mut self, usize) -> std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>
 pub fn prism_q::sim::compiled::CompiledSampler::sample_detection_events(&mut self, &[(usize, usize)], usize) -> prism_q::PackedShots
 pub fn prism_q::sim::compiled::CompiledSampler::sample_marginals(&mut self, usize) -> alloc::vec::Vec<f64>
-pub fn prism_q::sim::compiled::CompiledSampler::sparse(&self) -> core::option::Option<&prism_q::sim::compiled::parity::SparseParity>
 pub fn prism_q::sim::compiled::CompiledSampler::try_sample_bulk_packed(&mut self, usize) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::sim::compiled::CompiledSampler::try_sample_counts(&mut self, usize) -> prism_q::error::Result<std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>>
 pub fn prism_q::sim::compiled::CompiledSampler::try_sample_marginals(&mut self, usize) -> prism_q::error::Result<alloc::vec::Vec<f64>>
@@ -3778,15 +3751,12 @@ pub prism_q::MemoryEstimate::kind: prism_q::MemoryEstimateKind
 pub struct prism_q::MpsBackend
 impl prism_q::backend::mps::MpsBackend
 pub fn prism_q::backend::mps::MpsBackend::current_max_bond_dim(&self) -> usize
-pub fn prism_q::backend::mps::MpsBackend::is_qubit_in_zero_state(&self, usize, f64) -> prism_q::error::Result<bool>
 pub fn prism_q::backend::mps::MpsBackend::new(u64, usize) -> Self
 pub fn prism_q::backend::mps::MpsBackend::reset_truncation_tracking(&mut self)
 pub fn prism_q::backend::mps::MpsBackend::set_svd_epsilon(&mut self, f64)
-pub fn prism_q::backend::mps::MpsBackend::site_for_qubit(&self, usize) -> usize
 pub fn prism_q::backend::mps::MpsBackend::truncation_discarded(&self) -> f64
 impl prism_q::backend::mps::MpsBackend
 pub fn prism_q::backend::mps::MpsBackend::inner_product(&self, &Self) -> prism_q::error::Result<num_complex::Complex64>
-pub fn prism_q::backend::mps::MpsBackend::pauli_expectation(&self, &[(usize, prism_q::backend::mps::MpsPauliAxis)]) -> prism_q::error::Result<num_complex::Complex64>
 impl core::clone::Clone for prism_q::backend::mps::MpsBackend
 pub fn prism_q::backend::mps::MpsBackend::clone(&self) -> Self
 impl prism_q::backend::Backend for prism_q::backend::mps::MpsBackend
@@ -4396,14 +4366,11 @@ impl prism_q::sim::stabilizer_rank::StabRankResult
 pub fn prism_q::sim::stabilizer_rank::StabRankResult::fidelity_bound(&self) -> f64
 pub struct prism_q::StabilizerBackend
 impl prism_q::backend::stabilizer::StabilizerBackend
-pub fn prism_q::backend::stabilizer::StabilizerBackend::apply_gates_only(&mut self, &[prism_q::circuit::Instruction]) -> prism_q::error::Result<()>
-pub fn prism_q::backend::stabilizer::StabilizerBackend::enable_lazy_destab(&mut self)
 pub fn prism_q::backend::stabilizer::StabilizerBackend::export_statevector(&self) -> prism_q::error::Result<alloc::vec::Vec<num_complex::Complex64>>
 pub fn prism_q::backend::stabilizer::StabilizerBackend::export_tableau(&self) -> prism_q::error::Result<(alloc::vec::Vec<u64>, alloc::vec::Vec<bool>)>
 pub fn prism_q::backend::stabilizer::StabilizerBackend::init_from_tableau(&mut self, usize, alloc::vec::Vec<u64>, alloc::vec::Vec<bool>, usize) -> prism_q::error::Result<()>
 pub fn prism_q::backend::stabilizer::StabilizerBackend::new(u64) -> Self
 pub fn prism_q::backend::stabilizer::StabilizerBackend::new_lazy(u64) -> Self
-pub fn prism_q::backend::stabilizer::StabilizerBackend::raw_tableau(&self) -> (&[u64], &[bool])
 impl prism_q::backend::stabilizer::StabilizerBackend
 pub fn prism_q::backend::stabilizer::StabilizerBackend::with_gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
 pub fn prism_q::backend::stabilizer::StabilizerBackend::with_gpu_auto(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self

@@ -20,7 +20,9 @@ mps:
 
 parser:
   - changed-files:
-    - any-glob-to-any-file: 'src/circuit/openqasm/**'
+    - any-glob-to-any-file:
+      - 'src/circuit/openqasm/**'
+      - 'src/circuit/qasm/**'
 
 circuit:
   - changed-files:
@@ -28,7 +30,7 @@ circuit:
 
 fusion:
   - changed-files:
-    - any-glob-to-any-file: 'src/circuit/fusion.rs'
+    - any-glob-to-any-file: 'src/circuit/fusion*.rs'
 
 gates:
   - changed-files:

@@ -260,12 +260,13 @@ LINE_BUDGET=2000
 
 # Warnings for the code organization rules, one per line. Never fails the run.
 layout_warnings() {
-    local f lines base n text start
+    local f lines base n gate_arm baseline=scripts/pre_pr_layout_baseline.txt
     for f in "${CHANGED[@]}"; do
         [[ "$f" == src/*.rs && -f "$f" ]] || continue
         lines="$(wc -l < "$f")"
         (( lines > LINE_BUDGET )) || continue
-        base="$(awk -v f="$f" '$2 == f { print $1 }' scripts/pre_pr_layout_baseline.txt)"
+        base=""
+        [[ -f "$baseline" ]] && base="$(awk -v f="$f" '$2 == f { print $1 }' "$baseline")"
         if [[ -z "$base" ]]; then
             echo "$f: $lines lines, over the $LINE_BUDGET line budget; split it along its seams"
         elif (( lines > base )); then
@@ -274,7 +275,7 @@ layout_warnings() {
     done
     # A #[path] line counts as new unless the same text was removed elsewhere (a move).
     LC_ALL=C awk -F $'\x1f' '
-        $5 !~ /#\[path[[:space:]]*=/ || $2 !~ /^src\/.*\.rs$/ { next }
+        $5 !~ /^[[:space:]]*#\[(cfg_attr\(.*,[[:space:]]*)?path[[:space:]]*=/ || $2 !~ /^src\/.*\.rs$/ { next }
         { t = $5; gsub(/^[[:space:]]+|[[:space:]]+$/, "", t) }
         $1 == "-" { gone[t] = 1; next }
         { added[$2 ":" $3] = t }
@@ -282,11 +283,31 @@ layout_warnings() {
             for (k in added) if (!(added[k] in gone))
                 printf "%s: new #[path] module; give the module a directory and a sibling tests.rs\n", k
         }' "$RECORDS" | sort
+    # Exit 0 when line n sits at the arm depth of the innermost enclosing match and an
+    # earlier arm of that match opens with Gate::. Strings, chars and line comments are
+    # blanked first so their braces do not count.
+    gate_arm="$(cat <<'AWK'
+function strip(s) {
+    gsub(sprintf("%c%c.", 92, 92), "", s)
+    gsub(/"[^"]*"/, "\"\"", s)
+    gsub(/'[^']'/, "' '", s)
+    sub(/\/\/.*/, "", s)
+    return s
+}
+NR == n { hit = sp > 0 && body[sp] == depth && gate[sp]; done = 1; exit }
+{
+    s = strip($0)
+    if (sp > 0 && depth == body[sp] && s ~ /^[[:space:]]*(\|[[:space:]]*)?&?(crate::gates::)?Gate::[A-Z]/) gate[sp] = 1
+    depth += gsub(/\{/, "{", s) - gsub(/\}/, "}", s)
+    while (sp > 0 && depth < body[sp]) sp--
+    if (s ~ /(^|[^A-Za-z0-9_])match[[:space:]].*\{[[:space:]]*$/) { body[++sp] = depth; gate[sp] = 0 }
+}
+END { exit !(done && hit) }
+AWK
+)"
     LC_ALL=C awk -F $'\x1f' '$1 == "+" && $2 ~ /^src\/.*\.rs$/ && $5 ~ /^[[:space:]]*_[[:space:]]*=>/ {
         print $2 " " $3 }' "$RECORDS" | while read -r f n; do
-        start=$(( n > 40 ? n - 40 : 1 ))
-        text="$(sed -n "${start},$(( n - 1 ))p" "$f")"
-        if grep -q 'match ' <<< "$text" && grep -qE '(^|[^A-Za-z_])Gate::[A-Z]' <<< "$text"; then
+        if LC_ALL=C awk -v n="$n" "$gate_arm" "$f"; then
             echo "$f:$n: \`_ =>\` arm in a match over Gate; list the variants so a new one fails to compile"
         fi
     done
@@ -511,7 +532,7 @@ run_if sh-syntax "${SH_FILES[0]:-}" "no shell script changed" check_sh_syntax
 GPU_HIT="$(first_file '^src/gpu/')"
 [[ -n "$GPU_HIT" ]] && add owed-gpu owed "$GPU_HIT" \
     "scripts/test-gpu.ps1 on a host with a card; the GPU goldens fail without one"
-MPI_HIT="$(first_file '^src/(.*/)?([^/]*_)?mpi[^/]*$|^tools/dist_mpi_check\.rs$')"
+MPI_HIT="$(first_file '^src/(.*/)?([^/]*_)?mpi[^/]*$|^src/distributed/comm\.rs$|^tools/dist_mpi_check\.rs$')"
 MPI_HIT="${MPI_HIT:-$(first_hit '^[+-]$' '\.(rs|toml)$' 'MpiComm|distributed-mpi')}"
 [[ -n "$MPI_HIT" ]] && add owed-mpi owed "$MPI_HIT" \
     "--all-features clippy and nextest after . scripts/mpi-env.ps1, then scripts/test-mpi.ps1"

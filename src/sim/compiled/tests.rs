@@ -953,22 +953,50 @@ fn weight_minimization_matches_row_by_row_greedy() {
         weights.iter().map(|&w| w as usize).sum()
     }
 
+    // One ANDed word leaves dense rows that must not pay for the column index; seven
+    // leave the sparse rows it narrows. Each case also carries a duplicate and an empty
+    // row, and widths past four reach the path without a const width.
+    let counts = || {
+        (
+            super::parity::COLUMN_INDEX_BUILDS.with(|n| n.get()),
+            super::parity::NARROWED_SCANS.with(|n| n.get()),
+        )
+    };
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
-    for words in 1..=6 {
-        for rank in [2, 7, 33, 90] {
-            let rows: Vec<Vec<u64>> = (0..rank)
-                .map(|_| {
-                    (0..words)
-                        .map(|_| rng.random::<u64>() & rng.random::<u64>() & rng.random::<u64>())
-                        .collect()
-                })
-                .collect();
-            let mut expected = rows.clone();
-            let expected_after = reference(&mut expected);
-            let mut actual = rows;
-            let (_, after) = minimize_flip_row_weight(&mut actual);
-            assert_eq!(actual, expected, "words {words}, rank {rank}");
-            assert_eq!(after, expected_after, "words {words}, rank {rank}");
+    for ands in [1, 3, 7] {
+        let (builds_before, scans_before) = counts();
+        for words in [1, 2, 3, 4, 5, 6, 7, 9] {
+            for rank in [2, 3, 7, 33, 90, 200] {
+                let mut rows: Vec<Vec<u64>> = (0..rank)
+                    .map(|_| {
+                        (0..words)
+                            .map(|_| (0..ands).fold(!0u64, |w, _| w & rng.random::<u64>()))
+                            .collect()
+                    })
+                    .collect();
+                if rank >= 3 {
+                    rows[rank / 2] = rows[0].clone();
+                    rows[rank - 1].fill(0);
+                }
+                let mut expected = rows.clone();
+                let expected_after = reference(&mut expected);
+                let mut actual = rows;
+                let (_, after) = minimize_flip_row_weight(&mut actual);
+                assert_eq!(actual, expected, "ands {ands}, words {words}, rank {rank}");
+                assert_eq!(
+                    after, expected_after,
+                    "ands {ands}, words {words}, rank {rank}"
+                );
+            }
+        }
+        let (builds, scans) = counts();
+        match ands {
+            1 => assert_eq!(builds, builds_before, "dense rows built the column index"),
+            7 => assert!(
+                scans > scans_before,
+                "sparse rows never took the narrowed scan"
+            ),
+            _ => {}
         }
     }
 }

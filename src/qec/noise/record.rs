@@ -9,13 +9,13 @@ use super::{
     QEC_NOISE_UNIT_SHOTS, QecDeferredProgram, QecNoiseDraw, draw_qec_unit, qec_coin_unit_rng,
     qec_noise_unit_rng,
 };
+#[cfg(feature = "parallel")]
+use crate::backend::SendMutPtr;
 #[cfg(any(test, feature = "bench-internal"))]
 use crate::error::PrismError;
 use crate::error::Result;
 use crate::gates::Gate;
 use crate::qec::QecProgram;
-#[cfg(feature = "parallel")]
-use crate::sim::compiled::SendPtrU64;
 #[cfg(test)]
 use crate::sim::compiled::{CompiledSampler, compile_measurements};
 use crate::sim::compiled::{PackedShots, pair_rows_mut, xor_words};
@@ -309,7 +309,7 @@ impl QecRecordNoise {
             )
         {
             let data_len = data.len();
-            let data = SendPtrU64(data.as_mut_ptr());
+            let data = SendMutPtr(data.as_mut_ptr());
             let flip = move |offset: usize, value: u64| {
                 debug_assert!(offset < data_len);
                 // SAFETY: `offset` is a word of a record row holding shots of the unit

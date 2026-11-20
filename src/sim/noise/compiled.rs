@@ -8,7 +8,8 @@ use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::Result;
 use crate::sim::ShotsResult;
 use crate::sim::compiled::{
-    PackedShots, batch_propagate_backward, compile_measurements, xor_words,
+    LUT_GROUP_SIZE, PackedShots, batch_propagate_backward, build_xor_group_table,
+    compile_measurements, xor_words,
 };
 
 #[cfg(feature = "gpu")]
@@ -243,7 +244,6 @@ fn fill_one_event(
     }
 }
 
-const NOISE_LUT_K: usize = 8;
 const NOISE_LUT_MIN_EVENTS: usize = 16;
 const NOISE_LUT_TILE: usize = 4096;
 
@@ -407,42 +407,14 @@ pub(super) struct NoiseFlipLut {
 
 impl NoiseFlipLut {
     fn build_from_flat(flat_data: &[u64], num_rows: usize, m_words: usize) -> Self {
-        let num_full_groups = num_rows / NOISE_LUT_K;
-        let remainder_size = num_rows % NOISE_LUT_K;
-        let total_groups = num_full_groups + usize::from(remainder_size > 0);
-        let entries = 1 << NOISE_LUT_K;
-
-        let mut data = vec![0u64; total_groups * entries * m_words];
-
-        for g in 0..total_groups {
-            let group_start = g * NOISE_LUT_K;
-            let k = if g < num_full_groups {
-                NOISE_LUT_K
-            } else {
-                remainder_size
-            };
-            let lut_off = g * entries * m_words;
-
-            for byte in 1..(1usize << k) {
-                let lowest = byte & byte.wrapping_neg();
-                let row_idx = group_start + lowest.trailing_zeros() as usize;
-                let prev = byte ^ lowest;
-
-                let dst = lut_off + byte * m_words;
-                let src = lut_off + prev * m_words;
-                let row_off = row_idx * m_words;
-
-                for w in 0..m_words {
-                    data[dst + w] = data[src + w] ^ flat_data[row_off + w];
-                }
-            }
-        }
-
+        let data = build_xor_group_table(num_rows, m_words, |i| {
+            &flat_data[i * m_words..(i + 1) * m_words]
+        });
         Self {
             data,
             m_words,
-            num_full_groups,
-            remainder_size,
+            num_full_groups: num_rows / LUT_GROUP_SIZE,
+            remainder_size: num_rows % LUT_GROUP_SIZE,
         }
     }
 
@@ -456,7 +428,7 @@ impl NoiseFlipLut {
         for g in 0..self.total_groups() {
             let byte = ((mask[g / 8] >> ((g % 8) * 8)) & 0xFF) as usize;
             if byte != 0 {
-                let offset = (g * (1 << NOISE_LUT_K) + byte) * self.m_words;
+                let offset = (g * (1 << LUT_GROUP_SIZE) + byte) * self.m_words;
                 xor_words(accum, &self.data[offset..offset + self.m_words]);
             }
         }

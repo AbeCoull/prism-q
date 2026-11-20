@@ -7,7 +7,7 @@ use super::{
     QEC_NOISE_UNIT_SHOTS, QecNoiseDraw, QecProductTable, draw_qec_unit, qec_noise_unit_rng,
 };
 #[cfg(feature = "parallel")]
-use crate::sim::compiled::SendPtrU64;
+use crate::backend::SendMutPtr;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -61,7 +61,7 @@ impl QecParityNoise {
         #[cfg(feature = "parallel")]
         {
             let rows_len = rows.len();
-            let rows = SendPtrU64(rows.as_mut_ptr());
+            let rows = SendMutPtr(rows.as_mut_ptr());
             let flip = move |offset: usize, bit: u64| {
                 debug_assert!(offset < rows_len);
                 // SAFETY: `offset` is an output row's word for a shot of the unit being

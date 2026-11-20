@@ -4,8 +4,6 @@
 
 use std::marker::PhantomData;
 
-#[cfg(feature = "parallel")]
-use super::SendPtrU64;
 use super::parity::SparseParity;
 #[cfg(target_arch = "aarch64")]
 use super::rng::Xoshiro256PlusPlusX2;
@@ -13,6 +11,8 @@ use super::rng::{Xoshiro256PlusPlus, Xoshiro256PlusPlusLanes};
 #[cfg(target_arch = "x86_64")]
 use super::rng::{Xoshiro256PlusPlusX4, Xoshiro256PlusPlusX8};
 use super::shot_tail_mask;
+#[cfg(feature = "parallel")]
+use crate::backend::SendMutPtr;
 #[cfg(target_arch = "x86_64")]
 use crate::backend::word_ops::{WordTier, word_tier};
 
@@ -91,14 +91,6 @@ impl<'a> BtsOutput<'a> {
                 apply_ref_bits_meas_major(self.row_mut(row), &[bit], 1, words, num_shots);
             }
         }
-    }
-}
-
-#[cfg(feature = "parallel")]
-impl SendPtrU64 {
-    #[inline(always)]
-    fn as_mut_ptr(self) -> *mut u64 {
-        self.0
     }
 }
 
@@ -188,7 +180,7 @@ pub(super) fn bts_batched(
 
                 {
                     use rayon::prelude::*;
-                    let ptr = SendPtrU64(output.as_mut_ptr());
+                    let ptr = SendMutPtr(output.as_mut_ptr());
                     let total_sw = total_s_words;
                     let nm = num_meas;
 
@@ -210,7 +202,7 @@ pub(super) fn bts_batched(
                                 // the allocation remains live until all workers finish.
                                 let mut batch_output = unsafe {
                                     BtsOutput::new(
-                                        ptr.as_mut_ptr(),
+                                        ptr.ptr(),
                                         nm,
                                         total_sw,
                                         batch_offset,

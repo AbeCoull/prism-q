@@ -21,6 +21,8 @@ mod tests;
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
+#[cfg(feature = "parallel")]
+use crate::backend::SendMutPtr;
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 #[cfg(feature = "gpu")]
@@ -162,7 +164,8 @@ fn gaussian_eliminate(rows: &mut [Vec<u64>], num_cols: usize) -> (usize, Vec<usi
     (current_row, pivot_cols)
 }
 
-const LUT_GROUP_SIZE: usize = 8;
+/// Rows in one flip table group, so one random byte selects a group's entry.
+pub(crate) const LUT_GROUP_SIZE: usize = 8;
 const LUT_MIN_RANK: usize = 8;
 
 /// Largest flip table built. Past it, sampling XORs the flip rows each random byte selects
@@ -179,39 +182,49 @@ struct FlipLut {
     m_words: usize,
 }
 
-impl FlipLut {
-    fn build(flip_rows: &[Vec<u64>], m_words: usize) -> Self {
-        let rank = flip_rows.len();
-        let num_full_groups = rank / LUT_GROUP_SIZE;
-        let remainder_size = rank % LUT_GROUP_SIZE;
-        let total_groups = num_full_groups + usize::from(remainder_size > 0);
-        let entries_per_group = 1 << LUT_GROUP_SIZE;
+/// XOR table over `num_rows` rows of `m_words` words, `row(i)` giving row `i`. Entry `byte`
+/// of group `g`, at word `((g << LUT_GROUP_SIZE) + byte) * m_words`, holds the XOR of the
+/// rows of that group of [`LUT_GROUP_SIZE`] which the set bits of `byte` select.
+pub(crate) fn build_xor_group_table<'a>(
+    num_rows: usize,
+    m_words: usize,
+    row: impl Fn(usize) -> &'a [u64],
+) -> Vec<u64> {
+    let num_full_groups = num_rows / LUT_GROUP_SIZE;
+    let remainder_size = num_rows % LUT_GROUP_SIZE;
+    let total_groups = num_full_groups + usize::from(remainder_size > 0);
+    let entries_per_group = 1 << LUT_GROUP_SIZE;
 
-        let mut data = vec![0u64; total_groups * entries_per_group * m_words];
+    let mut data = vec![0u64; total_groups * entries_per_group * m_words];
 
-        for g in 0..total_groups {
-            let group_start = g * LUT_GROUP_SIZE;
-            let k = if g < num_full_groups {
-                LUT_GROUP_SIZE
-            } else {
-                remainder_size
-            };
-            let lut_offset = g * entries_per_group * m_words;
+    for g in 0..total_groups {
+        let group_start = g * LUT_GROUP_SIZE;
+        let k = if g < num_full_groups {
+            LUT_GROUP_SIZE
+        } else {
+            remainder_size
+        };
+        let lut_offset = g * entries_per_group * m_words;
 
-            for byte in 1..(1usize << k) {
-                let lowest = byte & byte.wrapping_neg();
-                let row_idx = group_start + lowest.trailing_zeros() as usize;
-                let prev = byte ^ lowest;
+        for byte in 1..(1usize << k) {
+            let lowest = byte & byte.wrapping_neg();
+            let src_row = row(group_start + lowest.trailing_zeros() as usize);
+            let prev = byte ^ lowest;
 
-                let dst_start = lut_offset + byte * m_words;
-                let src_start = lut_offset + prev * m_words;
+            let dst_start = lut_offset + byte * m_words;
+            let src_start = lut_offset + prev * m_words;
 
-                for w in 0..m_words {
-                    data[dst_start + w] = data[src_start + w] ^ flip_rows[row_idx][w];
-                }
+            for w in 0..m_words {
+                data[dst_start + w] = data[src_start + w] ^ src_row[w];
             }
         }
+    }
+    data
+}
 
+impl FlipLut {
+    fn build(flip_rows: &[Vec<u64>], m_words: usize) -> Self {
+        let data = build_xor_group_table(flip_rows.len(), m_words, |i| &flip_rows[i]);
         Self { data, m_words }
     }
 
@@ -467,18 +480,7 @@ fn pack_bools(bools: &[bool]) -> Vec<u64> {
 }
 
 #[cfg(feature = "parallel")]
-#[derive(Clone, Copy)]
-pub(crate) struct SendPtrU64(pub(crate) *mut u64);
-#[cfg(feature = "parallel")]
-// SAFETY: SendPtrU64 is used only for packed shot buffers partitioned by
-// disjoint word ranges before entering parallel workers.
-unsafe impl Send for SendPtrU64 {}
-#[cfg(feature = "parallel")]
-// SAFETY: The raw pointer wrapper is shared, but each worker writes only its
-// assigned non-overlapping range.
-unsafe impl Sync for SendPtrU64 {}
-#[cfg(feature = "parallel")]
-impl SendPtrU64 {
+impl SendMutPtr<u64> {
     #[inline(always)]
     unsafe fn copy_from_slice(self, dst_offset: usize, src: &[u64]) {
         // SAFETY: same contract as the enclosing unsafe fn.
@@ -1119,7 +1121,7 @@ impl CompiledSampler {
                 {
                     use rayon::prelude::*;
 
-                    let ptr = SendPtrU64(meas_major.as_mut_ptr());
+                    let ptr = SendMutPtr(meas_major.as_mut_ptr());
                     pb.blocks
                         .par_iter()
                         .zip(block_seeds.par_iter())

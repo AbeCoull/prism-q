@@ -12,7 +12,8 @@ use crate::sim::ShotsResult;
 
 use super::NoiseModel;
 use super::compiled::{
-    apply_readout_packed, geometric_sample, pair_branch, record_readout, unpack_and_remap,
+    PauliSplit, apply_readout_packed, for_each_event_shot, pair_branch, record_readout,
+    unpack_and_remap,
 };
 
 const FRAME_BATCH_SIZE: usize = 256;
@@ -308,73 +309,44 @@ pub(super) fn run_shots_noisy_frame(
             }
 
             for event in &noise.after_gate[idx] {
+                let frames = &mut (x_frame.as_mut_slice(), z_frame.as_mut_slice());
                 if let Some((q0, q1, p)) = event.pauli_pair() {
                     if p == 0.0 {
                         continue;
                     }
-                    if p < 0.5 && batch_n >= 32 {
-                        let ln_1mp = (-p).ln_1p();
-                        let mut pos = geometric_sample(&mut rng, ln_1mp);
-                        while pos < batch_n {
-                            let r: f64 = rand::RngExt::random(&mut rng);
-                            let (l0, l1) = pair_branch(r);
-                            flip_frame_letter(&mut x_frame, &mut z_frame, q0, pos, l0);
-                            flip_frame_letter(&mut x_frame, &mut z_frame, q1, pos, l1);
-                            pos += 1 + geometric_sample(&mut rng, ln_1mp);
-                        }
-                    } else {
-                        for s in 0..batch_n {
-                            let r: f64 = rand::RngExt::random(&mut rng);
-                            if r < p {
-                                let (l0, l1) = pair_branch(r / p);
-                                flip_frame_letter(&mut x_frame, &mut z_frame, q0, s, l0);
-                                flip_frame_letter(&mut x_frame, &mut z_frame, q1, s, l1);
+                    for_each_event_shot(
+                        &mut rng,
+                        p,
+                        0,
+                        batch_n,
+                        frames,
+                        |(x, z), shot, r, dense| {
+                            if dense && r >= p {
+                                return;
                             }
-                        }
-                    }
+                            let (l0, l1) = pair_branch(if dense { r / p } else { r });
+                            flip_frame_letter(x, z, q0, shot, l0);
+                            flip_frame_letter(x, z, q1, shot, l1);
+                        },
+                    );
                     continue;
                 }
 
                 let (px, py, pz) = event.pauli_probs();
                 let q = event.qubit();
-                let p_event = px + py + pz;
-                if p_event == 0.0 {
+                let Some(split) = PauliSplit::new(px, py, pz) else {
                     continue;
-                }
-
-                let px_frac = px / p_event;
-                let pxy_frac = (px + py) / p_event;
-
-                if p_event < 0.5 && batch_n >= 32 {
-                    let ln_1mp = (-p_event).ln_1p();
-                    let mut pos = geometric_sample(&mut rng, ln_1mp);
-                    while pos < batch_n {
-                        let r: f64 = rand::RngExt::random(&mut rng);
-                        let bit = 1u64 << (pos % 64);
-                        let w = pos / 64;
-                        if r < px_frac {
-                            x_frame[q][w] ^= bit;
-                        } else if r < pxy_frac {
-                            x_frame[q][w] ^= bit;
-                            z_frame[q][w] ^= bit;
-                        } else {
-                            z_frame[q][w] ^= bit;
-                        }
-                        pos += 1 + geometric_sample(&mut rng, ln_1mp);
-                    }
-                } else {
-                    for s in 0..batch_n {
-                        let r: f64 = rand::RngExt::random(&mut rng);
-                        if r < px {
-                            x_frame[q][s / 64] ^= 1u64 << (s % 64);
-                        } else if r < px + py {
-                            x_frame[q][s / 64] ^= 1u64 << (s % 64);
-                            z_frame[q][s / 64] ^= 1u64 << (s % 64);
-                        } else if r < p_event {
-                            z_frame[q][s / 64] ^= 1u64 << (s % 64);
-                        }
-                    }
-                }
+                };
+                for_each_event_shot(
+                    &mut rng,
+                    split.p_event(),
+                    0,
+                    batch_n,
+                    frames,
+                    |(x, z), shot, r, dense| {
+                        flip_frame_letter(x, z, q, shot, split.letter(r, dense));
+                    },
+                );
             }
         }
     }

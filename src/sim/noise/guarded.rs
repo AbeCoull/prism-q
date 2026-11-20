@@ -12,7 +12,8 @@ use crate::sim::compiled::{
 };
 
 use super::compiled::{
-    apply_readout_packed, compile_validated_noisy, geometric_sample, unpack_and_remap,
+    apply_readout_packed, compile_validated_noisy, for_each_event_shot, geometric_sample,
+    unpack_and_remap,
 };
 
 /// Sample a deferred circuit with guarded entries. The compiled sampler draws every
@@ -207,7 +208,15 @@ impl GuardedFlip {
         rng: &mut ChaCha8Rng,
     ) {
         let p_event = px + py + pz;
-        let mut fire = |shot: usize, branch: f64| {
+        for_each_event_shot(rng, p_event, 0, num_shots, rows, |rows, shot, r, dense| {
+            let branch = if dense {
+                if r >= p_event {
+                    return;
+                }
+                r
+            } else {
+                r * p_event
+            };
             if !self.guard.holds(|record| rows.bit(shot, record)) {
                 return;
             }
@@ -217,23 +226,7 @@ impl GuardedFlip {
             if branch >= px {
                 rows.xor_flips(shot, &self.z_flips);
             }
-        };
-        if p_event < 0.5 && num_shots >= 32 {
-            let ln_1mp = (-p_event).ln_1p();
-            let mut shot = geometric_sample(rng, ln_1mp);
-            while shot < num_shots {
-                let r: f64 = rand::RngExt::random(rng);
-                fire(shot, r * p_event);
-                shot += 1 + geometric_sample(rng, ln_1mp);
-            }
-        } else {
-            for shot in 0..num_shots {
-                let r: f64 = rand::RngExt::random(rng);
-                if r < p_event {
-                    fire(shot, r);
-                }
-            }
-        }
+        });
     }
 
     /// [`Self::land`] on measurement-major `rows`, a gate a word of shots at a time

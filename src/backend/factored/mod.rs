@@ -53,9 +53,11 @@ use crate::gates::{DiagEntry, Gate, is_diagonal_2x2};
 use crate::limits::ResolvedLimits;
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
+#[cfg(feature = "parallel")]
+use crate::backend::statevector::kernels::apply_fused_2q;
 use crate::backend::statevector::kernels::{
-    apply_cu, apply_cu_phase, apply_cx, apply_cz, apply_diagonal, apply_fused_2q, apply_mcu,
-    apply_mcu_phase, apply_parity2q, apply_swap, apply_unitary_seq, rzz_phases,
+    apply_cu, apply_cu_phase, apply_cx, apply_cz, apply_diagonal, apply_mcu, apply_mcu_phase,
+    apply_parity2q, apply_swap, apply_unitary_seq, rzz_phases,
 };
 #[cfg(feature = "parallel")]
 use crate::backend::statevector::kernels::{
@@ -116,11 +118,12 @@ fn apply_fused_2q_substate(
     q1: usize,
     mat: &[[Complex64; 4]; 4],
 ) {
-    if num_qubits < PARALLEL_THRESHOLD_QUBITS {
-        simd::PreparedGate2q::new(mat).apply_full(state, num_qubits, q0, q1);
-    } else {
+    #[cfg(feature = "parallel")]
+    if num_qubits >= PARALLEL_THRESHOLD_QUBITS {
         apply_fused_2q(state, num_qubits, q0, q1, mat);
+        return;
     }
+    simd::PreparedGate2q::new(mat).apply_full(state, num_qubits, q0, q1);
 }
 
 impl FactoredBackend {

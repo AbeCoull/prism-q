@@ -4,7 +4,7 @@
 use crate::circuit::{Circuit, Instruction};
 use crate::error::Result;
 
-use super::propagation::{colmajor_forward_sim, rowmul_phase, rowmul_phase_into};
+use super::propagation::{colmajor_forward_sim, rowmul_phase};
 use super::{CompiledSampler, finish_sampler, live_forward, require_compilable, xor_words};
 
 /// Compile a Clifford circuit's measurements via forward stabilizer
@@ -128,7 +128,7 @@ pub(crate) fn compile_forward_dense(circuit: &Circuit, seed: u64) -> Result<Comp
             // zero in every row.
             let live = k.div_ceil(64);
             let collapse = |row: &mut [u64], sign: &mut bool, dep: &mut [u64]| {
-                *sign = rowmul_phase(&p_data, row, 0, nw, p_phase, *sign);
+                *sign = rowmul_phase(&p_data, row, nw, p_phase, *sign);
                 xor_words(&mut dep[..live], &p_dep[..live]);
             };
             #[cfg(feature = "parallel")]
@@ -216,8 +216,13 @@ pub(crate) fn compile_forward_dense(circuit: &Circuit, seed: u64) -> Result<Comp
             for_each_row(&hits[..destab_words], n, |g| {
                 let s_base = (g + n) * stride;
                 let s_phase = phase[g + n];
-                scratch_phase =
-                    rowmul_phase_into(&xz, s_base, &mut scratch, nw, s_phase, scratch_phase);
+                scratch_phase = rowmul_phase(
+                    &xz[s_base..s_base + stride],
+                    &mut scratch,
+                    nw,
+                    s_phase,
+                    scratch_phase,
+                );
 
                 let (lo, hi) = gen_dep.split_at_mut(scratch_idx * rank_words);
                 for (dst, &src) in hi[..live]

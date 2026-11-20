@@ -441,24 +441,12 @@ impl<'p> Prepared<'p> {
     }
 
     fn fold(&self, runs: impl IntoIterator<Item = Result<ShotRun>>) -> Result<ShotsResult> {
-        let runs = runs.into_iter();
-        let mut shots = Vec::with_capacity(runs.size_hint().0);
-        let mut leaked = Vec::with_capacity(runs.size_hint().0);
-        let mut metadata = RunMetadata::exact(self.plan.resolved());
-        for (i, run) in runs.enumerate() {
-            let (bits, shot_leaked, shot_metadata) = run?;
-            if i == 0 {
-                metadata = shot_metadata;
-            } else {
-                metadata.weaken_with(&shot_metadata);
-            }
-            shots.push(bits);
-            leaked.push(shot_leaked);
-        }
-        let result =
-            ShotsResult::from_shots(shots, self.program.num_held_bits()).with_metadata(metadata);
-        let memory = self.noise.as_ref().and_then(|noise| noise.memory);
-        Ok(trajectory::with_leak_record(result, memory, leaked))
+        trajectory::collect_trajectory_shots(
+            self.program.num_held_bits(),
+            self.noise.as_ref().and_then(|noise| noise.memory),
+            self.plan.resolved(),
+            runs,
+        )
     }
 
     /// Walk the graph once from a fresh state, returning the classical bits and

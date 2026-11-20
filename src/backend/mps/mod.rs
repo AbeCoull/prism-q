@@ -52,7 +52,7 @@ use crate::backend::{
 };
 use crate::circuit::Instruction;
 use crate::error::Result;
-use crate::gates::Gate;
+use crate::gates::{Gate, mcu_matrix};
 use crate::limits::ResolvedLimits;
 use crate::sim::unified_pauli::PauliTerm;
 
@@ -67,7 +67,7 @@ mod svd;
 
 pub(crate) use env::MpsPauliAxis;
 use env::mps_pauli_factors;
-use linalg::{cu_phase_swap_matrix, mcu_matrix, swap_gate_qubits};
+use linalg::{cu_phase_swap_matrix, swap_gate_qubits};
 
 // Benchmark-only surface: benches link the crate externally and cannot see
 // pub(crate), so the SVD entry points are pub; doc(hidden) keeps them out of
@@ -1582,8 +1582,7 @@ impl MpsBackend {
                     .map(|&qubit| self.site_for_logical(qubit))
                     .collect();
                 let dim = 1usize << n;
-                let role_order: Vec<usize> = (0..n).collect();
-                let gate_mat = mcu_matrix(num_ctrl, &data.mat, &role_order);
+                let gate_mat = mcu_matrix(num_ctrl, &data.mat);
                 self.apply_n_qubit_gate(&gate_mat, dim, &all_qubits)?;
             }
             Gate::Unitary(data) => {

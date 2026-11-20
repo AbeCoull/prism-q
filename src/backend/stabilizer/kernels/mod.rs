@@ -26,39 +26,7 @@ use super::StabilizerBackend;
 pub(super) use crate::backend::MIN_QUBITS_FOR_PAR_GATES;
 
 #[cfg(feature = "parallel")]
-use crate::backend::MIN_ANTI_ROWS_FOR_PAR;
-
-#[cfg(feature = "parallel")]
-pub(crate) struct SendU64Ptr(pub(crate) *mut u64);
-#[cfg(feature = "parallel")]
-impl SendU64Ptr {
-    #[inline(always)]
-    pub(crate) fn ptr(&self) -> *mut u64 {
-        self.0
-    }
-}
-#[cfg(feature = "parallel")]
-// SAFETY: Used only when each parallel task accesses non-overlapping row regions.
-unsafe impl Send for SendU64Ptr {}
-#[cfg(feature = "parallel")]
-// SAFETY: The pointer itself is read-only; mutation goes through derived slices at disjoint offsets.
-unsafe impl Sync for SendU64Ptr {}
-
-#[cfg(feature = "parallel")]
-pub(crate) struct SendBoolPtr(pub(crate) *mut bool);
-#[cfg(feature = "parallel")]
-impl SendBoolPtr {
-    #[inline(always)]
-    pub(crate) fn ptr(&self) -> *mut bool {
-        self.0
-    }
-}
-#[cfg(feature = "parallel")]
-// SAFETY: Used only when each parallel task accesses a distinct phase element.
-unsafe impl Send for SendBoolPtr {}
-#[cfg(feature = "parallel")]
-// SAFETY: The pointer itself is read-only; mutation goes through distinct indices.
-unsafe impl Sync for SendBoolPtr {}
+use crate::backend::{MIN_ANTI_ROWS_FOR_PAR, SendMutPtr};
 
 /// Whether a gate sweep over the rows of an `n`-qubit tableau runs under Rayon.
 #[cfg(feature = "parallel")]
@@ -610,8 +578,8 @@ impl StabilizerBackend {
         if self.n >= MIN_QUBITS_FOR_PAR_GATES && anti_rows.len() >= MIN_ANTI_ROWS_FOR_PAR {
             use rayon::prelude::*;
 
-            let xz_ptr = SendU64Ptr(self.xz.as_mut_ptr());
-            let phase_ptr = SendBoolPtr(self.phase.as_mut_ptr());
+            let xz_ptr = SendMutPtr(self.xz.as_mut_ptr());
+            let phase_ptr = SendMutPtr(self.phase.as_mut_ptr());
 
             // SAFETY: Each row index in anti_rows is unique (collected from a filter
             // with no duplicates) and none equals p_row. Each row occupies

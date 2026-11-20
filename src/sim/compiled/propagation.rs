@@ -1416,12 +1416,12 @@ unsafe fn rowmul_avx512(
     }
 }
 
-/// Rowmul: multiply src into xz[r_base..], returning the resulting phase.
+/// Multiply the row `src` into the row `dst`, both laid out `[x(nw) | z(nw)]`,
+/// returning the phase of the product.
 #[inline(always)]
 pub(super) fn rowmul_phase(
     src: &[u64],
-    xz: &mut [u64],
-    r_base: usize,
+    dst: &mut [u64],
     nw: usize,
     src_phase: bool,
     dst_phase: bool,
@@ -1432,26 +1432,21 @@ pub(super) fn rowmul_phase(
     {
         let tier = word_tier();
         if nw >= 8 && tier == WordTier::Avx512 {
-            // SAFETY: AVX-512F and VPOPCNTDQ detected, src has 2*nw elements, xz[r_base..]
-            // has 2*nw elements
-            let sum = unsafe {
-                rowmul_avx512(src.as_ptr(), xz.as_mut_ptr().add(r_base), nw, initial_sum)
-            };
+            // SAFETY: AVX-512F and VPOPCNTDQ detected, src and dst each have 2*nw elements
+            let sum = unsafe { rowmul_avx512(src.as_ptr(), dst.as_mut_ptr(), nw, initial_sum) };
             return (sum & 3) >= 2;
         }
         if nw >= 4 && tier != WordTier::Scalar {
-            // SAFETY: AVX2 detected, src has 2*nw elements, xz[r_base..] has 2*nw elements
-            let sum =
-                unsafe { rowmul_avx2(src.as_ptr(), xz.as_mut_ptr().add(r_base), nw, initial_sum) };
+            // SAFETY: AVX2 detected, src and dst each have 2*nw elements
+            let sum = unsafe { rowmul_avx2(src.as_ptr(), dst.as_mut_ptr(), nw, initial_sum) };
             return (sum & 3) >= 2;
         }
     }
 
     #[cfg(target_arch = "aarch64")]
     if nw >= 2 {
-        // SAFETY: NEON is baseline on aarch64, src has 2*nw elements, xz[r_base..] has 2*nw elements
-        let sum =
-            unsafe { rowmul_neon(src.as_ptr(), xz.as_mut_ptr().add(r_base), nw, initial_sum) };
+        // SAFETY: NEON is baseline on aarch64, src and dst each have 2*nw elements
+        let sum = unsafe { rowmul_neon(src.as_ptr(), dst.as_mut_ptr(), nw, initial_sum) };
         return (sum & 3) >= 2;
     }
 
@@ -1459,87 +1454,12 @@ pub(super) fn rowmul_phase(
     for w in 0..nw {
         let x1 = src[w];
         let z1 = src[nw + w];
-        let x2 = xz[r_base + w];
-        let z2 = xz[r_base + nw + w];
+        let x2 = dst[w];
+        let z2 = dst[nw + w];
         let new_x = x1 ^ x2;
         let new_z = z1 ^ z2;
-        xz[r_base + w] = new_x;
-        xz[r_base + nw + w] = new_z;
-        if (x1 | z1 | x2 | z2) != 0 {
-            let nonzero = (new_x | new_z) & (x1 | z1) & (x2 | z2);
-            let pos = (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
-            sum = sum.wrapping_add(2 * pos.count_ones() as u64);
-            sum = sum.wrapping_sub(nonzero.count_ones() as u64);
-        }
-    }
-    (sum & 3) >= 2
-}
-
-/// Rowmul variant for scratch buffer: multiply src (from xz) into scratch.
-#[inline(always)]
-pub(super) fn rowmul_phase_into(
-    xz: &[u64],
-    s_base: usize,
-    scratch: &mut [u64],
-    nw: usize,
-    src_phase: bool,
-    dst_phase: bool,
-) -> bool {
-    let initial_sum = if src_phase { 2u64 } else { 0 } + if dst_phase { 2u64 } else { 0 };
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        let tier = word_tier();
-        if nw >= 8 && tier == WordTier::Avx512 {
-            // SAFETY: AVX-512F and VPOPCNTDQ detected, xz[s_base..] is src, scratch is dst
-            let sum = unsafe {
-                rowmul_avx512(
-                    xz.as_ptr().add(s_base),
-                    scratch.as_mut_ptr(),
-                    nw,
-                    initial_sum,
-                )
-            };
-            return (sum & 3) >= 2;
-        }
-        if nw >= 4 && tier != WordTier::Scalar {
-            // SAFETY: AVX2 detected, xz[s_base..] is src, scratch is dst
-            let sum = unsafe {
-                rowmul_avx2(
-                    xz.as_ptr().add(s_base),
-                    scratch.as_mut_ptr(),
-                    nw,
-                    initial_sum,
-                )
-            };
-            return (sum & 3) >= 2;
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    if nw >= 2 {
-        // SAFETY: NEON is baseline on aarch64, xz[s_base..] is src, scratch is dst
-        let sum = unsafe {
-            rowmul_neon(
-                xz.as_ptr().add(s_base),
-                scratch.as_mut_ptr(),
-                nw,
-                initial_sum,
-            )
-        };
-        return (sum & 3) >= 2;
-    }
-
-    let mut sum = initial_sum;
-    for w in 0..nw {
-        let x1 = xz[s_base + w];
-        let z1 = xz[s_base + nw + w];
-        let x2 = scratch[w];
-        let z2 = scratch[nw + w];
-        let new_x = x1 ^ x2;
-        let new_z = z1 ^ z2;
-        scratch[w] = new_x;
-        scratch[nw + w] = new_z;
+        dst[w] = new_x;
+        dst[nw + w] = new_z;
         if (x1 | z1 | x2 | z2) != 0 {
             let nonzero = (new_x | new_z) & (x1 | z1) & (x2 | z2);
             let pos = (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
@@ -1608,7 +1528,13 @@ pub(super) fn compute_reference_bits(
                     }
                     let r_base = r * stride;
                     if anticommutes(pauli, &xz[r_base..r_base + stride], nw) {
-                        phase[r] = rowmul_phase(&p_data, &mut xz, r_base, nw, p_phase, phase[r]);
+                        phase[r] = rowmul_phase(
+                            &p_data,
+                            &mut xz[r_base..r_base + stride],
+                            nw,
+                            p_phase,
+                            phase[r],
+                        );
                     }
                 }
 
@@ -1634,9 +1560,8 @@ pub(super) fn compute_reference_bits(
                     if anticommutes(pauli, &xz[g * stride..(g + 1) * stride], nw) {
                         let s_base = (g + n) * stride;
                         let s_phase = phase[g + n];
-                        scratch_phase = rowmul_phase_into(
-                            &xz,
-                            s_base,
+                        scratch_phase = rowmul_phase(
+                            &xz[s_base..s_base + stride],
                             &mut scratch,
                             nw,
                             s_phase,

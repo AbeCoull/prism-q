@@ -1,4 +1,20 @@
+use super::gate1q::{apply_slices_scalar, sandwich_1q_blocked_scalar};
+#[cfg(all(target_arch = "x86_64", feature = "distributed"))]
+use super::slice::{
+    combine_global_half_avx2fma, combine_global_half_avx512, combine_global_half_fma,
+    combine_global_half_scalar,
+};
+#[cfg(target_arch = "x86_64")]
+use super::slice::{
+    negate_slice_avx2, negate_slice_avx512, norm_sqr_sum_avx2fma, norm_sqr_sum_avx512,
+    norm_sqr_sum_scale_avx2fma, norm_sqr_sum_scale_avx512, norm_sqr_to_slice_avx2,
+    norm_sqr_to_slice_avx512, scale_complex_slice_avx2fma, scale_complex_slice_avx512,
+    scale_complex_to_slice_avx2fma, scale_complex_to_slice_avx512, swap_slices_avx2,
+    swap_slices_avx512, zero_slice_avx512,
+};
+use super::walsh::walsh_blocked;
 use super::*;
+use num_complex::Complex64;
 use std::f64::consts::FRAC_1_SQRT_2;
 
 const EPS: f64 = 1e-12;
@@ -938,11 +954,20 @@ fn target_feature_kernel_count_is_pinned() {
     let needle = concat!("target_feature", "(enable");
     let root = env!("CARGO_MANIFEST_DIR");
     // Per-file expected counts; the breakdown makes a drift easy to localise.
-    let expected: [(&str, usize); 8] = [
-        ("src/backend/simd.rs", 51),
+    let expected: [(&str, usize); 17] = [
+        ("src/backend/simd/mod.rs", 3),
+        ("src/backend/simd/gate1q.rs", 14),
+        ("src/backend/simd/gate2q.rs", 8),
+        ("src/backend/simd/kraus.rs", 3),
+        ("src/backend/simd/slice.rs", 21),
+        ("src/backend/simd/walsh.rs", 2),
         ("src/backend/word_ops.rs", 3),
         ("src/backend/stabilizer/kernels/simd.rs", 5),
-        ("src/backend/statevector/kernels.rs", 19),
+        ("src/backend/statevector/kernels/mod.rs", 0),
+        ("src/backend/statevector/kernels/batch_tables/mod.rs", 4),
+        ("src/backend/statevector/kernels/pauli_rot.rs", 0),
+        ("src/backend/statevector/kernels/qft/mod.rs", 15),
+        ("src/backend/statevector/kernels/tiling.rs", 0),
         ("src/sim/compiled/accumulator.rs", 2),
         ("src/sim/compiled/bts.rs", 4),
         ("src/sim/compiled/propagation.rs", 15),

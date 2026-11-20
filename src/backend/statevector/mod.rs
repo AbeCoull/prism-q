@@ -96,16 +96,9 @@ const INIT_ZERO_CHUNK: usize = 1 << 16;
 /// trajectory would otherwise walk its amplitudes toward the subnormal range.
 const MAX_PENDING_NORM: f64 = 1e32;
 
-/// Per-block partial sums for a 1q reduced density matrix: `(p0, p1, r)` over
-/// one `2 * 2^qubit` block whose low half holds the qubit-0 amplitudes.
-#[inline(always)]
-pub(super) fn rdm_block_sums(block: &[Complex64], half: usize) -> (f64, f64, Complex64) {
-    let (lo, hi) = block.split_at(half);
-    rdm_pair_sums(lo, hi)
-}
-
-/// [`rdm_block_sums`] over an already split pair, so a sub-tile of one block
-/// contributes without re-deriving the halves.
+/// Partial sums for a 1q reduced density matrix: `(p0, p1, r)` over the halves of
+/// one `2 * 2^qubit` block, or matching tiles of them, with `lo` holding the qubit-0
+/// amplitudes.
 #[inline(always)]
 pub(super) fn rdm_pair_sums(lo: &[Complex64], hi: &[Complex64]) -> (f64, f64, Complex64) {
     let mut p0 = 0.0f64;
@@ -120,7 +113,6 @@ pub(super) fn rdm_pair_sums(lo: &[Complex64], hi: &[Complex64]) -> (f64, f64, Co
 }
 
 /// Sum of `(p0, p1, r)` triples, the reduction [`rdm_pair_sums`] folds under.
-#[cfg(feature = "parallel")]
 #[inline(always)]
 pub(super) fn rdm_sum_add(
     a: (f64, f64, Complex64),

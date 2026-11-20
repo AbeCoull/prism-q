@@ -10,17 +10,10 @@ use rayon::prelude::*;
 
 #[cfg(feature = "parallel")]
 use crate::backend::MIN_PAR_ELEMS;
+#[cfg(feature = "parallel")]
+use crate::backend::gemm::{MIN_FAER_GEMM_WORK, faer_gemm_nn};
 
 use super::LegId;
-
-/// `m*k*n` at or above which a contraction goes to faer instead of the scalar
-/// loop below.
-///
-/// A 64-cubed complex product. Routing everything to faer instead costs 23% on
-/// `tn/scalar_depth_20q/4`, where the operands are too small to cover its
-/// packing.
-#[cfg(feature = "parallel")]
-const MIN_FAER_GEMM_WORK: usize = 1 << 18;
 
 /// Dense multidimensional tensor with named legs for contraction.
 ///
@@ -348,23 +341,20 @@ fn transpose_with(t: &Tensor, perm: &[usize], pool: &mut BufferPool) -> Tensor {
     Tensor { data, shape, legs }
 }
 
-/// Multiply the row-major `m` by `k` and `k` by `n` operands into `c`.
-///
-/// A row-major array is its own transpose read column-major, so `C = A*B` is
-/// issued as `C^T = B^T * A^T` over the same buffers with no repacking.
-#[cfg(feature = "parallel")]
-fn faer_gemm(a: &[Complex64], b: &[Complex64], c: &mut [Complex64], m: usize, k: usize, n: usize) {
-    use faer::linalg::matmul::matmul;
-    use faer::{Accum, MatMut, MatRef, Par};
-
-    matmul(
-        MatMut::from_column_major_slice_mut(c, n, m),
-        Accum::Replace,
-        MatRef::from_column_major_slice(b, n, k),
-        MatRef::from_column_major_slice(a, k, m),
-        Complex64::new(1.0, 0.0),
-        Par::rayon(0),
-    );
+/// Add the product of the length `k` row `a_row` with the row-major `k` by `n`
+/// operand `b` into `c_row`, skipping the zero entries of `a_row`.
+#[inline(always)]
+fn accumulate_row(c_row: &mut [Complex64], a_row: &[Complex64], b: &[Complex64], n: usize) {
+    let zero = Complex64::new(0.0, 0.0);
+    for (j, &a_val) in a_row.iter().enumerate() {
+        if a_val == zero {
+            continue;
+        }
+        let b_row = &b[j * n..(j + 1) * n];
+        for (c_elem, &b_val) in c_row.iter_mut().zip(b_row) {
+            *c_elem += a_val * b_val;
+        }
+    }
 }
 
 /// Contract two tensors over shared legs (matching LegId).
@@ -420,7 +410,6 @@ pub(super) fn contract_with(a: &Tensor, b: &Tensor, pool: &mut BufferPool) -> Te
         .max(1);
     let n: usize = b_free.iter().map(|&i| b.shape[i]).product::<usize>().max(1);
 
-    let zero = Complex64::new(0.0, 0.0);
     #[cfg(feature = "parallel")]
     let faer = m * k * n >= MIN_FAER_GEMM_WORK;
     #[cfg(not(feature = "parallel"))]
@@ -432,51 +421,29 @@ pub(super) fn contract_with(a: &Tensor, b: &Tensor, pool: &mut BufferPool) -> Te
     };
 
     #[cfg(feature = "parallel")]
-    if faer {
-        faer_gemm(&a_t.data, &b_t.data, &mut c_data, m, k, n);
+    let done = if faer {
+        faer_gemm_nn(&mut c_data, &a_t.data, &b_t.data, m, k, n);
+        true
     } else if m * n >= MIN_PAR_ELEMS {
         let a_data = &a_t.data;
         let b_data = &b_t.data;
         c_data.par_chunks_mut(n).enumerate().for_each(|(i, c_row)| {
-            for j in 0..k {
-                let a_val = a_data[i * k + j];
-                if a_val == zero {
-                    continue;
-                }
-                let b_row = &b_data[j * n..(j + 1) * n];
-                for (c_elem, &b_val) in c_row.iter_mut().zip(b_row) {
-                    *c_elem += a_val * b_val;
-                }
-            }
+            accumulate_row(c_row, &a_data[i * k..(i + 1) * k], b_data, n);
         });
+        true
     } else {
-        for i in 0..m {
-            for j in 0..k {
-                let a_val = a_t.data[i * k + j];
-                if a_val == zero {
-                    continue;
-                }
-                let b_row = &b_t.data[j * n..(j + 1) * n];
-                let c_row = &mut c_data[i * n..(i + 1) * n];
-                for (c_elem, &b_val) in c_row.iter_mut().zip(b_row) {
-                    *c_elem += a_val * b_val;
-                }
-            }
-        }
-    }
-
+        false
+    };
     #[cfg(not(feature = "parallel"))]
-    for i in 0..m {
-        for j in 0..k {
-            let a_val = a_t.data[i * k + j];
-            if a_val == zero {
-                continue;
-            }
-            let b_row = &b_t.data[j * n..(j + 1) * n];
-            let c_row = &mut c_data[i * n..(i + 1) * n];
-            for (c_elem, &b_val) in c_row.iter_mut().zip(b_row) {
-                *c_elem += a_val * b_val;
-            }
+    let done = false;
+    if !done {
+        for i in 0..m {
+            accumulate_row(
+                &mut c_data[i * n..(i + 1) * n],
+                &a_t.data[i * k..(i + 1) * k],
+                &b_t.data,
+                n,
+            );
         }
     }
 

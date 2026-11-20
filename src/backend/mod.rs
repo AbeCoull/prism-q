@@ -199,6 +199,55 @@ impl SendPtr {
     }
 }
 
+/// Raw pointer into a buffer that Rayon tasks write at disjoint elements.
+///
+/// Methods take `self` so a closure captures the whole wrapper, as with [`SendPtr`]. Each
+/// caller states at its `unsafe` site why no two tasks reach the same element.
+#[cfg(feature = "parallel")]
+pub(crate) struct SendMutPtr<T>(pub(crate) *mut T);
+
+#[cfg(feature = "parallel")]
+impl<T> Clone for SendMutPtr<T> {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+#[cfg(feature = "parallel")]
+impl<T> Copy for SendMutPtr<T> {}
+
+#[cfg(feature = "parallel")]
+// SAFETY: every task writes through the pointer only at elements no other task
+// touches, as each construction site states, and `T: Send` lets the values cross
+// threads.
+unsafe impl<T: Send> Send for SendMutPtr<T> {}
+#[cfg(feature = "parallel")]
+// SAFETY: sharing the wrapper only copies the pointer; writes stay at the disjoint
+// elements each construction site establishes.
+unsafe impl<T: Send> Sync for SendMutPtr<T> {}
+
+#[cfg(feature = "parallel")]
+impl<T> SendMutPtr<T> {
+    #[inline(always)]
+    pub(crate) fn ptr(self) -> *mut T {
+        self.0
+    }
+
+    /// Write `val` at element `idx`.
+    ///
+    /// # Safety
+    ///
+    /// `idx` must be in bounds, and no other thread may access that element concurrently.
+    #[inline(always)]
+    pub(crate) unsafe fn store(self, idx: usize, val: T) {
+        // SAFETY: same contract as the enclosing unsafe fn.
+        unsafe {
+            *self.0.add(idx) = val;
+        }
+    }
+}
+
 /// Element count above which a full-buffer reduction is worth Rayon fan-out.
 /// Higher than [`PARALLEL_THRESHOLD_QUBITS`] because a reduction is one
 /// lightweight streaming pass, so the fan-out only pays past `2^16`.

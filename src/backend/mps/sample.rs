@@ -6,6 +6,9 @@ use num_complex::Complex64;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+#[cfg(feature = "parallel")]
+use crate::backend::SendMutPtr;
+
 use super::{MpsBackend, ONE, ZERO};
 
 /// Leaves per Rayon task in the dense expansion, as a bit count. The split
@@ -18,30 +21,6 @@ const MIN_LEAVES_PER_TASK_BITS: usize = 6;
 /// scratch stacks allocated.
 #[cfg(feature = "parallel")]
 const MAX_SPLIT_BITS: usize = 6;
-
-/// Raw output pointer for the dense expansion's Rayon split.
-#[cfg(feature = "parallel")]
-#[derive(Copy, Clone)]
-struct DenseOutPtr<T>(*mut T);
-
-#[cfg(feature = "parallel")]
-// SAFETY: the expansion partitions basis indices by their top-site bits before
-// entering Rayon, so each task writes a disjoint set of elements.
-unsafe impl<T: Send> Send for DenseOutPtr<T> {}
-#[cfg(feature = "parallel")]
-// SAFETY: same partition as Send; sharing the wrapper grants no overlap.
-unsafe impl<T: Send> Sync for DenseOutPtr<T> {}
-
-#[cfg(feature = "parallel")]
-impl<T> DenseOutPtr<T> {
-    #[inline(always)]
-    unsafe fn store(self, idx: usize, val: T) {
-        // SAFETY: same contract as the enclosing unsafe fn.
-        unsafe {
-            *self.0.add(idx) = val;
-        }
-    }
-}
 
 impl MpsBackend {
     /// Conditional outcome weights at `site`, given the boundary vector `left`
@@ -208,7 +187,7 @@ impl MpsBackend {
                 .saturating_sub(MIN_LEAVES_PER_TASK_BITS)
                 .min(MAX_SPLIT_BITS);
             if split > 0 {
-                let ptr = DenseOutPtr(out.as_mut_ptr());
+                let ptr = SendMutPtr(out.as_mut_ptr());
                 self.expansion_prefixes(split, root)
                     .into_par_iter()
                     .for_each(|(basis, vector)| {

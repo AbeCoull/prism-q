@@ -378,22 +378,6 @@ impl TensorNetworkBackend {
         );
     }
 
-    /// Build the full row-major 2^m × 2^m matrix for an MCU gate.
-    fn mcu_full_matrix(num_controls: usize, mat: &[[Complex64; 2]; 2]) -> Vec<Complex64> {
-        let m = num_controls + 1;
-        let dim = 1usize << m;
-        let zero = Complex64::new(0.0, 0.0);
-        let one = Complex64::new(1.0, 0.0);
-        let mut full = vec![zero; dim * dim];
-        for i in 0..dim - 2 {
-            full[i * dim + i] = one;
-        }
-        let corner = (dim - 2) * dim + dim - 2;
-        full[corner..corner + 2].copy_from_slice(&mat[0]);
-        full[corner + dim..corner + dim + 2].copy_from_slice(&mat[1]);
-        full
-    }
-
     fn apply_reset(&mut self, qubit: usize) -> Result<()> {
         self.collapse_qubit(qubit, true)?;
         Ok(())

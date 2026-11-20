@@ -938,11 +938,12 @@ fn target_feature_kernel_count_is_pinned() {
     let needle = concat!("target_feature", "(enable");
     let root = env!("CARGO_MANIFEST_DIR");
     // Per-file expected counts; the breakdown makes a drift easy to localise.
-    let expected: [(&str, usize); 8] = [
+    let expected: [(&str, usize); 9] = [
         ("src/backend/simd.rs", 51),
         ("src/backend/word_ops.rs", 3),
         ("src/backend/stabilizer/kernels/simd.rs", 5),
-        ("src/backend/statevector/kernels.rs", 19),
+        ("src/backend/statevector/kernels/batch_tables.rs", 4),
+        ("src/backend/statevector/kernels/qft.rs", 15),
         ("src/sim/compiled/accumulator.rs", 2),
         ("src/sim/compiled/bts.rs", 4),
         ("src/sim/compiled/propagation.rs", 15),

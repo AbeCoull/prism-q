@@ -154,7 +154,8 @@ still costs about half a sweep.
 The CUDA C source sits in `.cu` files beside the launchers and reaches
 `KERNEL_SOURCE_TEMPLATE` through `include_str!`. Placeholders such as `{{BP_TABLE_SIZE}}`
 and `{{TILE_Q}}` in `kernels/dense.cu` are filled at device construction from the
-constants in `src/backend/statevector/kernels.rs`, so CPU and GPU share one value.
+constants in `src/backend/statevector/kernels/batch_tables.rs`, so CPU and GPU share one
+value.
 
 ## Correctness
 

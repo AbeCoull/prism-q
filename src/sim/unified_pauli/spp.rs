@@ -7,11 +7,11 @@ use rand::{Rng, RngExt};
 use rand_chacha::ChaCha8Rng;
 
 use super::{
-    PauliTerm, clifford_conjugation_phase, count_branching_gates, pauli_vec_from_terms,
+    PauliAxis, PauliTerm, clifford_conjugation_phase, count_branching_gates, pauli_vec_from_terms,
     validate_and_lower, z_rotation_angle, zz_rotation_angle,
 };
 use crate::circuit::clifford_t::is_pauli_native;
-use crate::circuit::{Circuit, Instruction, SmallVec};
+use crate::circuit::{Circuit, Instruction, SmallVec, smallvec};
 use crate::error::Result;
 use crate::gates::Gate;
 use crate::sim::compiled::{PauliVec, flip_bit, propagate_backward};
@@ -24,7 +24,8 @@ pub(super) const ZROT_SINGLE: u32 = u32::MAX;
 /// as `u32` to hold the enum at 40 bytes (48 cost +2.6% to +5.8%), and `Rzz`
 /// shares the `ZRot` variant via the `ZROT_SINGLE` sentinel instead of adding
 /// a third variant, which kept an outlined call in the sample loop's match
-/// and cost about the same again.
+/// and cost about the same again. A `PauliRot` string is boxed for the same
+/// size bound.
 pub(super) enum CoalescedOp {
     SmallCliff(Vec<(Gate, SmallVec<[usize; 4]>)>),
     ZRot {
@@ -32,6 +33,12 @@ pub(super) enum CoalescedOp {
         pair: u32,
         branch: RotBranch,
     },
+    String(Box<StringRot>),
+}
+
+/// Gates SPP takes without lowering: the shared native set plus `PauliRot`.
+fn is_spp_native(gate: &Gate) -> bool {
+    is_pauli_native(gate) || matches!(gate, Gate::PauliRot(_))
 }
 
 pub(super) fn coalesce_cliffords(circuit: &Circuit) -> Vec<CoalescedOp> {
@@ -54,6 +61,13 @@ pub(super) fn coalesce_cliffords(circuit: &Circuit) -> Vec<CoalescedOp> {
                     pair: targets[1] as u32,
                     branch: RotBranch::new(theta),
                 });
+            } else if let Gate::PauliRot(data) = gate {
+                flush_cliff_buf(&mut cliff_buf, &mut ops);
+                ops.push(CoalescedOp::String(Box::new(StringRot::new(
+                    data.theta(),
+                    targets,
+                    data.axes(),
+                ))));
             } else {
                 cliff_buf.push((gate.clone(), SmallVec::from_slice(targets)));
             }
@@ -136,6 +150,89 @@ pub(super) fn branch_z_rotation(
     Complex64::new(0.0, branch.flip_weight_im)
 }
 
+/// Sampling data for one `PauliRot` string `exp(-i θ P / 2)`, with the bits of `P`
+/// stored over the words its support spans, starting at `first_word`.
+pub(super) struct StringRot {
+    first_word: usize,
+    x: SmallVec<[u64; 2]>,
+    z: SmallVec<[u64; 2]>,
+    branch: RotBranch,
+    flip_weight: Complex64,
+}
+
+impl StringRot {
+    /// `branch` carries the `Rz(θ)` probabilities, since the string conjugates to
+    /// `Rz(θ)` on one qubit. With `P = i^num_y X^px Z^pz` in the ordered letter
+    /// convention, the flip `Q -> Q P` scales the `Rz` flip weight by `i^num_y`, and
+    /// by `-1` when an odd number of the source's z bits pass the string's x bits.
+    fn new(theta: f64, targets: &[usize], axes: &[PauliAxis]) -> Self {
+        let first_word = targets.iter().min().map_or(0, |&q| q / 64);
+        let last_word = targets.iter().max().map_or(0, |&q| q / 64);
+        let span = last_word - first_word + 1;
+        let mut x: SmallVec<[u64; 2]> = smallvec![0; span];
+        let mut z: SmallVec<[u64; 2]> = smallvec![0; span];
+        let mut num_y = 0u32;
+        for (&q, axis) in targets.iter().zip(axes) {
+            let bit = q - first_word * 64;
+            match axis {
+                PauliAxis::X => flip_bit(&mut x, bit),
+                PauliAxis::Z => flip_bit(&mut z, bit),
+                PauliAxis::Y => {
+                    flip_bit(&mut x, bit);
+                    flip_bit(&mut z, bit);
+                    num_y += 1;
+                }
+            }
+        }
+        let branch = RotBranch::new(theta);
+        let f = branch.flip_weight_im;
+        let flip_weight = match num_y & 3 {
+            0 => Complex64::new(0.0, f),
+            1 => Complex64::new(-f, 0.0),
+            2 => Complex64::new(0.0, -f),
+            _ => Complex64::new(f, 0.0),
+        };
+        Self {
+            first_word,
+            x,
+            z,
+            branch,
+            flip_weight,
+        }
+    }
+}
+
+/// Stochastic branch for a `PauliRot` string: fires when the propagated Pauli
+/// anticommutes with the string, and the flip right-multiplies by it.
+#[inline]
+fn branch_pauli_string(pauli: &mut PauliVec, rot: &StringRot, rng: &mut impl Rng) -> Complex64 {
+    let words = rot.first_word..rot.first_word + rot.x.len();
+    let (qx, qz) = (&pauli.x[words.clone()], &pauli.z[words.clone()]);
+    let overlap = (qx.iter().zip(qz))
+        .zip(rot.x.iter().zip(&rot.z))
+        .fold(0, |acc, ((qx, qz), (px, pz))| acc ^ (qx & pz) ^ (qz & px));
+    if overlap.count_ones() & 1 == 0 {
+        return Complex64::new(1.0, 0.0);
+    }
+
+    if rng.random_bool(rot.branch.p_keep) {
+        return Complex64::new(rot.branch.keep_weight, 0.0);
+    }
+
+    let passed = (qz.iter().zip(&rot.x)).fold(0, |acc, (qz, px)| acc ^ (qz & px));
+    for (w, p) in pauli.x[words.clone()].iter_mut().zip(&rot.x) {
+        *w ^= p;
+    }
+    for (w, p) in pauli.z[words].iter_mut().zip(&rot.z) {
+        *w ^= p;
+    }
+    if passed.count_ones() & 1 == 1 {
+        -rot.flip_weight
+    } else {
+        rot.flip_weight
+    }
+}
+
 pub(super) fn backward_propagate_coalesced(
     ops: &[CoalescedOp],
     observable: &PauliVec,
@@ -166,6 +263,9 @@ pub(super) fn backward_propagate_coalesced(
             } => {
                 weight *= branch_z_rotation(&mut pauli, *qubit, *pair, branch, rng);
             }
+            CoalescedOp::String(rot) => {
+                weight *= branch_pauli_string(&mut pauli, rot, rng);
+            }
         }
     }
 
@@ -178,7 +278,8 @@ pub struct SppResult {
     pub std_errors: Vec<f64>,
     /// Samples drawn per qubit, not in total.
     pub num_samples: usize,
-    /// Branching gates in the circuit: `T`, `Tdg`, `Rz`, `P`, and `Rzz`.
+    /// Branching gates in the circuit: `T`, `Tdg`, `Rz`, `P`, `Rzz`, `Rx`, `Ry`
+    /// and `PauliRot`.
     pub t_count: usize,
     /// Fraction of samples whose propagated Pauli was diagonal (contributed a
     /// nonzero value).
@@ -266,10 +367,10 @@ pub struct SppObservableResult {
 /// propagation.
 ///
 /// Each sample backward-propagates the observable through the circuit
-/// (Clifford segments as coalesced gate runs, `Rz(theta)` and the two-qubit
-/// `Rzz(theta)` via a stochastic Pauli branch that records a complex weight;
-/// `Rx`, `Ry`, and multi-qubit `PauliRot` strings lower to Clifford
-/// conjugation around one `Rz` first). The contribution is `Re(weight)` when
+/// (Clifford segments as coalesced gate runs, `Rz(theta)`, the two-qubit
+/// `Rzz(theta)` and multi-qubit `PauliRot` strings via a stochastic Pauli branch
+/// that records a complex weight; `Rx` and `Ry` lower to Clifford conjugation
+/// around one `Rz` first). The contribution is `Re(weight)` when
 /// the final Pauli is diagonal in `{I, Z}` (i.e. evaluates trivially on
 /// `|0^n⟩`), else zero.
 ///
@@ -282,7 +383,7 @@ pub fn run_spp_observable(
     num_samples: usize,
     seed: u64,
 ) -> Result<SppObservableResult> {
-    let lowered = validate_and_lower(circuit, "SPP observable", is_pauli_native)?;
+    let lowered = validate_and_lower(circuit, "SPP observable", is_spp_native)?;
     let circuit = lowered.as_ref();
     let n = circuit.num_qubits;
     let t_count = count_branching_gates(circuit);
@@ -341,7 +442,7 @@ pub fn run_spp_observable(
 /// # Ok::<(), prism_q::PrismError>(())
 /// ```
 pub fn run_spp(circuit: &Circuit, num_samples: usize, seed: u64) -> Result<SppResult> {
-    let lowered = validate_and_lower(circuit, "SPP", is_pauli_native)?;
+    let lowered = validate_and_lower(circuit, "SPP", is_spp_native)?;
     let circuit = lowered.as_ref();
     let n = circuit.num_qubits;
     let num_words = n.div_ceil(64);

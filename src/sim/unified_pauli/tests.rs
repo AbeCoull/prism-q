@@ -1313,3 +1313,104 @@ fn a_pauli_string_rotation_counts_as_one_branching_gate() {
     );
     assert_eq!(run_spp(&circuit, 16, 42).unwrap().t_count, 2);
 }
+
+#[test]
+fn spp_pauli_string_rotations_draw_the_samples_of_their_lowering() {
+    let n = 6;
+    let observables = [
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::x(3)],
+        vec![PauliTerm::y(1), PauliTerm::z(4)],
+        vec![PauliTerm::x(0), PauliTerm::y(2), PauliTerm::z(5)],
+    ];
+    let mut branched = 0;
+    for seed in 0..8u64 {
+        let circuit = random_pauli_string_circuit(n, 15, 42 + seed);
+        let lowered = crate::circuit::expand_pauli_rotations(&circuit).into_owned();
+        for obs in &observables {
+            let native = run_spp_observable(&circuit, obs, 2_000, seed).unwrap();
+            let ladder = run_spp_observable(&lowered, obs, 2_000, seed).unwrap();
+            assert_eq!(
+                (native.mean, native.variance, native.nonzero_fraction),
+                (ladder.mean, ladder.variance, ladder.nonzero_fraction),
+                "seed {seed} {obs:?}"
+            );
+            assert_eq!(native.t_count, ladder.t_count);
+            branched += usize::from(native.variance > 1e-6);
+        }
+        let native = run_spp(&circuit, 500, seed).unwrap();
+        let ladder = run_spp(&lowered, 500, seed).unwrap();
+        assert_eq!(native.expectations, ladder.expectations, "seed {seed}");
+        assert_eq!(native.std_errors, ladder.std_errors, "seed {seed}");
+        assert_eq!(native.t_count, ladder.t_count);
+    }
+    assert!(branched > 16, "only {branched} runs branched");
+}
+
+#[test]
+fn spp_pauli_string_rotations_converge_to_the_statevector() {
+    let mut nonzero = 0;
+    for (n, rotations, seed) in [
+        (4, 10, 100),
+        (5, 10, 101),
+        (5, 8, 103),
+        (6, 10, 104),
+        (6, 12, 105),
+    ] {
+        let circuit = random_pauli_string_circuit(n, rotations, seed);
+        let mut observables: Vec<Vec<PauliTerm>> = (0..n)
+            .flat_map(|q| [PauliTerm::x(q), PauliTerm::y(q), PauliTerm::z(q)])
+            .map(|term| vec![term])
+            .collect();
+        observables.push(vec![PauliTerm::x(0), PauliTerm::y(2), PauliTerm::z(n - 1)]);
+        let want = reference_expectations(
+            &circuit,
+            crate::sim::BackendKind::Statevector,
+            None,
+            &observables,
+        );
+        for (obs, want) in observables.iter().zip(&want) {
+            let got = run_spp_observable(&circuit, obs, 20_000, 42).unwrap();
+            assert!(
+                (got.mean - want).abs() <= 5.0 * got.std_error + 2e-3,
+                "{n}q seed {seed} {obs:?}: {} +- {} vs {want}",
+                got.mean,
+                got.std_error
+            );
+            nonzero += usize::from(want.abs() > 0.05);
+        }
+    }
+    assert!(nonzero > 20, "only {nonzero} observables away from zero");
+}
+
+#[test]
+fn spp_pauli_string_rotations_agree_across_key_widths() {
+    let layouts: [(usize, [usize; 5]); 3] = [
+        (5, [0, 1, 2, 3, 4]),
+        (128, [3, 63, 64, 100, 127]),
+        (200, [63, 64, 128, 150, 199]),
+    ];
+    let small = random_pauli_string_circuit(5, 12, 11);
+    let mut reference = None;
+    for (n, qubits) in layouts {
+        let mut circuit = Circuit::new(n, 0);
+        for inst in &small.instructions {
+            let Instruction::Gate { gate, targets } = inst else {
+                unreachable!()
+            };
+            let mapped: Vec<usize> = targets.iter().map(|&q| qubits[q]).collect();
+            circuit.add_gate(gate.clone(), &mapped);
+        }
+        let lowered = crate::circuit::expand_pauli_rotations(&circuit).into_owned();
+        let obs = [PauliTerm::x(qubits[1]), PauliTerm::z(qubits[3])];
+        let native = run_spp_observable(&circuit, &obs, 4_000, 9).unwrap();
+        let ladder = run_spp_observable(&lowered, &obs, 4_000, 9).unwrap();
+        let values = (native.mean, native.variance);
+        assert_eq!(values, (ladder.mean, ladder.variance), "{n} qubits");
+        match reference {
+            None => reference = Some(values),
+            Some(expected) => assert_eq!(values, expected, "{n} qubits"),
+        }
+    }
+    assert!(reference.unwrap().1 > 1e-6);
+}

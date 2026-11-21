@@ -1785,19 +1785,7 @@ mod gpu_scaffold {
     use crate::error::PrismError;
     use crate::gpu::GpuContext;
 
-    fn device_or_skip() -> Option<std::sync::Arc<GpuContext>> {
-        match GpuContext::new(0) {
-            Ok(ctx) => Some(ctx),
-            Err(e) => {
-                assert!(
-                    std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
-                    "PRISM_REQUIRE_GPU is set but no usable GPU was found ({e})"
-                );
-                eprintln!("SKIP: no usable GPU ({e})");
-                None
-            }
-        }
-    }
+    use crate::test_support::gpu_context_or_skip as device_or_skip;
 
     // Above the staging threshold a readback cycles through two pinned slots. The
     // lengths cover one partial chunk, an exact multiple of the slot, and full chunks

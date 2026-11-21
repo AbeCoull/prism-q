@@ -14,6 +14,15 @@ const SAMPLE_BLOCK_LOG: u32 = 12;
 /// Threads per sampling CTA; mirrors `SAMPLE_THREADS`.
 const SAMPLE_THREADS: u32 = 256;
 
+/// Whether walking `num_shots` on the device moves fewer bytes than the `2^n` probability
+/// readback the host sampler takes: 12 bytes a shot (offset up, index down) and 8 a block
+/// total, against 8 an amplitude.
+pub(crate) fn walk_moves_fewer_bytes(num_qubits: usize, num_shots: usize) -> bool {
+    let dim = 1u128 << num_qubits;
+    let blocks = dim.div_ceil(1 << SAMPLE_BLOCK_LOG);
+    12 * num_shots as u128 + 8 * blocks < 8 * dim
+}
+
 /// The state index of each ascending uniform in `sorted`, drawn against the weights
 /// `|a_i|^2` scaled by their total, so `pending_norm` drops out.
 ///

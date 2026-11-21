@@ -36,7 +36,7 @@ pub(crate) use measure::{
     measure_prob_one, read_measure_log, reduced_density_matrix_1q,
 };
 pub(crate) use noise::{noise_damping, noise_kraus, noise_thermal};
-pub(crate) use sample::sample_sorted;
+pub(crate) use sample::{sample_sorted, walk_moves_fewer_bytes};
 pub(crate) use tiles::{
     MIXED_TILE_GEOMETRY, launch_apply_mixed_tile, launch_apply_multi_fused_nondiag,
     launch_apply_qft_block,

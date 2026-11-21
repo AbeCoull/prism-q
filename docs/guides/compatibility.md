@@ -153,9 +153,12 @@ Seeded output has changed in these releases:
     sampler changed, and they no longer depend on the Rayon thread count.
   - Terminal shots and counts from a GPU statevector are drawn on the device against a
     scan of the state in blocks of 4096 amplitudes, with each uniform scaled by the
-    total weight, in place of a host walk over the probability vector. The uniforms are
-    unchanged, so a fixed-seed shot over the full register moves only where its draw
-    lands within rounding of the boundary between two outcomes, and then to the
-    neighbouring outcome. Counts whose map is anything but qubit `i` into bit `i` across
-    the whole register, a partial or permuted map, walk the full state where they sampled
-    a table keyed by the measured bits, so fixed-seed counts on those circuits changed.
+    total weight, in place of a host walk over the probability vector, when the walk
+    moves fewer bytes than reading the `2^n` probabilities back: fewer shots than about
+    two thirds of the amplitudes. The uniforms are unchanged, so a fixed-seed shot over
+    the full register moves only where its draw lands within rounding of the boundary
+    between two outcomes, and then to the neighbouring outcome. Counts drawn on the
+    device whose map is anything but qubit `i` into bit `i` across the whole register, a
+    partial or permuted map, walk the full state where they sampled a table keyed by the
+    measured bits, so fixed-seed counts on those circuits changed. A run with more shots
+    keeps the host sampler and its output, including the table for a partial map.

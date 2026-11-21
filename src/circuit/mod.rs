@@ -562,14 +562,18 @@ impl Circuit {
             }
         }
 
-        let mut components: std::collections::HashMap<usize, Vec<usize>> =
-            std::collections::HashMap::new();
+        // Qubits arrive in ascending order, so each group opens at its lowest qubit
+        // and the groups come out sorted by it.
+        let mut group_of = vec![usize::MAX; n];
+        let mut result: Vec<Vec<usize>> = Vec::new();
         for q in 0..n {
             let root = find(&mut parent, q);
-            components.entry(root).or_default().push(q);
+            if group_of[root] == usize::MAX {
+                group_of[root] = result.len();
+                result.push(Vec::new());
+            }
+            result[group_of[root]].push(q);
         }
-        let mut result: Vec<Vec<usize>> = components.into_values().collect();
-        result.sort_by_key(|group| group[0]);
         (result, clifford_only)
     }
 

@@ -1843,6 +1843,9 @@ fn require_clifford(circuit: &Circuit) -> Result<()> {
 /// [`require_clifford`], then, once the circuit measures, no resets and terminal
 /// measurements with no classical conditionals.
 fn require_compilable(circuit: &Circuit) -> Result<()> {
+    if crate::sim::supports_compiled_measurement_sampling(circuit) {
+        return Ok(());
+    }
     require_clifford(circuit)?;
 
     let has_measurements = circuit

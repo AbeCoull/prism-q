@@ -1200,16 +1200,18 @@ extern "C" __global__ void reset_fold_logged(
     state[i1].y = 0.0;
 }
 
-// compute_probabilities: out[i] = (amp.x² + amp.y²) * norm_sq for every basis state.
-// Launched over 2^n threads. Saves half the PCIe traffic compared to dtoh'ing raw amplitudes
-// and squaring on the host.
+// compute_probabilities: out[i] = (amp.x² + amp.y²) * norm_sq for the `count` basis states
+// from `start`. Saves half the PCIe traffic compared to dtoh'ing raw amplitudes and squaring
+// on the host. `out` may be a pinned host staging slot mapped into the device, so a large
+// readback squares one chunk at a time without a 2^n scratch on the device.
 
 extern "C" __global__ void compute_probabilities(
-    const double2 *state, unsigned long long dim, double norm_sq, double *out)
+    const double2 *state, unsigned long long start, unsigned long long count, double norm_sq,
+    double *out)
 {
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= dim) return;
-    double2 a = state[i];
+    if (i >= count) return;
+    double2 a = state[start + i];
     out[i] = (a.x * a.x + a.y * a.y) * norm_sq;
 }
 

@@ -46,7 +46,7 @@ enum DeviceInner {
         _module: Arc<CudaModule>,
         functions: HashMap<&'static str, CudaFunction>,
         #[cfg(feature = "parallel")]
-        staging: Mutex<Option<super::memory::HostStaging>>,
+        staging: Mutex<Option<Box<super::memory::HostStaging>>>,
     },
     #[cfg_attr(not(test), allow(dead_code))]
     Stub,
@@ -235,7 +235,7 @@ impl GpuDevice {
             } => {
                 let mut slot = staging.lock().unwrap_or_else(PoisonError::into_inner);
                 if slot.is_none() {
-                    *slot = Some(super::memory::HostStaging::new(stream)?);
+                    *slot = Some(Box::new(super::memory::HostStaging::new(stream)?));
                 }
                 f(slot.as_mut().unwrap())
             }

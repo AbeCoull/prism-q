@@ -29,6 +29,8 @@ pub(crate) use gates::{
     launch_apply_mcu, launch_apply_mcu_phase, launch_apply_rzz, launch_apply_swap,
     launch_set_initial_state, route_2q,
 };
+#[cfg(test)]
+pub(crate) use measure::probabilities_through_scratch;
 pub(crate) use measure::{
     begin_measure_log, launch_compute_probabilities, measure_collapse, measure_logged,
     measure_prob_one, read_measure_log, reduced_density_matrix_1q,

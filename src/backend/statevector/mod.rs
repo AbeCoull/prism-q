@@ -707,6 +707,21 @@ impl StatevectorBackend {
         Ok(None)
     }
 
+    /// Whether terminal sampling of `num_shots` takes the device walk: the state lives on
+    /// the device and the walk passes
+    /// [`walk_moves_fewer_bytes`](crate::gpu::kernels::dense::walk_moves_fewer_bytes).
+    #[cfg(feature = "gpu")]
+    pub(crate) fn walks_on_device(&self, num_shots: usize) -> bool {
+        self.gpu_state.as_ref().is_some_and(|gpu| {
+            crate::gpu::kernels::dense::walk_moves_fewer_bytes(gpu.num_qubits(), num_shots)
+        })
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    pub(crate) fn walks_on_device(&self, _num_shots: usize) -> bool {
+        false
+    }
+
     #[cfg(not(feature = "gpu"))]
     pub(crate) fn group_moments_on_device(
         &self,

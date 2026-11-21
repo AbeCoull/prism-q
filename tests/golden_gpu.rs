@@ -2769,9 +2769,9 @@ fn one_frequencies_from_counts(
         .collect()
 }
 
-// Terminal counts under `gpu_auto` simulate and sample on the device. CPU `Auto`
-// uses a different sampler over the same distribution, so the frequency comparison is
-// statistical.
+// Terminal counts under `gpu_auto` simulate on the device; at 50,000 shots of 16
+// qubits they sample through the probability readback. CPU `Auto` uses a different
+// sampler over the same distribution, so the frequency comparison is statistical.
 #[test]
 fn auto_gpu_terminal_counts_match_cpu_auto() {
     use prism_q::{BackendKind, simulate};
@@ -2904,13 +2904,15 @@ fn statevector_gpu_terminal_counts_match_auto_gpu() {
 
 // Terminal counts and shots drawn on the device follow the CPU probabilities over a
 // partial map of qubits that are not a prefix of the register, and repeat for a seed.
+// At 20 qubits, 200,000 shots move fewer bytes than the probabilities, so they walk on
+// the device.
 #[test]
 fn statevector_gpu_terminal_sampling_matches_cpu_marginals() {
     use prism_q::{BackendKind, Circuit, simulate};
 
     let Some(f) = Fixture::try_new() else { return };
 
-    let n = 16;
+    let n = 20;
     let measured = [3usize, 9, 14];
     let shots = 200_000;
     let unmeasured = prism_q::circuits::random_circuit(n, 6, common::SEED);

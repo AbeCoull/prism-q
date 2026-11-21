@@ -43,7 +43,9 @@ directly:
   keeps them on the device across its noise sites until a conditional, a region, a
   readout flip, a Kraus branch picked on the host, or the end of the shot.
   Terminal shots and counts are drawn on the device, and one state index per shot comes
-  back in place of the `2^n` probability vector.
+  back in place of the `2^n` probability vector, while that moves fewer bytes: fewer
+  shots than about two thirds of the amplitudes. More shots read the probabilities back
+  and sample on the host.
 - `BackendKind::StabilizerGpu { context }`. Gates apply to a device tableau through
   one word-grouped batched Clifford kernel (`stab_apply_word_grouped`). Measurement and
   reset keep pivot search, row cascade, phase fixup and deterministic outcomes on the
@@ -181,10 +183,12 @@ The golden equality tests do not cover three limits on what a seed guarantees.
   `statevector_gpu_mid_measure_shots_match_cpu` pins.
   `statevector_gpu_shot_frequencies_match_cpu_off_dyadic` pins the general case: equal
   frequencies within 5 sigma after `Rx(0.3)`.
-- Terminal shots and counts on the GPU statevector: the device walks a scan of the state
-  in blocks of 4096 amplitudes, which rounds differently from the host's running sum, so
-  a draw within rounding of the boundary between two outcomes can land on the
-  neighbouring one. The result does not depend on the card or the Rayon thread count.
+- Terminal shots and counts on the GPU statevector: below about two shots for every
+  three amplitudes, the device walks a scan of the state in blocks of 4096 amplitudes,
+  which rounds differently from the host's running sum, so a draw within rounding of the
+  boundary between two outcomes can land on the neighbouring one. The choice of walk
+  counts bytes only, so neither it nor the result depends on the card or the Rayon
+  thread count.
   `statevector_gpu_terminal_sampling_matches_cpu_marginals` pins the frequencies against
   the CPU probabilities.
 - GPU BTS sampling: reproducible outright. The random bits are drawn on the device from

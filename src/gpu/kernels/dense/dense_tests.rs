@@ -312,3 +312,49 @@ fn device_walk_reads_block_totals_and_indices_only() {
     let census = ctx.pass_census() - before;
     assert_eq!((census.launches, census.drains), (2, 2));
 }
+
+// 2^14 amplitudes in four blocks read back 131,072 bytes; 10,919 shots and the four block
+// totals move 131,060.
+#[test]
+fn device_walk_floor_counts_bytes_moved() {
+    use super::walk_moves_fewer_bytes;
+    assert!(walk_moves_fewer_bytes(14, 10_919));
+    assert!(!walk_moves_fewer_bytes(14, 10_920));
+    assert!(!walk_moves_fewer_bytes(14, 1_000_000));
+    assert!(walk_moves_fewer_bytes(28, 1_000_000));
+}
+
+// One shot either side of the floor at 14 qubits: below it the route runs the two
+// sampling kernels and reads back twice, above it one probability kernel and one readback.
+#[cfg(feature = "bench-internal")]
+#[test]
+fn device_walk_yields_to_the_probability_readback_past_the_floor() {
+    let Some(ctx) = gpu_context_or_skip() else {
+        return;
+    };
+    let n = 14;
+    let mut circuit = crate::circuit::Circuit::new(n, n);
+    circuit
+        .instructions
+        .extend(crate::circuits::hardware_efficient_ansatz(n, 1, 42).instructions);
+    for q in 0..n {
+        circuit.add_measure(q, q);
+    }
+    let census = |shots: usize| {
+        let before = ctx.pass_census();
+        let counts = sim::simulate(&circuit)
+            .gpu(ctx.clone())
+            .seed(42)
+            .sample_counts(shots)
+            .unwrap()
+            .counts;
+        assert_eq!(counts.values().sum::<u64>(), shots as u64);
+        ctx.pass_census() - before
+    };
+    let walked = census(10_919);
+    let read_back = census(10_920);
+    assert_eq!(
+        (walked.launches, walked.drains),
+        (read_back.launches + 1, read_back.drains + 1)
+    );
+}

@@ -53,9 +53,15 @@ pub(super) const LIVE_FORWARD_DENSITY: usize = 64;
 
 /// Row words a random collapse in [`compile_forward_dense`] multiplies before its row
 /// pass splits across the pool: two tasks of
-/// [`MIN_PAR_ELEMS`](crate::backend::MIN_PAR_ELEMS) words.
+/// [`MIN_PAR_ELEMS`](crate::backend::MIN_PAR_ELEMS) words. A pool of one thread never
+/// splits, since each split would hand the pass to that thread and wait for it.
 #[cfg(feature = "parallel")]
 const MIN_PAR_COLLAPSE_WORDS: usize = 2 * crate::backend::MIN_PAR_ELEMS;
+
+#[cfg(all(test, feature = "parallel"))]
+thread_local! {
+    pub(super) static PARALLEL_COLLAPSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// [`compile_forward`] over the whole register at once, measured at the end.
 pub(crate) fn compile_forward_dense(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
@@ -101,6 +107,8 @@ pub(crate) fn compile_forward_dense(circuit: &Circuit, seed: u64) -> Result<Comp
     let mut held: Vec<u64> = vec![0u64; destab_words];
     let mut held_valid = false;
     let mut scratch_phase = false;
+    #[cfg(feature = "parallel")]
+    let multi_threaded = rayon::current_num_threads() > 1;
 
     for (meas_idx, &(qubit, _)) in measurements.iter().enumerate() {
         let word = qubit / 64;
@@ -134,8 +142,10 @@ pub(crate) fn compile_forward_dense(circuit: &Circuit, seed: u64) -> Result<Comp
             #[cfg(feature = "parallel")]
             let hit_rows: usize = hits.iter().map(|w| w.count_ones() as usize).sum();
             #[cfg(feature = "parallel")]
-            let done_parallel = if hit_rows * stride >= MIN_PAR_COLLAPSE_WORDS {
+            let done_parallel = if multi_threaded && hit_rows * stride >= MIN_PAR_COLLAPSE_WORDS {
                 use rayon::prelude::*;
+                #[cfg(test)]
+                PARALLEL_COLLAPSES.with(|n| n.set(n.get() + 1));
                 xz.par_chunks_mut(64 * stride)
                     .zip(phase.par_chunks_mut(64))
                     .zip(gen_dep[..total_rows * rank_words].par_chunks_mut(64 * rank_words))

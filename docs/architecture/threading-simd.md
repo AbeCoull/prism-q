@@ -20,10 +20,15 @@ architectures each backend supports.
 
 ## Threading
 
-Under the `parallel` feature, gate kernels have `_par` variants built on
-`par_chunks_mut`. They engage at `PARALLEL_THRESHOLD_QUBITS = 15` (`src/backend/mod.rs`),
-below which thread-pool overhead exceeds the work. Each task covers at least
-`MIN_PAR_ELEMS = 4096` amplitudes, 64 KiB.
+A statevector kernel is a body handed to one of the traversals in
+`statevector/kernels/mod.rs` (`for_each_hi_half`, `for_each_half_pair`, `sum_hi_halves`,
+`reduce_half_pairs`), and the traversal owns the split. Under the `parallel` feature it
+switches to Rayon `par_chunks_mut` at `PARALLEL_THRESHOLD_QUBITS = 15`
+(`src/backend/mod.rs`), below which thread-pool overhead exceeds the work. With four or
+more blocks each block is a task; with fewer, each half splits into tiles of at least
+`MIN_PAR_ELEMS = 4096` amplitudes, 64 KiB. Passes that tile on their own terms, such as
+one gate over the whole state and the batch phase tables, keep a separate parallel entry
+point behind the same threshold.
 
 The pool is the process-wide Rayon pool, sized on the first simulation call to every
 logical core, and `RAYON_NUM_THREADS` overrides it. Hyperthreads help from 24 qubits by

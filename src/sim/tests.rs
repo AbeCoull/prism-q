@@ -1373,6 +1373,65 @@ fn test_has_terminal_measurements_only() {
 }
 
 #[test]
+fn compiled_sampling_support_matches_the_separate_checks() {
+    use crate::circuit::{ClassicalCondition, GuardedRegion, Instruction};
+    let gate = |gate: Gate, q: usize| Instruction::Gate {
+        gate,
+        targets: smallvec![q],
+    };
+    let measure = |q: usize| Instruction::Measure {
+        qubit: q,
+        classical_bit: q,
+    };
+    let region = Instruction::Region(Box::new(GuardedRegion::new(
+        ClassicalCondition::BitIsOne(0),
+        vec![gate(Gate::H, 1)],
+    )));
+    let conditional = Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::X,
+        targets: smallvec![1],
+    };
+    let cases = [
+        vec![gate(Gate::H, 0), measure(0), measure(1)],
+        vec![gate(Gate::H, 0)],
+        vec![],
+        vec![gate(Gate::T, 0), measure(0)],
+        vec![measure(0), gate(Gate::H, 1), measure(1)],
+        vec![
+            Instruction::Reset { qubit: 1 },
+            gate(Gate::H, 0),
+            measure(0),
+        ],
+        vec![gate(Gate::H, 0), measure(0), conditional],
+        vec![gate(Gate::H, 0), measure(0), region],
+        vec![
+            gate(Gate::H, 0),
+            Instruction::Barrier {
+                qubits: smallvec![0, 1],
+            },
+            measure(0),
+            measure(1),
+        ],
+    ];
+    for (i, instructions) in cases.into_iter().enumerate() {
+        let mut c = Circuit::new(2, 2);
+        c.instructions = instructions;
+        let separate = c.is_clifford_only()
+            && !c.has_resets()
+            && c.has_terminal_measurements_only()
+            && c.instructions
+                .iter()
+                .any(|inst| matches!(inst, Instruction::Measure { .. }));
+        assert_eq!(
+            supports_compiled_measurement_sampling(&c),
+            separate,
+            "case {i}"
+        );
+    }
+}
+
+#[test]
 fn reset_keeps_terminal_sampling_only_on_uncoupled_qubits() {
     let mut leading = Circuit::new(70, 2);
     for q in 0..70 {

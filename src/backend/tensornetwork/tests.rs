@@ -1,6 +1,14 @@
+use std::cmp::Reverse;
+
 use super::expectation::{FUSED_PLAN_TOTAL, ScalarExpectationNetwork};
-use super::plan::{PLANNER_CALLS, RESTART_PEAK_THRESHOLD, plan_with_restarts};
-use super::slice::{choose_slices, contract_slices, kept_rank, pin_axes, replay_plan, split_bond};
+use super::plan::{
+    PLANNER_CALLS, RESTART_PEAK_THRESHOLD, contract_meta, contraction_result_size,
+    plan_with_restarts,
+};
+use super::slice::{
+    SLICE_SEARCHES, cached_plan, choose_slices, contract_slices, contract_within, kept_rank,
+    pin_axes, replay_plan, split_bond,
+};
 use super::*;
 use crate::backend::Backend;
 use crate::backend::statevector::StatevectorBackend;
@@ -468,11 +476,7 @@ fn test_scalar_network_screened_by_the_cone_matches_the_unscreened_build() {
         assert!(renumbered.windows(2).all(|w| w[0] < w[1]));
 
         let plan = |network: &ScalarExpectationNetwork| {
-            let slots = network
-                .tensors
-                .iter()
-                .map(|t| Some(TensorMeta::of(t)))
-                .collect();
+            let slots = network.tensors.iter().map(TensorMeta::of).collect();
             plan_pairs(slots, None, usize::MAX, usize::MAX).unwrap()
         };
         let (a, b) = (plan(&screened), plan(&reference));
@@ -540,11 +544,7 @@ fn test_plan_restarts_deterministic_and_never_worse() {
     let circuit = crate::circuits::hardware_efficient_ansatz(30, 7, 42);
     let terms = [PauliTerm::z(0), PauliTerm::z(15)];
     let network = scalar_network(&circuit, &terms);
-    let slots: Vec<Option<TensorMeta>> = network
-        .tensors
-        .iter()
-        .map(|t| Some(TensorMeta::of(t)))
-        .collect();
+    let slots: Vec<TensorMeta> = network.tensors.iter().map(TensorMeta::of).collect();
 
     let greedy = plan_pairs(slots, None, usize::MAX, usize::MAX).unwrap();
     assert!(
@@ -617,6 +617,36 @@ fn test_slice_choice_refuses_what_the_budget_cannot_reach() {
         tolerance: None,
     };
     assert!(choose_slices(&metas, &plan, limits).is_none());
+}
+
+#[test]
+fn test_cached_slice_choice_matches_the_uncached_search() {
+    let circuit = crate::circuits::hardware_efficient_ansatz(12, 4, 42);
+    let terms = [PauliTerm::z(0), PauliTerm::z(6)];
+    let network = scalar_network(&circuit, &terms);
+    let plan = plan_with_restarts(&network.tensors);
+    let metas: Vec<TensorMeta> = network.tensors.iter().map(TensorMeta::of).collect();
+    let limits = ContractionLimits {
+        peak_cap: 1 << 8,
+        peak_source: LimitSource::Request,
+        slice_budget: 1 << 10,
+        tolerance: None,
+    };
+    assert!(plan.peak > limits.peak_cap, "the fixture never slices");
+    let uncached = choose_slices(&metas, &plan, limits).expect("the budget reaches the cap");
+
+    let mut tensors = network.tensors.clone();
+    let direct = contract_within(&mut tensors, &plan, limits, "tn", "test").unwrap();
+
+    let mut slot = None;
+    for expected_searches in [1, 0] {
+        let before = slice_searches();
+        let mut tensors = network.tensors.clone();
+        let cached = contract_cached(&mut tensors, &mut slot, limits, "tn", "test").unwrap();
+        assert_eq!(slot.as_ref().unwrap().cached_slice(), Some(Some(&uncached)));
+        assert_eq!(slice_searches() - before, expected_searches);
+        crate::test_support::assert_amps_close(&cached.data, &direct.data, 1e-12);
+    }
 }
 
 #[test]
@@ -723,11 +753,7 @@ fn test_noisy_plans_execute_to_the_same_scalar() {
 
     for seed in 0..5u64 {
         let mut network = scalar_network(&circuit, &terms);
-        let slots: Vec<Option<TensorMeta>> = network
-            .tensors
-            .iter()
-            .map(|t| Some(TensorMeta::of(t)))
-            .collect();
+        let slots: Vec<TensorMeta> = network.tensors.iter().map(TensorMeta::of).collect();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let plan = plan_pairs(slots, Some((&mut rng, 1.0)), usize::MAX, usize::MAX).unwrap();
 
@@ -783,12 +809,59 @@ fn test_exact_plans_match_the_heap_order() {
     networks.push(doubled.iter().map(TensorMeta::of).collect());
 
     for metas in &networks {
-        let slots = || metas.iter().cloned().map(Some).collect::<Vec<_>>();
-        let exact = plan_pairs(slots(), None, usize::MAX, usize::MAX).unwrap();
+        let exact = plan_pairs(metas.clone(), None, usize::MAX, usize::MAX).unwrap();
         let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let heap = plan_pairs(slots(), Some((&mut rng, 0.0)), usize::MAX, usize::MAX).unwrap();
+        let heap =
+            plan_pairs(metas.clone(), Some((&mut rng, 0.0)), usize::MAX, usize::MAX).unwrap();
         assert_eq!(exact.pairs, heap.pairs);
         assert_eq!((exact.peak, exact.total), (heap.peak, heap.total));
+    }
+}
+
+// Every live pair sharing a leg sits in the queue under a key fixed at push
+// time, so the exact pass must pick what a rescan of all live pairs picks:
+// smallest result, then the higher slot descending, then the lower.
+#[test]
+fn test_exact_plans_match_a_rescanning_greedy() {
+    let mut networks: Vec<Vec<TensorMeta>> = (0..40).map(random_network).collect();
+    for n in [20, 50] {
+        let circuit = crate::circuits::hardware_efficient_ansatz(n, 2, 0xDEAD_BEEF);
+        let terms = [PauliTerm::z(0), PauliTerm::z(n / 2)];
+        let network = scalar_network(&circuit, &terms);
+        networks.push(network.tensors.iter().map(TensorMeta::of).collect());
+    }
+    for depth in [4, 8] {
+        let chain = loaded_backend(&crate::circuits::cz_chain_circuit(40, depth, 0xDEAD_BEEF));
+        let doubled = chain.double_for_partial_trace(&[20]);
+        networks.push(doubled.iter().map(TensorMeta::of).collect());
+    }
+
+    for metas in &networks {
+        let mut slots: Vec<Option<TensorMeta>> = metas.iter().cloned().map(Some).collect();
+        let mut pairs = Vec::new();
+        loop {
+            let mut best: Option<(usize, Reverse<usize>, Reverse<usize>)> = None;
+            for j in 0..slots.len() {
+                for i in 0..j {
+                    let (Some(a), Some(b)) = (&slots[i], &slots[j]) else {
+                        continue;
+                    };
+                    if a.legs.iter().any(|leg| b.legs.contains(leg)) {
+                        let key = (contraction_result_size(a, b), Reverse(j), Reverse(i));
+                        best = Some(best.map_or(key, |held| held.min(key)));
+                    }
+                }
+            }
+            let Some((_, Reverse(j), Reverse(i))) = best else {
+                break;
+            };
+            let a = slots[i].take().unwrap();
+            let b = slots[j].take().unwrap();
+            slots.push(Some(contract_meta(&a, &b)));
+            pairs.push((i, j));
+        }
+        let plan = plan_pairs(metas.clone(), None, usize::MAX, usize::MAX).unwrap();
+        assert_eq!(plan.pairs, pairs);
     }
 }
 
@@ -1025,6 +1098,49 @@ fn test_plan_cache_plans_each_position_once() {
     let before = planner_calls();
     tn.sample_native(8, 42).unwrap();
     assert_eq!(planner_calls() - before, n);
+}
+
+fn slice_searches() -> usize {
+    SLICE_SEARCHES.with(|calls| calls.get())
+}
+
+// Sample hardware_efficient_ansatz(8, 3) through the sweep at a 2^7 peak cap,
+// once searching on every contraction and once through the cache, and count
+// the slice searches of each run.
+fn sample_capped_with_and_without_cache(tolerance: Option<f64>, shots: usize) -> (usize, usize) {
+    let n = 8;
+    let limits = ResolvedLimits::resolve(Some(&crate::Limits::new().max_tn_peak_qubits(7)));
+    let mut tn = TensorNetworkBackend::with_limits(42, tolerance, &limits);
+    tn.init(n, 0).unwrap();
+    for inst in &crate::circuits::hardware_efficient_ansatz(n, 3, 42).instructions {
+        tn.apply(inst).unwrap();
+    }
+
+    let before = slice_searches();
+    let uncached = tn.sample_sweep(shots, 42, None).unwrap();
+    let uncached_searches = slice_searches() - before;
+    assert!(uncached_searches >= shots, "the fixture never sliced");
+
+    let before = slice_searches();
+    let cached = tn.sample_native(shots, 42).unwrap();
+    assert_eq!(cached.words, uncached.words);
+    (slice_searches() - before, uncached_searches)
+}
+
+#[test]
+fn test_slice_cache_searches_each_position_once() {
+    let shots = 4;
+    let (cached, uncached) = sample_capped_with_and_without_cache(None, shots);
+    assert_eq!(cached * shots, uncached);
+}
+
+// Truncation picks its kept rank from the data, so the network it leaves to
+// slicing can change between shots; the cache only has to stay transparent
+// and reuse a choice where the shape repeats.
+#[test]
+fn test_slice_cache_matches_uncached_truncated_sweep() {
+    let (cached, uncached) = sample_capped_with_and_without_cache(Some(1e-3), 4);
+    assert!(cached < uncached, "{cached} searches against {uncached}");
 }
 
 #[test]

@@ -26,8 +26,8 @@ pub(super) struct TensorMeta {
 impl TensorMeta {
     pub(super) fn of(tensor: &Tensor) -> Self {
         Self {
-            shape: tensor.shape.clone(),
-            legs: tensor.legs.clone(),
+            shape: SmallVec::from_slice(&tensor.shape),
+            legs: SmallVec::from_slice(&tensor.legs),
         }
     }
 
@@ -164,25 +164,34 @@ impl PairQueue<'_> {
     /// Queue `slot` against every slot in `others`, each lower than `slot` and
     /// listed in the order the legs were walked.
     ///
+    /// Each entry carries the extent of the leg it was found through, so the
+    /// extents of one slot's entries multiply to the shared size and the result
+    /// size follows from the two element counts without walking either leg list.
+    ///
     /// The noisy arm draws one key per entry, in that order and twice for a pair
     /// sharing two legs. The exact arm drops the repeat, which would carry the
     /// same key.
     fn push_pairs(
         &mut self,
-        slots: &[Option<TensorMeta>],
+        elements: &[usize],
         slot: usize,
-        others: &mut SmallVec<[usize; 8]>,
+        others: &mut SmallVec<[(usize, usize); 8]>,
     ) {
-        let meta = slots[slot].as_ref().expect("slot just filled");
-        let cost = |other: usize| {
-            contraction_result_size(meta, slots[other].as_ref().expect("holder list pruned"))
-        };
+        let cost =
+            |other: usize, shared: usize| (elements[slot] / shared) * (elements[other] / shared);
         match self {
             Self::Exact { sizes, lowest } => {
-                others.sort_unstable();
-                others.dedup();
-                for &other in others.iter() {
-                    let size = cost(other);
+                others.sort_unstable_by_key(|&(other, _)| other);
+                let mut rest = &others[..];
+                while let Some(&(other, extent)) = rest.first() {
+                    let mut shared = extent;
+                    rest = &rest[1..];
+                    while let Some(&(_, extent)) = rest.first().filter(|&&(next, _)| next == other)
+                    {
+                        shared *= extent;
+                        rest = &rest[1..];
+                    }
+                    let size = cost(other, shared);
                     let at = match sizes.binary_search_by_key(&size, |&(key, _)| key) {
                         Ok(at) => at,
                         Err(at) => {
@@ -199,8 +208,13 @@ impl PairQueue<'_> {
                 rng,
                 temperature,
             } => {
-                for &other in others.iter() {
-                    let key = pair_key(cost(other), rng, *temperature);
+                for &(other, _) in others.iter() {
+                    let shared = others
+                        .iter()
+                        .filter(|&&(held, _)| held == other)
+                        .map(|&(_, extent)| extent)
+                        .product();
+                    let key = pair_key(cost(other, shared), rng, *temperature);
                     heap.push(Reverse((key, Reverse(slot), Reverse(other))));
                 }
             }
@@ -211,8 +225,8 @@ impl PairQueue<'_> {
     /// slot first.
     ///
     /// Returns `None` once no two live tensors share a leg.
-    fn pop_live(&mut self, slots: &[Option<TensorMeta>]) -> Option<(usize, usize)> {
-        let live = |i: usize, j: usize| slots[i].is_some() && slots[j].is_some();
+    fn pop_live(&mut self, live: &[bool]) -> Option<(usize, usize)> {
+        let live = |i: usize, j: usize| live[i] && live[j];
         match self {
             Self::Exact { sizes, lowest } => {
                 while let Some((_, stack)) = sizes.get_mut(*lowest) {
@@ -237,32 +251,41 @@ impl PairQueue<'_> {
 }
 
 /// Record `slot` against each of its legs and queue it against every live tensor
-/// already sharing one, pruning contracted slots off the holder lists it walks.
+/// already sharing one.
 ///
-/// A tensor carrying one leg twice would otherwise queue against itself; no
-/// valid circuit produces one.
+/// Each leg keeps two holder entries, and `slot` takes the first that is empty
+/// or names a contracted tensor. The `held != slot` test keeps a tensor
+/// carrying one leg twice from queuing against itself. The backend builds such
+/// a tensor only from a gate that names one qubit twice, which is outside its
+/// contract: every network built from distinct targets carries each leg at most
+/// once per tensor.
+///
+/// # Panics
+///
+/// If a leg already has two live holders: contraction is pairwise, so a third
+/// tensor on one leg has no meaning.
 fn queue_slot_pairs(
-    slots: &[Option<TensorMeta>],
+    meta: &TensorMeta,
+    live: &[bool],
+    elements: &[usize],
     slot: usize,
-    leg_holders: &mut Vec<SmallVec<[usize; 2]>>,
+    leg_holders: &mut [[usize; 2]],
     queue: &mut PairQueue,
 ) {
-    let meta = slots[slot].as_ref().expect("slot just filled");
-    let mut others: SmallVec<[usize; 8]> = SmallVec::new();
-    for &leg in &meta.legs {
-        if leg >= leg_holders.len() {
-            leg_holders.resize(leg + 1, SmallVec::new());
+    let mut others: SmallVec<[(usize, usize); 8]> = SmallVec::new();
+    for (&leg, &extent) in meta.legs.iter().zip(&meta.shape) {
+        let mut placed = false;
+        for held in &mut leg_holders[leg] {
+            if *held != slot && live.get(*held).is_some_and(|&alive| alive) {
+                others.push((*held, extent));
+            } else if !placed {
+                *held = slot;
+                placed = true;
+            }
         }
-        leg_holders[leg].retain(|held| slots[*held].is_some());
-        others.extend(
-            leg_holders[leg]
-                .iter()
-                .copied()
-                .filter(|&held| held != slot),
-        );
-        leg_holders[leg].push(slot);
+        assert!(placed, "a leg joins at most two tensors");
     }
-    queue.push_pairs(slots, slot, &mut others);
+    queue.push_pairs(elements, slot, &mut others);
 }
 
 /// Run one greedy planning pass over the metadata, deterministic when `noise`
@@ -274,12 +297,17 @@ fn queue_slot_pairs(
 /// can still win on `total`. Also `None` once the summed elements pass
 /// `total_budget`.
 pub(super) fn plan_pairs(
-    mut slots: Vec<Option<TensorMeta>>,
+    mut slots: Vec<TensorMeta>,
     noise: Option<(&mut ChaCha8Rng, f64)>,
     abort_above: usize,
     total_budget: usize,
 ) -> Option<ContractionPlan> {
-    let mut leg_holders: Vec<SmallVec<[usize; 2]>> = Vec::new();
+    let legs = slots
+        .iter()
+        .flat_map(|meta| meta.legs.iter().copied())
+        .max()
+        .map_or(0, |leg| leg + 1);
+    let mut leg_holders = vec![[usize::MAX; 2]; legs];
     let mut queue = match noise {
         None => PairQueue::Exact {
             sizes: Vec::new(),
@@ -292,8 +320,10 @@ pub(super) fn plan_pairs(
         },
     };
 
-    for slot in 0..slots.len() {
-        queue_slot_pairs(&slots, slot, &mut leg_holders, &mut queue);
+    let mut live = vec![true; slots.len()];
+    let mut elements: Vec<usize> = slots.iter().map(TensorMeta::num_elements).collect();
+    for (slot, meta) in slots.iter().enumerate() {
+        queue_slot_pairs(meta, &live, &elements, slot, &mut leg_holders, &mut queue);
     }
 
     let mut plan = ContractionPlan {
@@ -301,22 +331,31 @@ pub(super) fn plan_pairs(
         peak: 0,
         total: 0,
     };
-    while let Some((i, j)) = queue.pop_live(&slots) {
-        let a = slots[i].take().expect("popped pair is live");
-        let b = slots[j].take().expect("popped pair is live");
-        let result = contract_meta(&a, &b);
-        let elements = result.num_elements();
-        if elements > abort_above {
+    while let Some((i, j)) = queue.pop_live(&live) {
+        live[i] = false;
+        live[j] = false;
+        let result = contract_meta(&slots[i], &slots[j]);
+        let size = result.num_elements();
+        if size > abort_above {
             return None;
         }
-        plan.peak = plan.peak.max(elements);
-        plan.total += elements;
+        plan.peak = plan.peak.max(size);
+        plan.total += size;
         if plan.total > total_budget {
             return None;
         }
         plan.pairs.push((i, j));
-        slots.push(Some(result));
-        queue_slot_pairs(&slots, slots.len() - 1, &mut leg_holders, &mut queue);
+        live.push(true);
+        elements.push(size);
+        queue_slot_pairs(
+            &result,
+            &live,
+            &elements,
+            slots.len(),
+            &mut leg_holders,
+            &mut queue,
+        );
+        slots.push(result);
     }
     Some(plan)
 }
@@ -336,7 +375,7 @@ thread_local! {
 pub(super) fn plan_with_restarts(tensors: &[Tensor]) -> ContractionPlan {
     #[cfg(test)]
     PLANNER_CALLS.with(|calls| calls.set(calls.get() + 1));
-    let slots: Vec<Option<TensorMeta>> = tensors.iter().map(|t| Some(TensorMeta::of(t))).collect();
+    let slots: Vec<TensorMeta> = tensors.iter().map(TensorMeta::of).collect();
     let greedy = plan_pairs(slots, None, usize::MAX, usize::MAX).expect("unbounded pass completes");
     if greedy.peak < RESTART_PEAK_THRESHOLD {
         return greedy;
@@ -349,8 +388,12 @@ pub(super) fn plan_with_restarts(tensors: &[Tensor]) -> ContractionPlan {
         let temperature = PLAN_NOISE_TEMPERATURES[temp_index as usize];
         let pass_seed = PLAN_NOISE_SEED ^ ((temp_index << 32) | pass);
         let mut rng = ChaCha8Rng::seed_from_u64(pass_seed);
-        let slots: Vec<Option<TensorMeta>> = metas.iter().cloned().map(Some).collect();
-        plan_pairs(slots, Some((&mut rng, temperature)), bound, usize::MAX)
+        plan_pairs(
+            metas.clone(),
+            Some((&mut rng, temperature)),
+            bound,
+            usize::MAX,
+        )
     };
     let passes = PLAN_NOISE_TEMPERATURES.len() as u64 * PLAN_RESTARTS_PER_TEMPERATURE;
     #[cfg(feature = "parallel")]

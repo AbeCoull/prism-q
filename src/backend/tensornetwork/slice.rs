@@ -47,6 +47,7 @@ impl ContractionLimits {
 ///
 /// `count` is the product of `dims`: one contraction per assignment. `peak`
 /// is the largest intermediate one slice plans, in elements.
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub(super) struct SlicePlan {
     legs: SmallVec<[LegId; 4]>,
     dims: SmallVec<[usize; 4]>,
@@ -153,6 +154,11 @@ fn sliceable_legs(metas: &[TensorMeta]) -> Vec<(LegId, usize)> {
         .collect()
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static SLICE_SEARCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Pick sliced legs greedily by the peak each one buys, re-evaluating the peak
 /// after every choice, until the per-slice peak fits under the cap.
 ///
@@ -166,6 +172,8 @@ pub(super) fn choose_slices(
     plan: &ContractionPlan,
     limits: ContractionLimits,
 ) -> Option<SlicePlan> {
+    #[cfg(test)]
+    SLICE_SEARCHES.with(|calls| calls.set(calls.get() + 1));
     let candidates = sliceable_legs(metas);
     let mut legs: SmallVec<[LegId; 4]> = SmallVec::new();
     let mut dims: SmallVec<[usize; 4]> = SmallVec::new();
@@ -362,28 +370,68 @@ pub(super) fn contract_within(
     backend: &str,
     operation: &str,
 ) -> Result<Tensor> {
+    contract_reusing(tensors, plan, None, limits, backend, operation)
+}
+
+/// [`contract_within`], taking the slices from `slices` when that cache holds
+/// a choice for the same network, plan and limits, and filling it otherwise.
+fn contract_reusing(
+    tensors: &mut Vec<Tensor>,
+    plan: &ContractionPlan,
+    slices: Option<&mut Option<CachedSlices>>,
+    limits: ContractionLimits,
+    backend: &str,
+    operation: &str,
+) -> Result<Tensor> {
     LAST_DISCARDED.with(|weight| weight.set(0.0));
     if plan.peak <= limits.peak_cap {
         LAST_SLICE_COUNT.with(|count| count.set(1));
         return Ok(replay_plan(tensors, plan));
     }
     match limits.tolerance {
-        Some(tolerance) => contract_truncated(tensors, limits, tolerance, backend, operation),
-        None => slice_to_fit(tensors, plan, limits, backend, operation),
+        Some(tolerance) => {
+            contract_truncated(tensors, slices, limits, tolerance, backend, operation)
+        }
+        None => slice_to_fit(tensors, plan, slices, limits, backend, operation),
     }
 }
 
 /// Sum the slices that bring `plan` under the cap, or reject when the slice
 /// budget cannot reach it.
+///
+/// The search replays the plan once per candidate leg at every step, so a
+/// caller that contracts one network shape repeatedly passes `slices` to
+/// search once per shape.
 fn slice_to_fit(
     tensors: &mut Vec<Tensor>,
     plan: &ContractionPlan,
+    slices: Option<&mut Option<CachedSlices>>,
     limits: ContractionLimits,
     backend: &str,
     operation: &str,
 ) -> Result<Tensor> {
-    let metas: Vec<TensorMeta> = tensors.iter().map(TensorMeta::of).collect();
-    let Some(slice) = choose_slices(&metas, plan, limits) else {
+    let search = |tensors: &[Tensor]| {
+        let metas: Vec<TensorMeta> = tensors.iter().map(TensorMeta::of).collect();
+        choose_slices(&metas, plan, limits)
+    };
+    let fresh;
+    let slice = match slices {
+        Some(cache) => {
+            let key = slice_key(tensors, plan, limits);
+            if cache.as_ref().is_none_or(|held| held.key != key) {
+                *cache = Some(CachedSlices {
+                    key,
+                    slice: search(tensors),
+                });
+            }
+            cache.as_ref().expect("cache filled above").slice.as_ref()
+        }
+        None => {
+            fresh = search(tensors);
+            fresh.as_ref()
+        }
+    };
+    let Some(slice) = slice else {
         return Err(tensor_peak_error(
             backend,
             operation,
@@ -393,7 +441,7 @@ fn slice_to_fit(
         ));
     };
     LAST_SLICE_COUNT.with(|count| count.set(slice.count));
-    let summed = contract_slices(tensors, plan, &slice, limits.peak_cap);
+    let summed = contract_slices(tensors, plan, slice, limits.peak_cap);
     tensors.clear();
     Ok(summed)
 }
@@ -409,6 +457,7 @@ fn slice_to_fit(
 /// also bounds the loop, since both counts fall on every pass that continues.
 fn contract_truncated(
     tensors: &mut Vec<Tensor>,
+    slices: Option<&mut Option<CachedSlices>>,
     limits: ContractionLimits,
     tolerance: f64,
     backend: &str,
@@ -424,14 +473,14 @@ fn contract_truncated(
             return Ok(replay_plan(tensors, &plan));
         }
         if (plan.peak, plan.total) >= ranked {
-            let summed = slice_to_fit(tensors, &plan, limits, backend, operation)?;
+            let summed = slice_to_fit(tensors, &plan, slices, limits, backend, operation)?;
             LAST_DISCARDED.with(|weight| weight.set(discarded));
             return Ok(summed);
         }
         ranked = (plan.peak, plan.total);
         let Some(step) = truncate_one(tensors, &plan, limits.peak_cap, tolerance) else {
             let plan = plan_with_restarts(tensors);
-            let summed = slice_to_fit(tensors, &plan, limits, backend, operation)?;
+            let summed = slice_to_fit(tensors, &plan, slices, limits, backend, operation)?;
             LAST_DISCARDED.with(|weight| weight.set(discarded));
             return Ok(summed);
         };
@@ -657,19 +706,35 @@ pub(super) fn replay_plan(tensors: &mut Vec<Tensor>, plan: &ContractionPlan) -> 
 }
 
 /// One sweep position's plan, with the fingerprint of the metadata it was
-/// planned from.
+/// planned from and the slices last chosen at that position.
 pub(super) struct CachedPlan {
     pub(super) fingerprint: u64,
     plan: ContractionPlan,
+    slices: Option<CachedSlices>,
+}
+
+/// Slice choice for the network, plan and limits that [`slice_key`] folds,
+/// `None` when the budget could not reach the cap.
+struct CachedSlices {
+    key: u64,
+    slice: Option<SlicePlan>,
+}
+
+#[cfg(test)]
+impl CachedPlan {
+    pub(super) fn cached_slice(&self) -> Option<Option<&SlicePlan>> {
+        self.slices.as_ref().map(|held| held.slice.as_ref())
+    }
+}
+
+fn fold(hash: u64, word: usize) -> u64 {
+    (hash ^ word as u64).wrapping_mul(0x0000_0100_0000_01b3)
 }
 
 /// FNV-1a fold of the tensor count, then each tensor's rank, shape, and leg
 /// ids in order: everything the planner reads.
 fn metadata_fingerprint(tensors: &[Tensor]) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let fold = |hash: u64, word: usize| (hash ^ word as u64).wrapping_mul(PRIME);
-    let mut hash = fold(OFFSET, tensors.len());
+    let mut hash = fold(0xcbf2_9ce4_8422_2325, tensors.len());
     for tensor in tensors {
         hash = fold(hash, tensor.rank());
         for &dim in &tensor.shape {
@@ -682,12 +747,22 @@ fn metadata_fingerprint(tensors: &[Tensor]) -> u64 {
     hash
 }
 
-/// The plan in `slot` when its fingerprint matches `tensors`; otherwise plan
+/// [`metadata_fingerprint`] extended with the plan's pairs, the cap and the
+/// slice budget: everything [`choose_slices`] reads.
+fn slice_key(tensors: &[Tensor], plan: &ContractionPlan, limits: ContractionLimits) -> u64 {
+    let mut hash = fold(metadata_fingerprint(tensors), plan.pairs.len());
+    for &(i, j) in &plan.pairs {
+        hash = fold(fold(hash, i), j);
+    }
+    fold(fold(hash, limits.peak_cap), limits.slice_budget)
+}
+
+/// The entry in `slot` when its fingerprint matches `tensors`; otherwise plan
 /// afresh, overwrite the slot, and return that.
 pub(super) fn cached_plan<'s>(
     tensors: &[Tensor],
     slot: &'s mut Option<CachedPlan>,
-) -> &'s ContractionPlan {
+) -> &'s mut CachedPlan {
     let fingerprint = metadata_fingerprint(tensors);
     if slot
         .as_ref()
@@ -696,7 +771,28 @@ pub(super) fn cached_plan<'s>(
         *slot = Some(CachedPlan {
             fingerprint,
             plan: plan_with_restarts(tensors),
+            slices: None,
         });
     }
-    &slot.as_ref().expect("slot filled above").plan
+    slot.as_mut().expect("slot filled above")
+}
+
+/// [`contract_within`] on the plan cached in `slot`, which also keeps the slice
+/// choice, so a sweep that revisits one network shape plans and slices it once.
+pub(super) fn contract_cached(
+    tensors: &mut Vec<Tensor>,
+    slot: &mut Option<CachedPlan>,
+    limits: ContractionLimits,
+    backend: &str,
+    operation: &str,
+) -> Result<Tensor> {
+    let cached = cached_plan(tensors, slot);
+    contract_reusing(
+        tensors,
+        &cached.plan,
+        Some(&mut cached.slices),
+        limits,
+        backend,
+        operation,
+    )
 }

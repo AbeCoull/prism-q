@@ -107,28 +107,31 @@ impl<'a> LiveSchedule<'a> {
 /// Hoist points never decrease, so no slot retires before the first record's, the gate
 /// after its qubit's last: every qubit gated by then is live at once.
 pub(super) fn peak_live_lower_bound(circuit: &Circuit) -> usize {
-    let Some(first_measured) = circuit.instructions.iter().find_map(|inst| match inst {
-        Instruction::Measure { qubit, .. } => Some(*qubit),
-        _ => None,
-    }) else {
-        return 0;
-    };
     let mut first = vec![NONE; circuit.num_qubits];
-    let mut last_on_measured = NONE;
+    let mut last = vec![NONE; circuit.num_qubits];
+    let mut first_measured = None;
     let mut g = 0u32;
     for inst in &circuit.instructions {
-        if let Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } = inst {
-            for &q in targets.iter() {
-                if first[q] == NONE {
-                    first[q] = g;
+        match inst {
+            Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } => {
+                for &q in targets.iter() {
+                    if first[q] == NONE {
+                        first[q] = g;
+                    }
+                    last[q] = g;
                 }
-                if q == first_measured {
-                    last_on_measured = g;
-                }
+                g += 1;
             }
-            g += 1;
+            Instruction::Measure { qubit, .. } if first_measured.is_none() => {
+                first_measured = Some(*qubit);
+            }
+            _ => {}
         }
     }
+    let Some(first_measured) = first_measured else {
+        return 0;
+    };
+    let last_on_measured = last[first_measured];
     if last_on_measured == NONE {
         return 0;
     }

@@ -2299,3 +2299,29 @@ fn live_bound_routes_like_the_full_schedule() {
     }
     assert!(bound_routed >= 4);
 }
+
+#[cfg(feature = "parallel")]
+#[test]
+fn dense_collapse_stays_serial_on_one_thread_and_matches_the_split() {
+    use super::forward::PARALLEL_COLLAPSES;
+    let mut c = circuits::clifford_random_pairs(1000, 20, 42);
+    c.measure_all();
+    let compile = |num_threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                PARALLEL_COLLAPSES.with(|n| n.set(0));
+                let sampler = compile_forward_dense(&c, 42).unwrap();
+                let split = PARALLEL_COLLAPSES.with(|n| n.get());
+                (sampler.flip_rows, sampler.ref_bits_packed, split)
+            })
+    };
+    let (rows, ref_bits, split) = compile(1);
+    assert_eq!(split, 0);
+    let (split_rows, split_ref_bits, split) = compile(4);
+    assert!(split > 0);
+    assert_eq!(rows, split_rows);
+    assert_eq!(ref_bits, split_ref_bits);
+}

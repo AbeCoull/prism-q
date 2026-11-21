@@ -3,14 +3,27 @@
 
 use super::*;
 
+/// True when `circuit` is Clifford and measures, only at the end, with no resets or
+/// classical conditionals.
 pub(crate) fn supports_compiled_measurement_sampling(circuit: &Circuit) -> bool {
-    circuit.is_clifford_only()
-        && !circuit.has_resets()
-        && circuit.has_terminal_measurements_only()
-        && circuit
-            .instructions
-            .iter()
-            .any(|inst| matches!(inst, Instruction::Measure { .. }))
+    let mut measured = false;
+    for inst in &circuit.instructions {
+        match inst {
+            Instruction::Gate { gate, .. } => {
+                if measured || !gate.is_clifford() {
+                    return false;
+                }
+            }
+            Instruction::Measure { .. } => measured = true,
+            Instruction::Reset { .. }
+            | Instruction::Conditional { .. }
+            | Instruction::Region(_) => {
+                return false;
+            }
+            Instruction::Barrier { .. } | Instruction::Save { .. } => {}
+        }
+    }
+    measured
 }
 
 pub(super) fn supports_deferred_measurement_sampling(circuit: &Circuit) -> bool {

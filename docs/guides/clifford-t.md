@@ -39,14 +39,15 @@ has the exact conditions.
 ## Accepted gate forms
 
 All four engines take Clifford gates, `T`, `Tdg`, `Rz`, `P` and `Rzz` as they are. SPD
-and Pauli path branch on `Rx`, `Ry` and `PauliRot` too; SPP and stabilizer rank lower them
-to Clifford conjugation around one `Rz`. A `Fused` matrix (the parser's `u`, `u3`, `u2`,
-`r`, `gpi` and `gpi2`) lowers to the named gate or `Rz` it equals up to a global phase, or
-else to its Rz-Ry-Rz Euler triple. A `cu` lowers when its target is diagonal or a Pauli up
-to phase (`cy`, `cp`, `crz`, `cs`) and is rejected otherwise, as are `ccx` and the other
-multi-controlled forms. The Pauli engines take any rotation angle. Stabilizer rank needs
-every lowered Z rotation on the pi/4 grid; `Rz(pi/4)`, `P(pi/4)` and their odd multiples
-count as one T each, so `is_clifford_plus_t` and the automatic route treat them like `T`.
+and Pauli path branch on `Rx`, `Ry` and `PauliRot` too, and SPP on `PauliRot`. SPP lowers
+`Rx` and `Ry`, and stabilizer rank lowers all three, to Clifford conjugation around one
+`Rz`. A `Fused` matrix (the parser's `u`, `u3`, `u2`, `r`, `gpi` and `gpi2`) lowers to the
+named gate or `Rz` it equals up to a global phase, or else to its Rz-Ry-Rz Euler triple. A
+`cu` lowers when its target is diagonal or a Pauli up to phase (`cy`, `cp`, `crz`, `cs`)
+and is rejected otherwise, as are `ccx` and the other multi-controlled forms. The Pauli
+engines take any rotation angle. Stabilizer rank needs every lowered Z rotation on the
+pi/4 grid; `Rz(pi/4)`, `P(pi/4)` and their odd multiples count as one T each, so
+`is_clifford_plus_t` and the automatic route treat them like `T`.
 
 ## Stabilizer rank (`src/sim/stabilizer_rank.rs`)
 

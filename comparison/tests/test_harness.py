@@ -1095,11 +1095,16 @@ class SmokeTests(unittest.TestCase):
 
 
 class PageTests(unittest.TestCase):
-    REFERENCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "results", "matrix-reference-i7-6700k")
+    # A frozen copy of a complete reference run, so the page tests do not follow the published results.
+    FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "page-reference")
 
     def _render(self, tmp: str, keep=None, extra=None) -> tuple[str, dict]:
         results = os.path.join(tmp, "results")
-        shutil.copytree(self.REFERENCE, results)
+        os.makedirs(results)
+        for name in ("manifest.json", "observations.jsonl"):
+            with gzip.open(os.path.join(self.FIXTURE, name + ".gz"), "rb") as src:
+                with open(os.path.join(results, name), "wb") as dst:
+                    shutil.copyfileobj(src, dst)
         if keep is not None or extra:
             path = os.path.join(results, "observations.jsonl")
             with open(path, encoding="utf-8") as handle:
@@ -1178,7 +1183,16 @@ class PageTests(unittest.TestCase):
         for href, heading, _, _ in tiles:
             self.assertIn(f"## {heading} {{#{href}}}", page)
         labels = re.findall(r'- <span class="pq-spec-l">([^<]+)</span> ', page)
-        self.assertEqual(labels, ["Host", "Protocol", "Ratio", "Raw data"])
+        self.assertEqual(labels, ["Host", "Run", "Protocol", "Ratio", "Raw data"])
+        self.assertIn("31.9 GB RAM, CPU only. Every number on this page comes from this host.", page)
+        self.assertIn("profile `reference`, started 2026-11-03", page)
+        self.assertLess(page.index('class="pq-issue"'), page.index("Median wall time per call"))
+        self.assertIn(f'href="{pages.ISSUE_URL}"', page)
+        toc = re.search(r'<nav class="pq-toc"[^>]*>(.+?)</nav>', page).group(1)
+        self.assertIn('<a href="#statevector-fp64">Statevector, fp64</a>', toc)
+        self.assertIn('<a href="#thread-scaling">Thread scaling</a>', toc)
+        self.assertNotIn("reference host", page)
+        self.assertNotIn('data-chart="scaling"', page)
         self.assertLess(page.index('pq-spec-l">Raw data<'), page.index('class="pq-kpis"'))
         self.assertLess(page.index('class="pq-kpis"'), page.index('data-chart="summary"'))
         self.assertIn('distance <span class="pq-nw">8.3e-15</span> in <span class="pq-nw">53.1 ms</span>', page)
@@ -1245,6 +1259,93 @@ class PageTests(unittest.TestCase):
         self.assertEqual({o["bond_cap"] for o in sweep}, {2, 16})
         self.assertTrue(all("max_abs_error" in o for o in sweep))
 
+    def test_scaling_section_shows_each_ceiling_and_the_widest_run(self) -> None:
+        extra = _ladder_records()
+        with tempfile.TemporaryDirectory() as tmp:
+            page, data = self._render(tmp, None, extra)
+        self.assertIn("## Scaling to the ceiling {#scaling}", page)
+        self.assertIn('data-chart="scaling"', page)
+        self.assertIn('<a href="#scaling">Scaling to the ceiling</a>', page)
+        self.assertIn("Widest PRISM-Q run on the CPU per method: 29 statevector and 100,000 stabilizer", page)
+        self.assertNotIn("None at", page)
+        rows = dict(
+            (cells[1], cells[2:])
+            for cells in (
+                re.findall(r"<td>([^<]*)</td>", row)
+                for row in re.findall(r"<tr>(<td>(?:Random brickwork|GHZ)</td>.*?)</tr>", page)
+            )
+        )
+        self.assertEqual(rows["PRISM-Q statevector"], ["double", "29§", "8.00 s", "memory at 30 qubits"])
+        self.assertEqual(rows["PRISM-Q GPU"], ["double", "29§", "900 ms", "memory at 30 qubits"])
+        self.assertEqual(rows["Aer"], ["double", "20‡", "5.00 ms", "memory at 29 qubits"])
+        self.assertEqual(rows["QuEST"], ["double", "20", "6.00 ms", "wider rungs not run"])
+        self.assertEqual(rows["qsim fp32"], ["single", "29*", "30.00 s", "one call over the rung budget at 30 qubits"])
+        self.assertEqual(rows["Stim"], ["exact (tableau)", "1,000", "1.00 ms", "timeout at 10,000 qubits"])
+        self.assertEqual(rows["PRISM-Q 1 thread"], ["double", "100,000", "100 ms", "top of the ladder"])
+        tiles = re.findall(r'<li class="pq-reach-t" data-tab="([a-z]+)">(.*?)</li>', page)
+        self.assertEqual([t[0] for t in tiles], ["dense", "stabilizer"])
+        dense = re.findall(r'<span class="pq-reach-s">([^<]+)</span>', tiles[0][1])
+        self.assertIn("<em>Statevector</em>", tiles[0][1])
+        self.assertEqual(dense[0], "PRISM-Q statevector§ · 8.00 s · memory at 30 qubits")
+        self.assertRegex(dense[1], r"^widest fp64 peer: (Aer|QuEST) at 20$")
+        self.assertEqual(dense[2:], ["fp32 peer: qsim fp32 at 29", "GPU: PRISM-Q GPU at 29, no GPU peer"])
+        stabilizer = re.findall(r'<span class="pq-reach-s">([^<]+)</span>', tiles[1][1])
+        self.assertIn("1 thread: PRISM-Q 100,000, Stim 1,000", stabilizer)
+        self.assertIn("times out (300 s on the Stabilizer ladders; 600 s on the Statevector ladders)", page)
+        self.assertIn("`PRISM_MAX_SV_QUBITS=30`", page)
+        self.assertIn("so the stabilizer ladders also run PRISM-Q at 1 thread", page)
+        self.assertIn(pages.MARK_WORDS[pages.PAIRED], page)
+        failures = page[page.index("## Correctness") :]
+        self.assertIn("| qsim (fp32) | invalid | rcs 30q d10 |", failures)
+        self.assertNotIn("| Stim | timeout |", failures)
+        self.assertNotIn("PRISM-Q (statevector) | refused", failures)
+        ghz = [o for o in data["observations"] if o.get("ladder") == "stabilizer/ghz" and o["simulator"] == "stim"]
+        self.assertEqual({o["qubits"]: o.get("ceiling") for o in ghz}, {1000: None, 10000: "timeout", 100000: None})
+        self.assertTrue(next(o for o in ghz if o["qubits"] == 100000)["beyond_ceiling"])
+        qsim = {
+            o["qubits"]: o for o in data["observations"] if o.get("ladder") == "dense/rcs" and o["simulator"] == "qsim"
+        }
+        self.assertEqual((qsim[29]["status"], qsim[29]["valid"]), ("ok", True))
+        self.assertEqual((qsim[30]["status"], qsim[30]["ceiling"]), ("invalid", "budget"))
+        self.assertEqual(data["ladders"], {"dense/rcs": "Random brickwork", "stabilizer/ghz": "GHZ"})
+
+    def test_reach_handles_rungs_left_out_and_unchecked(self) -> None:
+        wl = [workloads.rcs(n, 10) for n in (20, 24)]
+        left = [_ladder_rec("scaling", w, "quest", 0, "dense/rcs", status="skipped", reason="left out") for w in wl]
+        self.assertEqual(pages._reach(left), {"n": None, "record": None, "stop": "wider rungs not run"})
+        cannot = [_ladder_rec("scaling", w, "quest", 0, "dense/rcs", status="not-applicable") for w in wl]
+        self.assertEqual(pages._reach(cannot)["stop"], "cannot run at 20 qubits")
+        unchecked = [
+            aggregate._normalize(_ladder_rec("scaling", w, "qsim", 1.0, "dense/rcs", validation={"pass": None}))
+            for w in wl
+        ]
+        reach = pages._reach(unchecked)
+        self.assertEqual((reach["n"], reach["stop"], pages._mark(reach["record"])), (24, "top of the ladder", "*"))
+        crashed = unchecked[:1] + [_ladder_rec("scaling", wl[1], "qsim", 0, "dense/rcs", status="crash")]
+        self.assertEqual(pages._reach(crashed)["stop"], "crash at 24 qubits")
+
+    def test_zoo_sections_render_beside_the_families(self) -> None:
+        extra = []
+        for wl in (workloads.qaoa(20), workloads.adder(9)):
+            extra += [
+                _ladder_rec("zoo", wl, "prismq", 2.0, ladder=None, validation={"pass": True, "tvd": 0.0}),
+                _ladder_rec("zoo", wl, "aer-statevector", 8.0, ladder=None, validation={"pass": True, "tvd": 0.0}),
+            ]
+        wl = workloads.ghz(1000, 1000)
+        passed = {"ladder": None, "validation": {"pass": True}}
+        extra += [
+            _ladder_rec("zoo", wl, "prismq", 1.0, **passed),
+            _ladder_rec("zoo", wl, "prismq", 2.0, threads=1, **passed),
+            _ladder_rec("zoo", wl, "stim", 3.0, threads=1, **passed),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            page, _ = self._render(tmp, None, extra)
+        self.assertIn("## Circuit zoo, statevector {#circuit-zoo-statevector}", page)
+        self.assertIn("Aer takes 4.00x the PRISM-Q time, 20 qubits", page)
+        self.assertIn("## Circuit zoo, stabilizer {#circuit-zoo-stabilizer}", page)
+        self.assertIn("Stim takes 1.50x the 1-thread PRISM-Q time, 1,000 qubits", page)
+        self.assertIn("<td>qaoa 20q</td>", page)
+
     def test_status_words_tell_skipped_from_unrunnable_and_mark_checks(self) -> None:
         wl = workloads.clifford(4, 100)
         self.assertEqual(pages._status(None), "not run")
@@ -1283,10 +1384,10 @@ class PageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page, _ = self._render(tmp)
         intro = page.index("tables mark")
-        issue = page.index("[open an")
+        issue = page.index("[open a benchmark issue]")
         self.assertLess(intro, issue)
         self.assertLess(issue, page.index('- <span class="pq-spec-l">Host</span> Intel'))
-        self.assertIn("https://github.com/AbeCoull/prism-q/issues", page)
+        self.assertIn("https://github.com/AbeCoull/prism-q/issues/new?template=BENCHMARK.yml", page)
 
     def test_setup_names_a_dirty_commit_and_an_unrecorded_compiler(self) -> None:
         manifest = _provenance_manifest()
@@ -1439,6 +1540,76 @@ def _ladder_rec(group, wl, sim, median, ladder="", threads=8, status="ok", **ext
         record["ladder"] = ladder
         record["policy"]["ceiling_s"] = 60.0
     return record
+
+
+def _ladder_records() -> list[dict]:
+    """A dense and a stabilizer ladder covering every way a climb ends.
+
+    No fp64 reference past 20 qubits, a cross-checked PRISM-Q pair, a harness memory refusal, a
+    runner memory refusal, a budget ceiling whose output failed its check, rungs the profile left
+    out, a timeout, and PRISM-Q at 1 thread beside single-threaded Stim.
+    """
+    cap = {"env": {"PRISM_MAX_SV_QUBITS": "30"}, "resolved_backend": "Statevector"}
+    paired = {
+        "pass": None,
+        "role": "untested",
+        "reason": "no fp64 reference ran on this row; agrees",
+        "cross_check": {"tvd": 0.0},
+    }
+    out = []
+    for n in (20, 29, 30):
+        wl = workloads.rcs(n, 10)
+        dense = {"pass": True, "tvd": 0.0} if n == 20 else paired
+
+        def add(sim, median, **extra):
+            out.append(_ladder_rec("scaling", wl, sim, median, "dense/rcs", **extra))
+
+        if n < 30:
+            add("prismq:statevector", 0.5 if n == 20 else 8000.0, validation=dense, **cap)
+            add("prismq:gpu", 0.4 if n == 20 else 900.0, validation=dense)
+        else:
+            reason = "backend `statevector`: the state needs 31 qubits, exceeding the cap of 30"
+            add("prismq:statevector", 0, status="error", reason=reason, ceiling="memory", **cap)
+            add("prismq:gpu", 0, status="oom", reason="device allocation failed", ceiling="memory")
+        if n == 20:
+            add("aer-statevector", 5.0, validation={"pass": None, "role": "reference"})
+            add("quest", 6.0, validation={"pass": True, "tvd": 0.0})
+            add("qsim", 2.0, precision="single", validation={"pass": True, "tvd": 0.0})
+        elif n == 29:
+            add(
+                "aer-statevector", 0, status="not-applicable", reason="dense state of 2^29 amplitudes", ceiling="memory"
+            )
+            add("quest", 0, status="skipped", reason="left out")
+            add("qsim", 30_000.0, precision="single", validation={"pass": None, "reason": "no fp64 reference ran"})
+        else:
+            past = {"reason": "past this ladder's ceiling (memory at 29 qubits)", "beyond_ceiling": True}
+            add("aer-statevector", 0, status="skipped", **past)
+            add("quest", 0, status="skipped", reason="left out")
+            failed = {"pass": False, "failures": ["b3: p < 1e-6"], "tvd": 0.2}
+            add("qsim", 70_000.0, precision="single", validation=failed, ceiling="budget")
+    stab = {"timeout_s": 300.0}
+    for n in (1000, 10_000, 100_000):
+        wl = workloads.ghz(n, 1000)
+        passed = {"validation": {"pass": True}}
+        out.append(_ladder_rec("scaling", wl, "prismq", n / 2500, "stabilizer/ghz", **passed))
+        out.append(_ladder_rec("scaling", wl, "prismq", n / 1000, "stabilizer/ghz", threads=1, **passed))
+        if n == 1000:
+            out.append(
+                _ladder_rec(
+                    "scaling", wl, "stim", 1.0, "stabilizer/ghz", threads=1, precision="exact (tableau)", **passed
+                )
+            )
+        elif n == 10_000:
+            out.append(
+                _ladder_rec("scaling", wl, "stim", 0, "stabilizer/ghz", threads=1, status="timeout", ceiling="timeout")
+            )
+        else:
+            past = {"reason": "past this ladder's ceiling (timeout at 10,000 qubits)", "beyond_ceiling": True}
+            out.append(_ladder_rec("scaling", wl, "stim", 0, "stabilizer/ghz", threads=1, status="skipped", **past))
+    for r in out:
+        if r["ladder"].startswith("stabilizer"):
+            r["policy"].update(stab)
+    return out
 
 
 def _wide_records() -> list[dict]:

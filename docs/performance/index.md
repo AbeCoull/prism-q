@@ -4,6 +4,8 @@
 
 <link rel="stylesheet" href="perf.css">
 
+<div class="pq-actions"><a class="pq-issue" href="https://github.com/AbeCoull/prism-q/issues/new?template=BENCHMARK.yml">Report a benchmark result</a><span class="pq-actions-s">Numbers that differ on your machine, a method question, or a missing simulator: the form asks for the host, the command and the rows.</span></div>
+
 Median wall time per call for PRISM-Q and other simulators on the same gate lists. Each
 simulator's output at its top thread count on a row is checked against a reference: dense
 vectors by total variation distance, samples by per-statistic tests, expectation values by
@@ -12,18 +14,23 @@ absolute difference. Records below the top thread count, rows under 100 shots
 them.
 
 These numbers come from one host and the harness in `comparison/`. If the method looks
-wrong or a simulator should be added, [open an
-issue](https://github.com/AbeCoull/prism-q/issues).
+wrong, a number does not reproduce, or a simulator should be added, [open a benchmark
+issue](https://github.com/AbeCoull/prism-q/issues/new?template=BENCHMARK.yml).
 
 - <span class="pq-spec-l">Host</span> Intel Core i7-6700K, 4 cores, 8 threads, Windows 10,
-  31.9 GB RAM, CPU only.
+  31.9 GB RAM, CPU only. Every number on this page comes from this host.
+- <span class="pq-spec-l">Run</span> `20261103T090018-b6c9ed`, profile `reference`,
+  started 2026-11-03, commit `b012445717` with uncommitted changes, 6.2 h of measurement,
+  13 supplementary runs.
 - <span class="pq-spec-l">Protocol</span> One process per measurement: a cold call, then a
   set of warm calls; the median warm call is reported.
 - <span class="pq-spec-l">Ratio</span> Peer median time / PRISM-Q median time.
-  Cross-process timing varies by about 10% on the reference host, where ratios within 0.9x
+  Cross-process timing of identical code moves by up to about 10%, so ratios within 0.9x
   to 1.1x are not distinguishable.
 - <span class="pq-spec-l">Raw data</span> `comparison/results/matrix-reference-i7-6700k/`;
   how it was taken: [Benchmark Methodology](../guides/benchmarking.md).
+
+<nav class="pq-toc" aria-label="On this page"><a href="#statevector-fp64">Statevector, fp64</a><a href="#statevector-against-fp32-peers">Statevector against fp32 peers</a><a href="#stabilizer">Stabilizer</a><a href="#high-shot-stabilizer">High-shot stabilizer</a><a href="#matrix-product-state">Matrix product state</a><a href="#deep-mps">Deep MPS</a><a href="#tensor-network-expectation-values">Tensor network expectation values</a><a href="#shot-sampling">Shot sampling</a><a href="#disjoint-components">Disjoint components</a><a href="#every-row">Every row</a><a href="#thread-scaling">Thread scaling</a><a href="#automatic-dispatch">Automatic dispatch</a><a href="#peak-memory">Peak memory</a><a href="#correctness">Correctness</a><a href="#prism-q-alone">PRISM-Q alone</a><a href="#setup-and-versions">Setup and versions</a></nav>
 
 <ul class="pq-kpis">
 <li class="pq-kpi"><a href="#statevector-fp64"><span class="pq-kpi-l">Statevector, fp64</span><span class="pq-kpi-v"><span>5.11</span><i>x</i> <em>to</em> <span>69.2</span><i>x</i></span><span class="pq-kpi-b" data-lo="5.115" data-hi="69.22"></span><span class="pq-kpi-s">Aer, QuEST, Spinoza and qip over PRISM-Q · 12 rows</span></a></li>
@@ -199,8 +206,8 @@ issue](https://github.com/AbeCoull/prism-q/issues).
   probabilities of each observable's qubits.
 - Aer's matrix product state method runs with `mps_lapack=True` and `mps_omp_threads`
   equal to the thread count.
-- The circuit is the rcs brickwork without measurements; every value is checked against
-  the exact cone reference.
+- The circuits are the rcs brickwork and a 4-step Trotterized Ising chain, without
+  measurements; every value is checked against the exact cone reference.
 
 <figure class="pq-figure" data-chart="tn">
 <p class="pq-kicker">Expectation values · 4 Z and 4 ZZ · brickwork depth 8</p>
@@ -321,8 +328,8 @@ Runs without a valid timing:
 
 ## PRISM-Q alone
 
-- `bench_suite` on the same host, measured 2026-11-10 with PRISM-Q 0.38.0, automatic
-  dispatch, every logical core.
+- `bench_suite` measured 2026-11-10 with PRISM-Q 0.38.0 on Intel64 Family 6 Model 94
+  Stepping 3, GenuineIntel, automatic dispatch, 8 threads.
 - Backend each family resolved to: GHZ on `Stabilizer`; QFT, HEA and QV on `Statevector`.
 - Rows without a probability vector time the run alone: GHZ at 256, 1,024 and 4,096
   qubits. Every other row includes the dense probability vector.
@@ -359,8 +366,8 @@ Runs without a valid timing:
 | Spinoza | 0.5.1 (git f900971), double, built with rustc 1.99.0-nightly, rustflags -C target-cpu=x86-64-v3 |
 | qip | 1.5.0, double, built with rustc 1.99.0-nightly, rustflags -C target-cpu=x86-64-v3 |
 
-Rerun the matrix and regenerate this page (about three hours; `--profile smoke` takes
-about 5 minutes):
+Rerun the matrix and regenerate this page (these results took 6.2 h of measurement;
+`--profile smoke` takes a few minutes):
 
 ```bash
 comparison/.venv/Scripts/python comparison/matrix.py run --profile reference --out comparison/results/my-run

@@ -106,10 +106,14 @@ pub fn stabilizer_min_qubits() -> usize {
     })
 }
 
-/// Device bytes a GPU statevector needs per amplitude: 16 for the interleaved
-/// complex buffer, 8 for the probabilities scratch, 1 of margin for the measurement
-/// partials and launcher metadata. The soft `Auto` gate and the hard explicit gate
-/// both budget with it.
+/// Device bytes a GPU statevector needs per amplitude: 16 for the interleaved complex
+/// buffer and 1 of margin for the measurement partials and launcher metadata, plus 8 for
+/// the probabilities scratch without `parallel`. With `parallel`, probabilities from 19
+/// qubits square chunk by chunk into the pinned staging slots, and the scratch below that
+/// is at most 2 MiB. The soft `Auto` gate and the hard explicit gate both budget with it.
+#[cfg(feature = "parallel")]
+pub(crate) const STATEVECTOR_BYTES_PER_AMPLITUDE: usize = 17;
+#[cfg(not(feature = "parallel"))]
 pub(crate) const STATEVECTOR_BYTES_PER_AMPLITUDE: usize = 25;
 
 /// Device handle and compiled kernel module, shared across backends and simulations
@@ -171,8 +175,8 @@ impl GpuContext {
     /// statevector for `num_qubits` qubits.
     ///
     /// Counts only the amplitude buffer at 16 bytes per amplitude;
-    /// `fits_statevector_with_scratch` also budgets the probabilities and
-    /// measurement scratch.
+    /// `fits_statevector_with_scratch` also budgets the measurement scratch, and the
+    /// probabilities scratch without `parallel`.
     pub fn fits_statevector(&self, num_qubits: usize) -> Result<bool> {
         if num_qubits >= usize::BITS as usize - 4 {
             return Ok(false);
@@ -183,9 +187,10 @@ impl GpuContext {
     /// Whether the currently-available VRAM holds a dense statevector for
     /// `num_qubits` plus the reduction scratch `GpuState` keeps live.
     ///
-    /// Budgets 25 bytes per amplitude: 16 for amplitudes, 8 for the probabilities
-    /// scratch, and 1 of margin for the measurement partials (`ceil(2^n / 512)` f64) and
-    /// launcher metadata.
+    /// Budgets 17 bytes per amplitude: 16 for amplitudes and 1 of margin for the
+    /// measurement partials (`ceil(2^n / 512)` f64) and launcher metadata. Without
+    /// `parallel` it adds 8 for the probabilities scratch, which builds with `parallel`
+    /// replace from 19 qubits by squaring into pinned host memory chunk by chunk.
     /// This is the fail-fast gate for the `Auto` GPU statevector leaf; the backend's
     /// soft mode ([`StatevectorBackend::with_gpu_auto`](crate::backend::statevector::StatevectorBackend::with_gpu_auto))
     /// catches any transient allocation that slips past it.
@@ -337,8 +342,8 @@ pub(crate) struct GpuState {
     buffer: GpuBuffer<f64>,
     num_qubits: usize,
     pending_norm: f64,
-    /// Reused across `probabilities()` calls so shot sampling does not reallocate `2^n`
-    /// f64s per read.
+    /// The `2^n` probabilities, reused across `probabilities()` calls. With `parallel` it
+    /// is allocated only below the staged readback threshold.
     probs_scratch: std::cell::RefCell<Option<GpuBuffer<f64>>>,
     /// Measurements decided on the device: the pending norm at index 0, then one outcome
     /// per slot, read back once per run of deferred measurements.
@@ -439,8 +444,8 @@ impl GpuState {
         Ok(out)
     }
 
-    /// Compute per-basis-state probabilities with `pending_norm²` scaling, via a GPU
-    /// reduction kernel. Only `2^n` f64s cross PCIe (vs `2·2^n` for raw amplitudes).
+    /// Compute per-basis-state probabilities with `pending_norm²` scaling, squared on the
+    /// device. Only `2^n` f64s cross PCIe (vs `2·2^n` for raw amplitudes).
     pub(crate) fn probabilities(&self) -> Result<Vec<f64>> {
         kernels::dense::launch_compute_probabilities(&self.context, self)
     }

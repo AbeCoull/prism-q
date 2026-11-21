@@ -12,9 +12,67 @@ use super::super::{
 };
 use super::BLOCK_SIZE;
 
+/// Per-basis-state probabilities with `pending_norm²` applied. With `parallel`, a readback
+/// of `STAGED_READBACK_MIN_BYTES` or more squares one chunk at a time straight into the
+/// pinned staging slots; anything smaller squares into the state's `probs_scratch`.
 pub(crate) fn launch_compute_probabilities(ctx: &GpuContext, state: &GpuState) -> Result<Vec<f64>> {
-    let n = state.num_qubits();
-    let dim: u64 = 1u64 << n;
+    #[cfg(feature = "parallel")]
+    if (std::mem::size_of::<f64>() << state.num_qubits())
+        >= crate::gpu::memory::STAGED_READBACK_MIN_BYTES
+    {
+        return probabilities_through_staging(ctx, state);
+    }
+    probabilities_through_scratch(ctx, state)
+}
+
+#[cfg(feature = "parallel")]
+fn probabilities_through_staging(ctx: &GpuContext, state: &GpuState) -> Result<Vec<f64>> {
+    let dim = 1usize << state.num_qubits();
+    let device = ctx.device();
+    let (stream, func) = stream_and_fn(ctx, "compute_probabilities")?;
+    let norm_sq = state.pending_norm() * state.pending_norm();
+    let state_buf = state.buffer().raw();
+    let mut host = vec![0.0_f64; dim];
+    // SAFETY: `host` holds `dim` initialized f64s, plain data for which every byte pattern
+    // is a valid value, and the exclusive borrow covers the byte view for its lifetime.
+    let dst = unsafe {
+        std::slice::from_raw_parts_mut(host.as_mut_ptr().cast::<u8>(), dim * size_of::<f64>())
+    };
+    device.with_staging(|staging| {
+        staging.stage(dst, |range, slot| {
+            let start = (range.start / size_of::<f64>()) as u64;
+            let count = (range.len() / size_of::<f64>()) as u64;
+            let mut builder = stream.launch_builder(&func);
+            builder
+                .arg(state_buf)
+                .arg(&start)
+                .arg(&count)
+                .arg(&norm_sq)
+                .arg(&slot.device);
+            let cfg = linear_cfg(BLOCK_SIZE, grid_for(count, BLOCK_SIZE));
+            // SAFETY: signature matches; the grid covers `count` threads, each reading
+            // amplitude `start + i < dim` and writing f64 `i` of the slot, which holds
+            // `range.len() = 8 * count` bytes mapped into the device.
+            unsafe {
+                launch_counted(
+                    builder,
+                    cfg,
+                    "compute_probabilities",
+                    device,
+                    u64::from(start == 0),
+                )
+            }
+        })
+    })?;
+    device.count_drain();
+    Ok(host)
+}
+
+pub(crate) fn probabilities_through_scratch(
+    ctx: &GpuContext,
+    state: &GpuState,
+) -> Result<Vec<f64>> {
+    let dim: u64 = 1u64 << state.num_qubits();
     let device = ctx.device();
     let (stream, func) = stream_and_fn(ctx, "compute_probabilities")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim, BLOCK_SIZE));
@@ -26,10 +84,16 @@ pub(crate) fn launch_compute_probabilities(ctx: &GpuContext, state: &GpuState) -
     let scratch = scratch_slot.as_mut().unwrap();
 
     let norm_sq = state.pending_norm() * state.pending_norm();
+    let start = 0u64;
     let mut builder = stream.launch_builder(&func);
     let state_buf = state.buffer().raw();
     let out = scratch.raw_mut();
-    builder.arg(state_buf).arg(&dim).arg(&norm_sq).arg(out);
+    builder
+        .arg(state_buf)
+        .arg(&start)
+        .arg(&dim)
+        .arg(&norm_sq)
+        .arg(out);
     // SAFETY: signature matches; grid covers dim; scratch is at least dim elements.
     unsafe { launch_counted(builder, cfg, "compute_probabilities", ctx.device(), 1) }?;
     let mut host = vec![0.0_f64; dim as usize];

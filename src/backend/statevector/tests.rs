@@ -2067,6 +2067,62 @@ mod gpu_scaffold {
         assert!(gpu_probs[1].abs() < 1e-12);
         assert!(gpu_probs[2].abs() < 1e-12);
     }
+
+    fn entangling_layer(n: usize) -> Vec<Instruction> {
+        let mut gates: Vec<Instruction> = (0..n)
+            .map(|q| Instruction::Gate {
+                gate: Gate::Ry(0.3 + 0.07 * q as f64),
+                targets: crate::circuit::smallvec![q],
+            })
+            .collect();
+        gates.extend((0..n - 1).map(|q| Instruction::Gate {
+            gate: Gate::Cx,
+            targets: crate::circuit::smallvec![q, q + 1],
+        }));
+        gates
+    }
+
+    // From 19 qubits the probabilities square chunk by chunk straight into the pinned
+    // slots. Both lengths run the same kernel arithmetic as the scratch path, so the bits
+    // must match: one partial chunk at 20 qubits and two full chunks at 24. A pending
+    // norm other than 1 covers the scaling, and no 2^n scratch may appear.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn staged_probabilities_match_the_scratch_path_bit_for_bit() {
+        use crate::gpu::kernels::dense::{
+            launch_compute_probabilities, probabilities_through_scratch,
+        };
+        let Some(ctx) = device_or_skip() else {
+            return;
+        };
+        for n in [20usize, 24] {
+            let mut gpu = StatevectorBackend::new(42).with_gpu(ctx.clone());
+            gpu.init(n, 0).unwrap();
+            gpu.apply_instructions(&entangling_layer(n)).unwrap();
+            gpu.gpu_state_mut().unwrap().set_pending_norm(1.0 / 1.3);
+            let state = gpu.gpu_state().unwrap();
+            let chunks_before = ctx.device().staged_chunks();
+            let staged = launch_compute_probabilities(&ctx, state).unwrap();
+            assert_eq!(
+                ctx.device().staged_chunks() - chunks_before,
+                (8usize << n).div_ceil(64 << 20),
+                "probabilities at {n} qubits skipped the staged path"
+            );
+            assert!(
+                state.probs_scratch().is_none(),
+                "a 2^{n} scratch was allocated"
+            );
+            let reference = probabilities_through_scratch(&ctx, state).unwrap();
+            assert_eq!(staged.len(), 1 << n);
+            assert!(
+                staged
+                    .iter()
+                    .zip(&reference)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "staged probabilities at {n} qubits differ from the scratch path"
+            );
+        }
+    }
 }
 
 // The density-matrix registers batch only in runs of this length. On a state

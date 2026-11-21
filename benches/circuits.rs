@@ -5221,6 +5221,27 @@ fn bench_spp(c: &mut Criterion) {
         });
     });
 
+    // `PauliRot` strings: weight 2 on the Heisenberg chain, 2 to 16 on the
+    // Jordan-Wigner step.
+    let mut heisenberg = Circuit::new(16, 0);
+    heisenberg.add_trotter(&heisenberg_hamiltonian(16), 0.1, 1, TrotterOrder::Second);
+    let mut jordan_wigner = Circuit::new(16, 0);
+    for (coefficient, factors) in &circuits::jordan_wigner_hamiltonian(16, 200, SEED) {
+        if !factors.is_empty() {
+            jordan_wigner.add_pauli_rotation(0.1 * coefficient, factors);
+        }
+    }
+    for (name, circuit) in [
+        ("heisenberg_16q", &heisenberg),
+        ("jw_trotter_16q", &jordan_wigner),
+    ] {
+        group.bench_function(BenchmarkId::new("spp_10k", name), |b| {
+            b.iter(|| {
+                prism_q::sim::unified_pauli::run_spp(circuit, num_samples, 42).unwrap();
+            });
+        });
+    }
+
     group.finish();
 }
 

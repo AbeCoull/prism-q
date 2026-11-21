@@ -3393,3 +3393,106 @@ fn exactness_holds_up_to_the_discard_bound() {
         }
     ));
 }
+
+// The route the windowed sweep replaced: every left and right identity
+// environment stored, and each window walked from its prefix to a trace
+// against the right environment at its last site.
+fn stored_environment_expectations(b: &MpsBackend, observables: &[Vec<PauliTerm>]) -> Vec<f64> {
+    let prefixes = b.pauli_env_prefixes();
+    let rights = b.right_environments();
+    let norm = prefixes[b.num_qubits][0].re;
+    let (mut tmp, mut env, mut next) = (Vec::new(), Vec::new(), Vec::new());
+    observables
+        .iter()
+        .map(|observable| {
+            let site_axis = b.pauli_site_axes(&mps_pauli_factors(observable)).unwrap();
+            let Some(first) = site_axis.iter().position(Option::is_some) else {
+                return 1.0;
+            };
+            let last = site_axis.iter().rposition(Option::is_some).unwrap();
+            b.contract_pauli_env(
+                first,
+                &prefixes[first],
+                site_axis[first],
+                &mut tmp,
+                &mut env,
+            );
+            for (site, &axis) in site_axis.iter().enumerate().take(last + 1).skip(first + 1) {
+                b.contract_pauli_env(site, &env, axis, &mut tmp, &mut next);
+                std::mem::swap(&mut env, &mut next);
+            }
+            let cols = b.sites[last].bond_right;
+            let right = &rights[last];
+            let mut value = ZERO;
+            for bra in 0..cols {
+                for ket in 0..cols {
+                    value += env[bra * cols + ket] * right[ket * cols + bra];
+                }
+            }
+            value.re / norm
+        })
+        .collect()
+}
+
+// Random tensors are neither normalized nor in any gauge, and the layout is
+// shuffled, so nothing but the contraction itself can line the two routes up.
+// Bonds up to 70 put the middle steps on faer under `parallel`.
+#[test]
+fn windowed_expectations_match_stored_environments_on_random_chains() {
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    for (n, max_bond) in [(1, 1), (2, 2), (3, 4), (6, 5), (9, 16), (12, 70)] {
+        let mut bonds = vec![1usize; n + 1];
+        for bond in &mut bonds[1..n] {
+            *bond = rng.random_range(1..=max_bond);
+        }
+        let mut b = MpsBackend::new(42, 1024);
+        b.init(n, 0).unwrap();
+        for (site, tensor) in b.sites.iter_mut().enumerate() {
+            let (bl, br) = (bonds[site], bonds[site + 1]);
+            *tensor = SiteTensor {
+                bond_left: bl,
+                bond_right: br,
+                data: (0..bl * 2 * br)
+                    .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
+                    .collect(),
+            };
+        }
+        b.center = None;
+        let shuffled = |rng: &mut ChaCha8Rng| {
+            let mut order: Vec<usize> = (0..n).collect();
+            for i in (1..n).rev() {
+                order.swap(i, rng.random_range(0..=i));
+            }
+            order
+        };
+        let layout = shuffled(&mut rng);
+        for (qubit, &site) in layout.iter().enumerate() {
+            b.logical_to_site[qubit] = site;
+            b.site_to_logical[site] = qubit;
+        }
+
+        let axis = |rng: &mut ChaCha8Rng, qubit: usize| match rng.random_range(0..3) {
+            0 => PauliTerm::x(qubit),
+            1 => PauliTerm::y(qubit),
+            _ => PauliTerm::z(qubit),
+        };
+        let mut observables: Vec<Vec<PauliTerm>> = vec![Vec::new()];
+        for qubit in 0..n {
+            observables.push(vec![axis(&mut rng, qubit)]);
+        }
+        for _ in 0..3 * n {
+            let mut qubits = shuffled(&mut rng);
+            qubits.truncate(rng.random_range(1..=n.min(4)));
+            observables.push(qubits.into_iter().map(|q| axis(&mut rng, q)).collect());
+        }
+
+        let windowed = b.pauli_expectations(&observables).unwrap();
+        let stored = stored_environment_expectations(&b, &observables);
+        for ((observable, w), s) in observables.iter().zip(&windowed).zip(&stored) {
+            assert!(
+                (w - s).abs() <= 1e-12 * s.abs().max(1.0),
+                "n={n}, max bond {max_bond}, {observable:?}: windowed {w}, stored {s}"
+            );
+        }
+    }
+}

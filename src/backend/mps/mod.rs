@@ -2029,11 +2029,12 @@ impl Backend for MpsBackend {
         true
     }
 
-    /// Identity environments are swept once and shared, so an observable
-    /// contracts only the sites between its first and last non-identity
-    /// factor: a single-qubit observable costs one site instead of a full
-    /// chain walk. Divided by `⟨ψ|ψ⟩` because a truncated chain is not
-    /// exactly normalized.
+    /// With two or more observables, identity environments are swept once in
+    /// each direction and shared, so an observable contracts only the sites
+    /// between its first and last
+    /// non-identity factor: a single-qubit observable costs no environment
+    /// step at all. Divided by `⟨ψ|ψ⟩` because a truncated chain is not exactly
+    /// normalized.
     fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
         if self.num_qubits == 0 {
             return Ok(vec![1.0; observables.len()]);
@@ -2051,51 +2052,7 @@ impl Backend for MpsBackend {
                 })
                 .collect();
         }
-
-        let prefixes = self.pauli_env_prefixes();
-        let rights = self.right_environments();
-        let norm = prefixes[self.num_qubits][0].re;
-
-        let mut tmp = Vec::new();
-        let mut env = Vec::new();
-        let mut next = Vec::new();
-        observables
-            .iter()
-            .map(|observable| {
-                let site_axis = self.pauli_site_axes(&mps_pauli_factors(observable))?;
-                if norm == 0.0 {
-                    return Ok(0.0);
-                }
-                let Some(first) = site_axis.iter().position(Option::is_some) else {
-                    return Ok(1.0);
-                };
-                let last = site_axis.iter().rposition(Option::is_some).unwrap();
-
-                self.contract_pauli_env(
-                    first,
-                    &prefixes[first],
-                    site_axis[first],
-                    &mut tmp,
-                    &mut env,
-                );
-                for (site, &axis) in site_axis.iter().enumerate().take(last + 1).skip(first + 1) {
-                    self.contract_pauli_env(site, &env, axis, &mut tmp, &mut next);
-                    std::mem::swap(&mut env, &mut next);
-                }
-                let cols = self.sites[last].bond_right;
-
-                // The identity cap right of `last` carries the ket bond first,
-                // so closing the two chains is a trace of the two matrices.
-                let right = &rights[last];
-                let mut value = ZERO;
-                for bra in 0..cols {
-                    for ket in 0..cols {
-                        value += env[bra * cols + ket] * right[ket * cols + bra];
-                    }
-                }
-                Ok(value.re / norm)
-            })
-            .collect()
+        self.windowed_pauli_expectations(observables)
     }
 
     fn export_statevector(&self) -> Result<Vec<Complex64>> {

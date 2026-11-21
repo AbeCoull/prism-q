@@ -61,6 +61,32 @@ fn fold_pauli_into_rows(tmp: &mut [Complex64], br: usize, axis: Option<MpsPauliA
     }
 }
 
+/// `Σ tmp'[β, k, α'] · cap[β, k, α']` over two `[β, j, α']` buffers with rows of
+/// `br`, where `tmp'` is `tmp` with the Pauli matrix folded in as
+/// [`fold_pauli_into_rows`] folds it.
+fn pauli_dot(
+    tmp: &[Complex64],
+    cap: &[Complex64],
+    br: usize,
+    axis: Option<MpsPauliAxis>,
+) -> Complex64 {
+    let dot = |x: &[Complex64], y: &[Complex64]| -> Complex64 {
+        x.iter().zip(y).map(|(&a, &b)| a * b).sum()
+    };
+    let mut value = ZERO;
+    for (t, c) in tmp.chunks_exact(2 * br).zip(cap.chunks_exact(2 * br)) {
+        let (t0, t1) = t.split_at(br);
+        let (c0, c1) = c.split_at(br);
+        value += match axis {
+            None => dot(t0, c0) + dot(t1, c1),
+            Some(MpsPauliAxis::X) => dot(t1, c0) + dot(t0, c1),
+            Some(MpsPauliAxis::Y) => Complex64::i() * (dot(t1, c0) - dot(t0, c1)),
+            Some(MpsPauliAxis::Z) => dot(t0, c0) - dot(t1, c1),
+        };
+    }
+    value
+}
+
 fn identity_env(dim: usize) -> Vec<Complex64> {
     let mut env = vec![ZERO; dim * dim];
     for i in 0..dim {
@@ -219,7 +245,8 @@ impl MpsBackend {
     ///
     /// `env` is the `bond_left` square indexed `[bra bond, ket bond]`; `out`
     /// is resized to the `bond_right` square indexed the same way. `tmp` is
-    /// scratch held across a sweep.
+    /// scratch held across a sweep, and on return holds the first product
+    /// with the Pauli matrix folded in.
     pub(super) fn contract_pauli_env(
         &self,
         site: usize,
@@ -228,20 +255,123 @@ impl MpsBackend {
         tmp: &mut Vec<Complex64>,
         out: &mut Vec<Complex64>,
     ) {
+        self.pauli_env_bra_half(site, env, tmp);
+        fold_pauli_into_rows(tmp, self.sites[site].bond_right, axis);
+        self.pauli_env_ket_half(site, tmp, out);
+    }
+
+    /// `tmp[β, j, α'] = Σ_α env[α, β] · conj(A[α, j, α'])`, the first product of
+    /// [`Self::contract_pauli_env`], before any Pauli matrix.
+    fn pauli_env_bra_half(&self, site: usize, env: &[Complex64], tmp: &mut Vec<Complex64>) {
         let a = &self.sites[site];
         let bl = a.bond_left;
         let br = a.bond_right;
         debug_assert_eq!(env.len(), bl * bl);
-
-        // tmp[β, j, α'] = Σ_α env[α, β] · conj(A[α, j, α']), then the Pauli
-        // matrix folded over j.
         tmp.resize(bl * 2 * br, ZERO);
         gemm_tn::<true>(tmp, env, &a.data, bl, bl, 2 * br);
-        fold_pauli_into_rows(tmp, br, axis);
+    }
 
-        // out[α', β'] = Σ_{β, k} tmp[β, k, α'] · A[β, k, β']
+    /// `out[α', β'] = Σ_{β, k} tmp[β, k, α'] · A[β, k, β']`, the second product of
+    /// [`Self::contract_pauli_env`].
+    fn pauli_env_ket_half(&self, site: usize, tmp: &[Complex64], out: &mut Vec<Complex64>) {
+        let a = &self.sites[site];
+        let bl = a.bond_left;
+        let br = a.bond_right;
         out.resize(br * br, ZERO);
         gemm_tn::<false>(out, tmp, &a.data, 2 * bl, br, br);
+    }
+
+    /// `⟨ψ|P|ψ⟩ / ⟨ψ|ψ⟩` for each observable from one sweep in each direction.
+    ///
+    /// Each sweep keeps the first product of its step: the forward sweep's
+    /// `conj(A)` against the left environment where a window opens, and the
+    /// backward sweep's `A` against the right environment where windows close.
+    /// A window runs the ket half of the step at its first site, full steps over
+    /// its interior and the bra half at its last site, then closes as the
+    /// elementwise product of the two kept products with the Pauli matrix folded
+    /// in, `O(χ²)` against `O(χ³)` for a step, so a single-site observable takes
+    /// no step.
+    /// The kept products hold `2·bl·br` entries per opening site, never more
+    /// than the `bl² + br²` of the two environments a window would otherwise
+    /// read.
+    pub(super) fn windowed_pauli_expectations(
+        &self,
+        observables: &[Vec<PauliTerm>],
+    ) -> Result<Vec<f64>> {
+        struct Window {
+            index: usize,
+            first: usize,
+            last: usize,
+            axes: Vec<Option<MpsPauliAxis>>,
+        }
+
+        let n = self.num_qubits;
+        let mut windows = Vec::with_capacity(observables.len());
+        let mut opens = vec![false; n];
+        for (index, observable) in observables.iter().enumerate() {
+            let site_axis = self.pauli_site_axes(&mps_pauli_factors(observable))?;
+            let Some(first) = site_axis.iter().position(Option::is_some) else {
+                continue;
+            };
+            let last = site_axis.iter().rposition(Option::is_some).unwrap();
+            opens[first] = true;
+            windows.push(Window {
+                index,
+                first,
+                last,
+                axes: site_axis[first..=last].to_vec(),
+            });
+        }
+
+        let mut opened: Vec<Vec<Complex64>> = vec![Vec::new(); n];
+        let mut env = vec![ONE; 1];
+        let mut next = Vec::new();
+        let mut tmp = Vec::new();
+        for site in 0..n {
+            self.contract_pauli_env(site, &env, None, &mut tmp, &mut next);
+            std::mem::swap(&mut env, &mut next);
+            if opens[site] {
+                opened[site] = std::mem::take(&mut tmp);
+            }
+        }
+        let norm = env[0].re;
+        if norm == 0.0 {
+            return Ok(vec![0.0; observables.len()]);
+        }
+
+        let mut values = vec![1.0; observables.len()];
+        windows.sort_unstable_by_key(|w| std::cmp::Reverse(w.last));
+        let Some(stop) = windows.last().map(|w| w.last) else {
+            return Ok(values);
+        };
+        let mut pending = windows.iter().peekable();
+        let mut right = vec![ONE; 1];
+        let mut right_next = Vec::new();
+        let mut closing = Vec::new();
+        for site in (stop..n).rev() {
+            self.contract_right_env(site, &right, &mut closing, &mut right_next);
+            std::mem::swap(&mut right, &mut right_next);
+            let br = self.sites[site].bond_right;
+            while let Some(w) = pending.next_if(|w| w.last == site) {
+                let close_axis = w.axes[w.axes.len() - 1];
+                let value = if w.first == site {
+                    pauli_dot(&opened[site], &closing, br, close_axis)
+                } else {
+                    tmp.clear();
+                    tmp.extend_from_slice(&opened[w.first]);
+                    fold_pauli_into_rows(&mut tmp, self.sites[w.first].bond_right, w.axes[0]);
+                    self.pauli_env_ket_half(w.first, &tmp, &mut env);
+                    for (s, &axis) in (w.first + 1..site).zip(&w.axes[1..w.axes.len() - 1]) {
+                        self.contract_pauli_env(s, &env, axis, &mut tmp, &mut next);
+                        std::mem::swap(&mut env, &mut next);
+                    }
+                    self.pauli_env_bra_half(site, &env, &mut tmp);
+                    pauli_dot(&tmp, &closing, br, close_axis)
+                };
+                values[w.index] = value.re / norm;
+            }
+        }
+        Ok(values)
     }
 
     /// Identity environments left of every site, plus `⟨ψ|ψ⟩` as the last
@@ -361,7 +491,8 @@ impl MpsBackend {
     /// Absorb one site into a right environment as two matrix products:
     /// `O(χ³)` instead of the four-index sum's `O(χ⁴)`. `out` is resized to the
     /// `bond_left` square, and `tmp` carries the intermediate across a sweep so
-    /// the inner buffer is allocated once rather than per site.
+    /// the inner buffer is allocated once rather than per site. On return `tmp`
+    /// holds `A[α, i, β] · env[β, β']`, laid out `[α, i, β']`.
     ///
     /// [`Self::compute_right_env`] calls this only past
     /// [`DENSE_ENV_MAX_BONDS`]. Below it the chains a projection leaves behind

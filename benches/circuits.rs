@@ -2986,7 +2986,48 @@ fn bench_auto_crossover(c: &mut Criterion) {
         });
     }
 
+    // Jordan-Wigner strings of weight 1 up to the full register at pi/4, so the
+    // circuit is Clifford+T with one T per string. The Pauli sum sits near the
+    // work budget, so how SPD charges a `PauliRot` string decides whether `auto`
+    // keeps it or hands it back to the backend tree.
+    let circuit = jordan_wigner_clifford_t_circuit(14, 24, SEED);
+    for (name, kind) in [
+        ("auto", BackendKind::Auto),
+        ("statevector", BackendKind::Statevector),
+    ] {
+        group.bench_with_input(
+            BenchmarkId::new(name, "spd_jw_14q_24t"),
+            &circuit,
+            |b, circ| {
+                b.iter(|| {
+                    black_box(
+                        sim::simulate(circ)
+                            .backend(kind.clone())
+                            .seed(42)
+                            .marginals()
+                            .unwrap(),
+                    )
+                });
+            },
+        );
+    }
+
     group.finish();
+}
+
+/// H on every qubit, then each non-identity string of the seeded Jordan-Wigner
+/// operator truncated to `t_count` terms, rotated by pi/4 with its coefficient's sign.
+fn jordan_wigner_clifford_t_circuit(n: usize, t_count: usize, seed: u64) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for (coefficient, factors) in &circuits::jordan_wigner_hamiltonian(n, t_count, seed) {
+        if !factors.is_empty() {
+            c.add_pauli_rotation(std::f64::consts::FRAC_PI_4.copysign(*coefficient), factors);
+        }
+    }
+    c
 }
 
 /// `depth` layers of random single-qubit Cliffords, `t_count` T or Tdg gates

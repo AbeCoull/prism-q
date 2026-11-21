@@ -12,13 +12,14 @@
 //! - `pauli_engine_qaoa`: weighted MaxCut evaluation on the shared QAOA
 //!   fixture through the deterministic Pauli engine.
 //! - `spd_truncation`: budgeted SPD truncation against the untruncated
-//!   engine, with a Clifford+T control the policy must not touch.
+//!   engine, on Trotter steps of `PauliRot` strings too, with a Clifford+T
+//!   control the policy must not touch.
 //!
 //! Reference and internal sweeps are opt-in benchmarks. Enable them with
 //! `--features parallel,bench-internal`.
 
 mod common;
-use common::{SEED, configure_group_timed};
+use common::{SEED, configure_group_timed, heisenberg_hamiltonian};
 
 #[cfg(feature = "bench-internal")]
 use criterion::{BenchmarkGroup, measurement::WallTime};
@@ -29,8 +30,8 @@ use prism_q::qec::cut_selection::{InteractionGraph, cut_score, min_fill_treewidt
 use prism_q::qec::observable_reroute::{cone_telemetry, min_cone_z_representative, xor_z_support};
 use prism_q::{
     BackendKind, Circuit, Gate, PauliObservable, PauliTerm, QecOptions, QecProgram, QecRecordRef,
-    QecTStrategy, SpdTruncation, circuits, run_qec_program_with_strategy, run_spd_observable,
-    run_spd_observable_budgeted, run_spd_observable_light_cone, simulate,
+    QecTStrategy, SpdTruncation, TrotterOrder, circuits, run_qec_program_with_strategy,
+    run_spd_observable, run_spd_observable_budgeted, run_spd_observable_light_cone, simulate,
 };
 #[cfg(feature = "bench-internal")]
 use std::collections::HashSet;
@@ -686,8 +687,9 @@ fn near_clifford_zrot(n: usize, layers: usize) -> Circuit {
 
 /// Budgeted SPD truncation against the untruncated engine: the near-Clifford
 /// shape where the budget pays, a threshold run that prunes on every
-/// instruction once past its term count, and a Clifford+T control sized under
-/// the budget where the policy must not fire.
+/// instruction once past its term count, two Trotter steps of `PauliRot`
+/// strings, and a Clifford+T control sized under the budget where the policy
+/// must not fire.
 fn bench_spd_truncation(c: &mut Criterion) {
     let mut group = c.benchmark_group("spd_truncation");
     configure_group_timed(
@@ -716,6 +718,28 @@ fn bench_spd_truncation(c: &mut Criterion) {
     group.bench_function(BenchmarkId::new("threshold", "zrot_10q_l3"), |b| {
         b.iter(|| run_spd_observable(&zrot, &hea_obs, epsilon, max_terms).unwrap())
     });
+
+    // `PauliRot` strings under the same budget: weight 2 on the Heisenberg chain,
+    // 2 to 16 on the Jordan-Wigner step.
+    let mut heisenberg = Circuit::new(16, 0);
+    heisenberg.add_trotter(&heisenberg_hamiltonian(16), 0.1, 1, TrotterOrder::Second);
+    let mut jordan_wigner = Circuit::new(16, 0);
+    for (coefficient, factors) in &circuits::jordan_wigner_hamiltonian(16, 200, SEED) {
+        if !factors.is_empty() {
+            jordan_wigner.add_pauli_rotation(0.1 * coefficient, factors);
+        }
+    }
+    let mid_obs = [PauliTerm::z(8)];
+    for (name, circuit) in [
+        ("heisenberg_16q", &heisenberg),
+        ("jw_trotter_16q", &jordan_wigner),
+    ] {
+        let probe = run_spd_observable_budgeted(circuit, &mid_obs, 4096).unwrap();
+        assert!(probe.peak_terms == 4096 && probe.total_discarded > 0.0);
+        group.bench_function(BenchmarkId::new("budget4096", name), |b| {
+            b.iter(|| run_spd_observable_budgeted(circuit, &mid_obs, 4096).unwrap())
+        });
+    }
 
     let mut t_control = Circuit::new(10, 0);
     for q in 0..10 {

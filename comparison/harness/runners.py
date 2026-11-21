@@ -10,6 +10,7 @@ and `time` commands, which gives the same timed region without the phase split.
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -37,14 +38,21 @@ QUEST = os.environ.get(
         REPO_ROOT, "comparison", "quest", "build", "Release" if sys.platform == "win32" else "", "quest_runner" + EXE
     ),
 )
+# The `gpu` feature builds into its own target directory, so the CPU runner every other row uses
+# stays the `parallel` build.
+RUNNER_GPU = os.environ.get(
+    "PRISMQ_CMP_RUNNER_GPU",
+    os.path.join(REPO_ROOT, "target", "gpu", "release", "examples", "compare_runner" + EXE),
+)
 WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker.py")
 
-UNITARY = {"h", "x", "z", "s", "sdg", "ry", "rz", "cx", "cz", "swap", "cp"}
+UNITARY = {"h", "x", "z", "s", "sdg", "rx", "ry", "rz", "cx", "cz", "swap", "cp", "rzz"}
 CLIFFORD = {"h", "x", "z", "s", "sdg", "cx", "cz", "swap", "measure", "reset", "if"}
 LEGACY_GATES = {"h", "cx", "swap", "ry", "rz", "cp"}
 PROBS_BYTES_PER_AMP = 8
 THREAD_ENV_KEYS = ("RAYON_NUM_THREADS", "OMP_NUM_THREADS")
 DENSE_MEMORY_FRACTION = 0.8
+MEMORY_REFUSAL = "dense state of"
 # Warm calls of these OpenMP peers ran faster with idle worker threads sleeping than spinning
 # between calls, on both a 20- and a 24-qubit row; PRISM-Q's environment is left unchanged.
 OMP_PASSIVE = (("OMP_WAIT_POLICY", "PASSIVE"),)
@@ -219,7 +227,18 @@ PRISMQ_BACKENDS = {
     "product": ("product state", False),
     "factored": ("split dense sub-states", False),
     "tensor-network": ("tensor network", False),
+    "gpu": ("dense statevector on a CUDA device", False),
 }
+
+
+def dense_qubit_limit(bytes_per_amp: int = 16) -> int:
+    """The widest register whose state fits the share of RAM the harness allows every dense simulator.
+
+    PRISM-Q's own statevector cap defaults to half of physical memory; forcing its statevector with
+    this cap puts it under the same limit `applicable` holds the dense peers to.
+    """
+    have = psutil.virtual_memory().total * DENSE_MEMORY_FRACTION
+    return int(math.log2(have / bytes_per_amp))
 
 
 def resolve(name: str) -> Simulator:
@@ -249,6 +268,7 @@ def resolve(name: str) -> Simulator:
             representation, dense = PRISMQ_BACKENDS[option]
             backend = option
         gates = CLIFFORD if backend in ("stabilizer", "factored-stabilizer") else sim.gates
+        env = (("PRISM_MAX_SV_QUBITS", str(dense_qubit_limit())),) if backend == "statevector" else ()
         return Simulator(
             name,
             f"PRISM-Q ({backend})",
@@ -259,6 +279,7 @@ def resolve(name: str) -> Simulator:
             gates=frozenset(gates),
             dense=dense,
             backend=backend,
+            env=env,
         )
     if base in ("aer-mps", "quimb-mps"):
         return Simulator(
@@ -332,7 +353,7 @@ def applicable(sim: Simulator, workload: Workload) -> str | None:
         need = per_amp * 2**workload.num_qubits
         have = psutil.virtual_memory().total * DENSE_MEMORY_FRACTION
         if need > have:
-            return f"dense state of 2^{workload.num_qubits} amplitudes needs {need / 1024**3:.3g} GiB"
+            return f"{MEMORY_REFUSAL} 2^{workload.num_qubits} amplitudes needs {need / 1024**3:.3g} GiB"
     executable = _executable(sim)
     if executable is not None and not os.path.exists(executable):
         return f"executable not built: {executable}"
@@ -341,7 +362,7 @@ def applicable(sim: Simulator, workload: Workload) -> str | None:
 
 def _executable(sim: Simulator) -> str | None:
     if sim.kind == "exec":
-        return RUNNER
+        return RUNNER_GPU if sim.backend == "gpu" else RUNNER
     if sim.kind == "legacy":
         return QUEST if sim.name == "quest" else PEERS
     return None
@@ -477,7 +498,7 @@ def python_executable() -> str:
 
 def version(sim: Simulator) -> str | None:
     if sim.kind == "exec":
-        argv = [RUNNER, "version"]
+        argv = [_executable(sim), "version"]
     elif sim.kind == "python":
         argv = [python_executable(), WORKER, sim.name.partition(":")[0], "version"]
     elif sim.name == "quest":
@@ -503,6 +524,19 @@ def native_builds() -> dict[str, str | None]:
     return builds
 
 
+RUN_FIELDS = (
+    "resolved_backend",
+    "route",
+    "engine",
+    "exactness",
+    "placement",
+    "bond",
+    "plan",
+    "fusion_applied",
+    "details",
+)
+
+
 def execute(
     sim: Simulator,
     workload: Workload,
@@ -526,7 +560,7 @@ def execute(
         if keys_path:
             common += ["--keys", keys_path]
         if sim.kind == "exec":
-            argv = [RUNNER, "exec", *common, "--backend", sim.backend or "auto"]
+            argv = [_executable(sim), "exec", *common, "--backend", sim.backend or "auto"]
         else:
             argv = [python_executable(), WORKER, sim.name, "exec", *common, "--threads", str(threads)]
         proc = run_process(argv, workload.text, env, timeout_s)
@@ -547,7 +581,7 @@ def execute(
         if data.get("first_internal_ms") is not None:
             obs["first_internal_ms"] = data["first_internal_ms"]
         obs["version"] = data.get("version")
-        for key in ("resolved_backend", "route", "engine", "exactness", "bond", "plan", "fusion_applied", "details"):
+        for key in RUN_FIELDS:
             if data.get(key) is not None:
                 obs[key] = data[key]
         hashes = data.get("output_hashes") or []
@@ -562,6 +596,12 @@ def execute(
     obs["phases"] = {"process_wall_ms": first.wall_ms}
     if status != "ok":
         return obs
+    try:
+        cold = _last_json(first.stdout).get("first_ms")
+    except ValueError:
+        cold = None
+    if cold is not None:
+        obs["phases"]["first_ms"] = cold
     # The cold process time bounds one call from above; the budget rule then
     # matches the one the exec runners apply internally.
     affordable = int(budget_s * 1000.0 // max(first.wall_ms, 1e-3))

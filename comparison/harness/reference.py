@@ -42,6 +42,9 @@ def _matrix(name: str, angle: float | None) -> np.ndarray:
     if name == "ry":
         c, s = math.cos(angle / 2), math.sin(angle / 2)
         return np.array([[c, -s], [s, c]], dtype=np.complex128)
+    if name == "rx":
+        c, s = math.cos(angle / 2), math.sin(angle / 2)
+        return np.array([[c, -1j * s], [-1j * s, c]], dtype=np.complex128)
     if name == "rz":
         return np.diag([np.exp(-0.5j * angle), np.exp(0.5j * angle)])
     u = np.eye(4, dtype=np.complex128)
@@ -54,6 +57,8 @@ def _matrix(name: str, angle: float | None) -> np.ndarray:
         u = np.array([[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]], dtype=np.complex128)
     elif name == "cp":
         u[3, 3] = np.exp(1j * angle)
+    elif name == "rzz":
+        u = np.diag(np.exp(0.5j * angle * np.array([-1, 1, 1, -1]))).astype(np.complex128)
     else:
         raise ValueError(f"no matrix for {name}")
     return u.reshape(2, 2, 2, 2)

@@ -34,7 +34,7 @@ import numpy as np
 
 from . import runners, stats, validate
 
-COMPARE_GROUPS = ("headline", "sampling", "seeds", "tn", "mpsdeep", "highshot")
+COMPARE_GROUPS = ("headline", "sampling", "seeds", "tn", "mpsdeep", "highshot", "zoo")
 # The PRISM-Q configuration a group's ratios divide by, where it is not automatic dispatch.
 RATIO_BASE = {"mpsdeep": "prismq:mps-256"}
 
@@ -73,6 +73,8 @@ def row_label(wl: dict) -> str:
     bits = [wl["family"], f"{wl['num_qubits']}q"]
     if "depth" in p and wl["family"] in ("rcs", "lowent"):
         bits.append(f"d{p['depth']}")
+    if "steps" in p:
+        bits.append(f"{p['steps']} steps")
     if wl["family"] == "disjoint":
         bits.append(p.get("layout", ""))
     if p.get("measured") == "half":
@@ -85,7 +87,8 @@ def row_label(wl: dict) -> str:
 
 
 def family_order(wl: dict) -> tuple:
-    order = ["rcs", "qft", "qv", "clifford", "lowent", "disjoint", "midcircuit", "sampling"]
+    order = ["rcs", "qft", "qv", "hea", "qaoa", "tfim", "adder", "clifford", "ghz", "bv", "lowent", "wstate"]
+    order += ["disjoint", "midcircuit", "sampling"]
     fam = wl["family"]
     return (
         order.index(fam) if fam in order else 99,
@@ -140,6 +143,8 @@ def _normalize(record: dict) -> dict:
             "reason": f"fewer than {validate.MIN_SHOTS} shots: statistics not tested",
         }
     v = record.get("validation")
+    if v and v.get("pass") is None and not v.get("role"):
+        v["role"] = "untested"
     if v and ("min_p_value" in v or "z_threshold" in v) and "min_detectable" not in v:
         shots = record["workload"]["shots"]
         statistical = (v.get("against_exact") or 0) - (v.get("deterministic") or 0) + (v.get("against_simulator") or 0)

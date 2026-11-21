@@ -175,7 +175,9 @@ int main(int argc, char** argv) {
         (void)sink;
         printTimes(program, times);
     } else if (command == "probabilities") {
+        const auto start = std::chrono::steady_clock::now();
         Probs probs = run(program);
+        const double first_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         std::ofstream out(argv[2], std::ios::binary);
         out.write(reinterpret_cast<const char*>(probs.data.get()),
                   static_cast<std::streamsize>(probs.size * sizeof(double)));
@@ -187,8 +189,8 @@ int main(int argc, char** argv) {
         }
         std::printf(
             "{\"schema\":\"prismq-compare-runner/2\",\"simulator\":\"quest\",\"num_qubits\":%d,"
-            "\"num_operations\":%zu,\"length\":%zu,\"dtype\":\"<f8\",\"path\":\"%s\"}\n",
-            program.numQubits, program.ops.size(), probs.size, path.c_str());
+            "\"num_operations\":%zu,\"length\":%zu,\"dtype\":\"<f8\",\"path\":\"%s\",\"first_ms\":%.4f}\n",
+            program.numQubits, program.ops.size(), probs.size, path.c_str(), first_ms);
     } else {
         usage();
     }

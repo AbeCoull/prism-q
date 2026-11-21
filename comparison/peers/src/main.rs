@@ -404,7 +404,10 @@ fn main() {
         "probabilities" => {
             let path = args.get(3).unwrap_or_else(|| usage());
             let program = parse_gate_list(&read_stdin());
-            let probs = run(&mut prepare(sim.kind, &program), sim.lsb_first);
+            let mut prepared = prepare(sim.kind, &program);
+            let start = Instant::now();
+            let probs = run(&mut prepared, sim.lsb_first);
+            let first_ms = start.elapsed().as_secs_f64() * 1000.0;
             let mut bytes = Vec::with_capacity(probs.len() * 8);
             for p in &probs {
                 bytes.extend_from_slice(&p.to_le_bytes());
@@ -416,12 +419,13 @@ fn main() {
             writeln!(
                 out,
                 "{{\"schema\":\"prismq-compare-runner/2\",\"simulator\":\"{}\",\"num_qubits\":{},\
-                 \"num_operations\":{},\"length\":{},\"dtype\":\"<f8\",\"path\":{:?}}}",
+                 \"num_operations\":{},\"length\":{},\"dtype\":\"<f8\",\"path\":{:?},\"first_ms\":{:.4}}}",
                 sim.name,
                 program.num_qubits,
                 program.ops.len(),
                 probs.len(),
-                path
+                path,
+                first_ms
             )
             .unwrap_or_else(|err| fail(5, format!("failed to write to stdout: {err}")));
         }

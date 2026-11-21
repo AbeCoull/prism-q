@@ -4,9 +4,13 @@ Each profile is declared before it runs, repetition policy included, so a
 reader can see what was asked for as well as what came back. A simulator that
 cannot run a workload is still listed against it; the run records why.
 
-`smoke` finishes in a few minutes on a laptop. `reference` is the published
-run. `full` is every size in the matrix; on a 4-core desktop it takes most of a
-day and needs 32 GB for the 28-qubit rows.
+`smoke` finishes in a few minutes. `reference` is the published run, sized for a
+24-thread host with 32 GB of RAM. `full` adds every peer at every dense size.
+
+A scaling ladder is a run of cells sharing one `ladder` key, ordered by register
+width. Each simulator climbs it until a rung times out, is refused for memory, or
+takes longer than `ceiling_s` for one call; the run records that rung as the
+simulator's ceiling and skips the wider rungs for it.
 """
 
 from __future__ import annotations
@@ -43,6 +47,8 @@ class Cell:
     timeout_s: float = 600.0
     sim_threads: dict[str, list[int]] = field(default_factory=dict)
     excluded: dict[str, str] = field(default_factory=dict)
+    ladder: str | None = None
+    ceiling_s: float | None = None
     profile_simulators: list[str] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -98,9 +104,9 @@ DEEP_MPS_SHOTS = 100
 # their check detects from about 0.23 to 0.07; depth 16 rows cost too much per call to repeat.
 DEEP_MPS_POWER_SHOTS = 1000
 SWEEP_CAPS = (2, 4, 8, 16, 32)
-# Cost of one quimb CircuitMPS call (gates plus 100 samples, bond cap 256) per qubit, measured on
-# the reference host, and the widest row it runs at so cold call plus warm calls stay near two minutes.
-QUIMB_MPS_COST = {12: (0.07, 500), 16: (0.54, 50)}
+# Cost of one quimb CircuitMPS call (gates plus 100 samples, bond cap 256) per qubit, measured on the
+# 24-thread host, and the widest row it runs at so cold call plus warm calls stay near two minutes.
+QUIMB_MPS_COST = {12: (0.054, 500), 16: (0.39, 100)}
 
 
 def _sweep_sims() -> list[str]:
@@ -113,7 +119,7 @@ def _quimb_mps_excluded(n: int, depth: int) -> dict[str, str]:
         return {}
     return {
         "quimb-mps:256": (
-            f"one quimb CircuitMPS call costs about {rate:g} s per qubit at depth {depth} on the reference "
+            f"one quimb CircuitMPS call costs about {rate:g} s per qubit at depth {depth} on the 24-thread "
             f"host; rows past {limit} qubits would exceed the row budget"
         )
     }
@@ -156,6 +162,91 @@ def _wide_cells(threads: int) -> list[Cell]:
     return cells
 
 
+ZOO_DENSE = ("hea", "qaoa", "tfim", "adder")
+AER_STABILIZER_SLOW = (
+    "one Aer stabilizer call on a 1,000-qubit GHZ circuit took about 14 s on the 24-thread host; the "
+    "stabilizer ladder times its wider rows instead"
+)
+LADDER_POLICY = {"iterations": 3, "min_iterations": 1, "budget_s": 15.0, "timeout_s": 600.0, "ceiling_s": 60.0}
+DENSE_LADDER_SIMS = ["prismq:statevector", "prismq:gpu", "aer-statevector", "qsim", "quest"]
+STABILIZER_LADDER_SIMS = ["prismq", "stim", "aer-stabilizer"]
+MPS_LADDER_SIMS = ["prismq", "prismq:mps-64", "aer-mps", "quimb-mps:64"]
+TN_LADDER_SIMS = ["prismq", "prismq:tensor-network", "quimb-tn", "aer-mps"]
+FACTORED_LADDER_SIMS = ["prismq", "prismq:factored", "aer-mps"]
+
+
+def _zoo_dense(runner: str, family: str, n: int) -> w.Workload:
+    """One dense zoo circuit on `n` qubits; the adder takes the even width at or below `n`."""
+    if family == "hea":
+        return w.hea(runner, n)
+    if family == "qaoa":
+        return w.qaoa(n)
+    if family == "tfim":
+        return w.tfim(n, 10)
+    return w.adder((n - 2) // 2)
+
+
+def _dense_ladder(runner: str, family: str, n: int) -> w.Workload:
+    if family == "rcs":
+        return w.rcs(n, 10)
+    if family == "qft":
+        return w.qft(runner, n)
+    return _zoo_dense(runner, family, n)
+
+
+def ladder(key: str, workloads: list[w.Workload], sims: list[str], threads: list[int], **policy) -> list[Cell]:
+    """Cells for one scaling ladder, narrowest rung first; `policy` overrides `LADDER_POLICY`."""
+    merged = {**LADDER_POLICY, **policy}
+    rungs = sorted(workloads, key=lambda wl: wl.num_qubits)
+    return [Cell("scaling", wl, list(sims), threads, ladder=key, **merged) for wl in rungs]
+
+
+def _scaling_cells(runner: str, threads: int) -> list[Cell]:
+    """Every family climbed until each simulator reaches its ceiling on the host."""
+    t = [threads]
+    cells: list[Cell] = []
+    for family in ("rcs", "qft", "hea", "qaoa"):
+        widths = [n for n in (20, 24, 26, 28, 29, 30) if n % 2 == 0 or family in ("rcs", "qft", "hea")]
+        rungs = [_dense_ladder(runner, family, n) for n in widths]
+        cells += ladder(f"dense/{family}", rungs, DENSE_LADDER_SIMS, t)
+    wide = (1000, 10_000, 100_000)
+    stab = {"timeout_s": 300.0, "sim_threads": _with_one_thread(threads)}
+    cells += ladder("stabilizer/ghz", [w.ghz(n, 1000) for n in wide], STABILIZER_LADDER_SIMS, t, **stab)
+    cells += ladder("stabilizer/bv", [w.bv(n, 1000) for n in wide], STABILIZER_LADDER_SIMS, t, **stab)
+    rungs = [w.clifford(n, 1000) for n in (1000, 10_000, 30_000)]
+    cells += ladder("stabilizer/clifford", rungs, STABILIZER_LADDER_SIMS, t, **stab)
+    long = (100, 300, 1000, 3000, 10_000)
+    cells += ladder("mps/lowent", [w.lowent(n, 4, 1000) for n in long], MPS_LADDER_SIMS, t)
+    cells += ladder("mps/wstate", [w.wstate(n, 1000) for n in long], MPS_LADDER_SIMS, t)
+    expval = (64, 256, 1024, 4096)
+    cells += ladder("tn/rcs", [w.expval(n, 8, 4) for n in expval], TN_LADDER_SIMS, t)
+    cells += ladder("tn/tfim", [w.tfim(n, 4, "expval", observables=4) for n in expval], TN_LADDER_SIMS, t)
+    cells += ladder(
+        "factored/disjoint", [w.disjoint(n, 1000) for n in (100, 1000, 3000, 10_000)], FACTORED_LADDER_SIMS, t
+    )
+    return cells
+
+
+def _zoo_cells(runner: str, threads: int, sizes: tuple[int, ...], slow_limit: int, quest_limit: int) -> list[Cell]:
+    """The wider circuit zoo against every peer that can run it."""
+    t = [threads]
+    cells = [
+        Cell("zoo", _zoo_dense(runner, family, n), _dense_sims(n, slow_limit, quest_limit), t)
+        for family in ZOO_DENSE
+        for n in sizes
+    ]
+    stab = ["prismq", "stim", "aer-stabilizer"]
+    for n in (100, 1000, 10_000):
+        slow = {"aer-stabilizer": AER_STABILIZER_SLOW} if n > 1000 else {}
+        for wl in (w.ghz(n, 1000), w.bv(n, 1000)):
+            cells.append(
+                Cell("zoo", wl, list(stab), t, timeout_s=300.0, sim_threads=_with_one_thread(threads), excluded=slow)
+            )
+    for n in (50, 100, 200):
+        cells.append(Cell("zoo", w.wstate(n, 1000), ["prismq", "aer-mps", "aer-automatic"], t, timeout_s=300.0))
+    return cells
+
+
 def smoke(runner: str, threads: int) -> Profile:
     t = [threads]
     cells = [
@@ -185,21 +276,34 @@ def smoke(runner: str, threads: int) -> Profile:
             t,
             sim_threads=_with_one_thread(threads),
         ),
+        Cell("tn", w.tfim(32, 4, "expval", observables=4), list(TN_PEERS), t),
     ]
+    cells += [Cell("zoo", _zoo_dense(runner, f, 12), _dense_sims(12, 12, 12), t) for f in ZOO_DENSE]
+    stab = ["prismq", "stim", "aer-stabilizer"]
+    for wl in (w.ghz(100, 200), w.bv(100, 200)):
+        cells.append(Cell("zoo", wl, list(stab), t, sim_threads=_with_one_thread(threads)))
+    cells.append(Cell("zoo", w.wstate(50, 200), ["prismq", "aer-mps", "aer-automatic"], t))
+    cells += ladder("dense/rcs", [w.rcs(n, 10) for n in (14, 16, 18)], DENSE_LADDER_SIMS, t)
+    one = {"sim_threads": _with_one_thread(threads)}
+    cells += ladder("stabilizer/ghz", [w.ghz(n, 200) for n in (100, 1000)], STABILIZER_LADDER_SIMS, t, **one)
+    cells += ladder("mps/wstate", [w.wstate(n, 200) for n in (50, 200)], MPS_LADDER_SIMS, t)
+    cells += ladder("tn/tfim", [w.tfim(n, 4, "expval", observables=4) for n in (32, 64)], TN_LADDER_SIMS, t)
     for cell in cells:
         cell.iterations, cell.min_iterations, cell.budget_s, cell.timeout_s = 3, 2, 5.0, 120.0
+        if cell.ladder:
+            cell.ceiling_s = 10.0
     return Profile("smoke", "every family at a small size, every adapter, a few seconds per row", cells)
 
 
 def reference(runner: str, threads: int) -> Profile:
     t = [threads]
     cells: list[Cell] = []
-    for n in (20, 24, 26):
+    for n in (20, 24, 26, 28):
         for depth in (10, 20):
-            cells.append(Cell("headline", w.rcs(n, depth), _dense_sims(n, 20, 24), t))
-        cells.append(Cell("headline", w.qft(runner, n), _dense_sims(n, 20, 24) + [QFT_CONTROL], t))
+            cells.append(Cell("headline", w.rcs(n, depth), _dense_sims(n, 24, 28), t, timeout_s=1200.0))
+        cells.append(Cell("headline", w.qft(runner, n), _dense_sims(n, 24, 28) + [QFT_CONTROL], t, timeout_s=1200.0))
     for n in (16, 20, 24):
-        cells.append(Cell("headline", w.exported(runner, "qv", n), _dense_sims(n, 20, 24), t))
+        cells.append(Cell("headline", w.exported(runner, "qv", n), _dense_sims(n, 24, 24), t))
 
     stab = ["prismq", "stim"]
     for n in (100, 1000, 10000):
@@ -235,8 +339,8 @@ def reference(runner: str, threads: int) -> Profile:
     cells.append(Cell("headline", w.midcircuit(18, 1000), mid, t, min_iterations=2, timeout_s=600.0))
 
     scaling = ["prismq", "aer-statevector", "qsim", "quest"]
-    for wl in (w.rcs(22, 10), w.qft(runner, 22), w.exported(runner, "qv", 20)):
-        cells.append(Cell("threads", wl, scaling, _thread_counts((1, 2, 4), threads)))
+    for wl in (w.rcs(24, 10), w.qft(runner, 24), w.exported(runner, "qv", 22), w.qaoa(24)):
+        cells.append(Cell("threads", wl, scaling, _thread_counts((1, 2, 4, 8, 12, 16), threads)))
 
     for wl in (
         w.rcs(20, 10),
@@ -246,6 +350,8 @@ def reference(runner: str, threads: int) -> Profile:
         w.disjoint(100, 1000),
         w.sampling(20, 100_000),
         w.midcircuit(12, 1000),
+        w.qaoa(20),
+        w.ghz(1000, 1000),
     ):
         cells.append(Cell("dispatch", wl, _dispatch_sims(wl), t, budget_s=15.0, timeout_s=180.0))
 
@@ -258,8 +364,13 @@ def reference(runner: str, threads: int) -> Profile:
         cells.append(Cell("seeds", w.rcs(20, 10, seed), ["prismq", "aer-statevector", "qsim"], t))
         cells.append(Cell("seeds", w.exported(runner, "qv", 20, seed), ["prismq", "aer-statevector", "qsim"], t))
     cells += _wide_cells(threads)
+    cells += [Cell("tn", w.tfim(n, 4, "expval", observables=4), list(TN_PEERS), t) for n in (32, 64, 128, 256)]
+    cells += _zoo_cells(runner, threads, (20, 24, 26), 24, 28)
+    cells += _scaling_cells(runner, threads)
     return Profile(
-        "reference", "the published subset: every family, sizes that fit about three hours on a 4-core host", cells
+        "reference",
+        "the published run: every family against every peer that can run it, then each family scaled to its ceiling",
+        cells,
     )
 
 
@@ -270,10 +381,9 @@ def full(runner: str, threads: int) -> Profile:
     for n in (20, 24, 26, 28):
         for depth in (10, 20):
             dense.append(Cell("headline", w.rcs(n, depth), _dense_sims(n, 28, 28), t, timeout_s=3600.0))
-    for n in (20, 24, 26):
-        dense.append(Cell("headline", w.qft(runner, n), _dense_sims(n, 26, 26) + [QFT_CONTROL], t, timeout_s=3600.0))
-    for n in (16, 20, 24):
-        dense.append(Cell("headline", w.exported(runner, "qv", n), _dense_sims(n, 24, 24), t, timeout_s=3600.0))
+        dense.append(Cell("headline", w.qft(runner, n), _dense_sims(n, 28, 28) + [QFT_CONTROL], t, timeout_s=3600.0))
+    for n in (16, 20, 24, 26):
+        dense.append(Cell("headline", w.exported(runner, "qv", n), _dense_sims(n, 26, 26), t, timeout_s=3600.0))
     widened = {c.workload.workload_id for c in dense}
     base = reference(runner, threads)
     cells = dense + [
@@ -282,9 +392,9 @@ def full(runner: str, threads: int) -> Profile:
         if c.group != "threads" and not (c.group == "headline" and c.workload.workload_id in widened)
     ]
     scaling = ["prismq", "aer-statevector", "qsim", "quest"]
-    for wl in (w.rcs(24, 10), w.rcs(26, 10), w.qft(runner, 26), w.exported(runner, "qv", 24)):
-        cells.append(Cell("threads", wl, scaling, _thread_counts((1, 2, 4, 8, 16), threads)))
-    return Profile("full", "every size in the matrix, all thread counts up to 16 where the host has them", cells)
+    for wl in (w.rcs(26, 10), w.rcs(28, 10), w.qft(runner, 28), w.exported(runner, "qv", 24)):
+        cells.append(Cell("threads", wl, scaling, _thread_counts((1, 2, 4, 6, 8, 12, 16, 20), threads)))
+    return Profile("full", "the reference run with every peer at every dense size and more thread counts", cells)
 
 
 PROFILES = {"smoke": smoke, "reference": reference, "full": full}

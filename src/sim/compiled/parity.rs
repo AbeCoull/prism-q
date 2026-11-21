@@ -463,7 +463,11 @@ pub(super) fn minimize_flip_row_weight(flip_rows: &mut [Vec<u64>]) -> (usize, us
 fn minimize_flat<const W: usize>(flat: &mut [u64], rank: usize) -> usize {
     let rows = flat.as_chunks_mut::<W>().0;
     let mut weights: Vec<u32> = rows.iter().map(|r| row_weight(r)).collect();
+    let mut overlaps: Option<ColumnRows> = None;
     for _round in 0..MAX_WEIGHT_MIN_ROUNDS {
+        if overlaps.is_none() {
+            overlaps = ColumnRows::build_if_worthwhile(rows.as_flattened(), &weights, W);
+        }
         let mut improved = false;
         for i in 0..rank {
             let wi = weights[i];
@@ -473,7 +477,7 @@ fn minimize_flat<const W: usize>(flat: &mut [u64], rank: usize) -> usize {
             let ri = rows[i];
             let mut best_j = usize::MAX;
             let mut best_w = wi;
-            for (j, rj) in rows.iter().enumerate() {
+            let mut consider = |j: usize, rj: &[u64; W]| {
                 let mut xor_w = 0u32;
                 for w in 0..W {
                     xor_w += (ri[w] ^ rj[w]).count_ones();
@@ -482,9 +486,20 @@ fn minimize_flat<const W: usize>(flat: &mut [u64], rank: usize) -> usize {
                     best_w = xor_w;
                     best_j = j;
                 }
+            };
+            match overlaps.as_mut().filter(|o| wi as usize <= o.limit) {
+                Some(o) => for_each_set_bit(o.rows_overlapping(&ri), |j| consider(j, &rows[j])),
+                None => {
+                    for (j, rj) in rows.iter().enumerate() {
+                        consider(j, rj);
+                    }
+                }
             }
             if best_j != usize::MAX {
                 let rj = rows[best_j];
+                if let Some(o) = overlaps.as_mut() {
+                    o.toggle(&rj, i);
+                }
                 for w in 0..W {
                     rows[i][w] ^= rj[w];
                 }
@@ -501,7 +516,11 @@ fn minimize_flat<const W: usize>(flat: &mut [u64], rank: usize) -> usize {
 
 fn minimize_flat_dyn(flat: &mut [u64], rank: usize, words: usize) -> usize {
     let mut weights: Vec<u32> = flat.chunks_exact(words).map(row_weight).collect();
+    let mut overlaps: Option<ColumnRows> = None;
     for _round in 0..MAX_WEIGHT_MIN_ROUNDS {
+        if overlaps.is_none() {
+            overlaps = ColumnRows::build_if_worthwhile(flat, &weights, words);
+        }
         let mut improved = false;
         for i in 0..rank {
             let wi = weights[i];
@@ -511,14 +530,27 @@ fn minimize_flat_dyn(flat: &mut [u64], rank: usize, words: usize) -> usize {
             let ri = &flat[i * words..(i + 1) * words];
             let mut best_j = usize::MAX;
             let mut best_w = wi;
-            for (j, rj) in flat.chunks_exact(words).enumerate() {
+            let mut consider = |j: usize, rj: &[u64]| {
                 let xor_w: u32 = ri.iter().zip(rj).map(|(&a, &b)| (a ^ b).count_ones()).sum();
                 if xor_w < best_w && j != i {
                     best_w = xor_w;
                     best_j = j;
                 }
+            };
+            match overlaps.as_mut().filter(|o| wi as usize <= o.limit) {
+                Some(o) => for_each_set_bit(o.rows_overlapping(ri), |j| {
+                    consider(j, &flat[j * words..(j + 1) * words]);
+                }),
+                None => {
+                    for (j, rj) in flat.chunks_exact(words).enumerate() {
+                        consider(j, rj);
+                    }
+                }
             }
             if best_j != usize::MAX {
+                if let Some(o) = overlaps.as_mut() {
+                    o.toggle(&flat[best_j * words..(best_j + 1) * words], i);
+                }
                 for w in 0..words {
                     flat[i * words + w] ^= flat[best_j * words + w];
                 }
@@ -531,6 +563,106 @@ fn minimize_flat_dyn(flat: &mut [u64], rank: usize, words: usize) -> usize {
         }
     }
     weights.iter().map(|&w| w as usize).sum()
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static COLUMN_INDEX_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static NARROWED_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// For each column, the set of rows holding a bit in it. A row sharing no column with
+/// row `i` XORs it to a weight no lower than its own, so the greedy scan for row `i`
+/// can visit only the rows this index lists for its columns, in ascending order, and
+/// pick the same row the full scan picks.
+struct ColumnRows {
+    /// The largest row weight whose scan the index serves.
+    limit: usize,
+    row_words: usize,
+    masks: Vec<u64>,
+    candidates: Vec<u64>,
+}
+
+impl ColumnRows {
+    /// Build the index over `flat` when one round of full scans over the rows it narrows
+    /// outweighs zeroing the masks and toggling every set bit, counted twice to cover the
+    /// rows that improve later.
+    ///
+    /// A row narrows when gathering its candidates costs at most a quarter of a full scan
+    /// and its expected overlaps, bounded by its weight times the total weight over the
+    /// column count, stay under the rank: a candidate costs more to visit than a row of
+    /// the contiguous scan. Weights only fall, so the limit stays safe for later rounds.
+    fn build_if_worthwhile(flat: &[u64], weights: &[u32], words: usize) -> Option<Self> {
+        let rank = weights.len();
+        let row_words = rank.div_ceil(64);
+        let scan = rank * words;
+        let total: usize = weights.iter().map(|&w| w as usize).sum();
+        let cost = 8 * total + 8 * words * row_words;
+        let mut saved = 0;
+        for &w in weights {
+            let w = w as usize;
+            if w != 0 && 4 * w * row_words <= scan && w * total <= 64 * scan {
+                saved += scan;
+                if saved >= cost {
+                    break;
+                }
+            }
+        }
+        if saved < cost {
+            return None;
+        }
+        #[cfg(test)]
+        COLUMN_INDEX_BUILDS.with(|n| n.set(n.get() + 1));
+        let mut index = Self {
+            limit: (scan / (4 * row_words)).min(64 * scan / total),
+            row_words,
+            masks: vec![0u64; words * 64 * row_words],
+            candidates: vec![0u64; row_words],
+        };
+        for (i, row) in flat.chunks_exact(words).enumerate() {
+            index.toggle(row, i);
+        }
+        Some(index)
+    }
+
+    /// Flip row `i`'s membership in every column set in `diff`.
+    #[inline]
+    fn toggle(&mut self, diff: &[u64], i: usize) {
+        let bit = 1u64 << (i % 64);
+        let word = i / 64;
+        for_each_set_bit(diff, |c| self.masks[c * self.row_words + word] ^= bit);
+    }
+
+    /// The rows sharing a column with `row`, as a bit set over rows.
+    fn rows_overlapping(&mut self, row: &[u64]) -> &[u64] {
+        #[cfg(test)]
+        NARROWED_SCANS.with(|n| n.set(n.get() + 1));
+        let Self {
+            row_words,
+            masks,
+            candidates,
+            ..
+        } = self;
+        candidates.fill(0);
+        for_each_set_bit(row, |c| {
+            let mask = &masks[c * *row_words..(c + 1) * *row_words];
+            for (o, &m) in candidates.iter_mut().zip(mask) {
+                *o |= m;
+            }
+        });
+        candidates
+    }
+}
+
+#[inline]
+fn for_each_set_bit(words: &[u64], mut f: impl FnMut(usize)) {
+    for (w, &word) in words.iter().enumerate() {
+        let mut bits = word;
+        while bits != 0 {
+            f(w * 64 + bits.trailing_zeros() as usize);
+            bits &= bits - 1;
+        }
+    }
 }
 
 #[cfg(test)]

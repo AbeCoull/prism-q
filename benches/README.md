@@ -105,6 +105,9 @@ These rows have no CPU twin:
 | `gpu/pauli_sum_grouped/{tfim,heisenberg}/{20,22,24}` | The weighted-observable route on the device state after a two-layer HEA, with the CPU `observable` Hamiltonians; every group is past the pair budget, so each evaluation is the moments pass per group |
 | `gpu/export/{22,24}` | `export_statevector` on a prepared uniform superposition: one device-to-host copy of `2^n` amplitudes into the returned vector, deferred norm at one |
 | `gpu/export/scaled/{22,24}` | The same readback after one measurement, so the in-place `pending_norm` pass runs on top of the copy |
+| `gpu/readout/probabilities/{24,26,28}` | `probabilities()` on a resident state after one H, with the returned vector freed inside the timer: the reduction kernel plus a `2^n` f64 readback |
+| `gpu/readout/e2e_qft/{26,28}` | A QFT through `run()`, where allocation, setup and the probability readback outweigh the gates |
+| `gpu/readout/export/{24,26}` | `export_statevector()` on a resident state after one H, the 16 byte amplitude readback, carried two qubits past `gpu/export` |
 
 ### Shot and QEC benchmarks (bench_shots_perf)
 

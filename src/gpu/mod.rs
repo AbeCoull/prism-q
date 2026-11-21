@@ -425,8 +425,9 @@ impl GpuState {
         self.pending_norm
     }
 
-    /// Read the amplitudes with `pending_norm` applied. The device copy lands in the
-    /// returned vector's own storage, with no second host copy.
+    /// Read the amplitudes with `pending_norm` applied. The readback buffer becomes the
+    /// returned vector without a conversion copy. With `parallel`, from 18 qubits (4 MiB)
+    /// the bytes pass through the device's pinned staging slots on the way in.
     pub(crate) fn export_statevector(&self) -> Result<Vec<Complex64>> {
         let mut raw = vec![0.0_f64; self.buffer.len()];
         self.buffer.copy_to_host(self.context.device(), &mut raw)?;

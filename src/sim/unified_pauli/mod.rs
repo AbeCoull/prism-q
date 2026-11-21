@@ -4,12 +4,12 @@
 //! path engine carries the same sum through a noise model. None materializes a
 //! state vector.
 //!
-//! Z-axis rotations (`T`, `Tdg`, `Rz`, `P`) and the two-qubit `Rzz` branch
-//! natively, as do `Rx`, `Ry` and multi-qubit `PauliRot` strings in SPD and the
-//! Pauli path engine; SPP lowers those three to Clifford conjugation around one
-//! `Rz` before the run, a `Fused` matrix lowers to the named gate it equals up
-//! to phase or to its ZYZ Euler triple, and a `Cu` with a diagonal or Pauli
-//! target lowers to Z rotations and Cliffords.
+//! Z-axis rotations (`T`, `Tdg`, `Rz`, `P`), the two-qubit `Rzz` and multi-qubit
+//! `PauliRot` strings branch natively, as do `Rx` and `Ry` in SPD and the Pauli
+//! path engine; SPP lowers those two to Clifford conjugation around one `Rz`
+//! before the run, a `Fused` matrix lowers to the named gate it equals up to
+//! phase or to its ZYZ Euler triple, and a `Cu` with a diagonal or Pauli target
+//! lowers to Z rotations and Cliffords.
 
 use num_complex::Complex64;
 

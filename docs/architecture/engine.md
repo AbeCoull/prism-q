@@ -58,9 +58,9 @@ Other extraction failures propagate as errors too.
 `marginals()` needs a direct Pauli marginal route or backend probabilities, and returns
 `BackendUnsupported` when it has neither rather than fabricating uniform marginals. The
 stochastic and deterministic Pauli backends accept only unitary circuits of Clifford gates
-and Pauli rotations, with no measurement, reset or conditional. `T`, `Tdg`, `Rz`, `P` and
-`Rzz` branch natively, and the deterministic engine also branches on `Rx`, `Ry` and
-multi-qubit `PauliRot`. The stochastic engine lowers those three to Clifford conjugation
+and Pauli rotations, with no measurement, reset or conditional. `T`, `Tdg`, `Rz`, `P`,
+`Rzz` and multi-qubit `PauliRot` branch natively, and the deterministic engine also
+branches on `Rx` and `Ry`. The stochastic engine lowers those two to Clifford conjugation
 around one `Rz`. `Fused` matrices lower to the named gate they equal up to phase, or to an
 Euler triple, and a `Cu` with a diagonal or Pauli target lowers to Z rotations and
 Cliffords.

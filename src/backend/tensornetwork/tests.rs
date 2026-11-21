@@ -5,7 +5,10 @@ use super::plan::{
     PLANNER_CALLS, RESTART_PEAK_THRESHOLD, contract_meta, contraction_result_size,
     plan_with_restarts,
 };
-use super::slice::{choose_slices, contract_slices, kept_rank, pin_axes, replay_plan, split_bond};
+use super::slice::{
+    SLICE_SEARCHES, cached_plan, choose_slices, contract_slices, contract_within, kept_rank,
+    pin_axes, replay_plan, split_bond,
+};
 use super::*;
 use crate::backend::Backend;
 use crate::backend::statevector::StatevectorBackend;
@@ -617,6 +620,36 @@ fn test_slice_choice_refuses_what_the_budget_cannot_reach() {
 }
 
 #[test]
+fn test_cached_slice_choice_matches_the_uncached_search() {
+    let circuit = crate::circuits::hardware_efficient_ansatz(12, 4, 42);
+    let terms = [PauliTerm::z(0), PauliTerm::z(6)];
+    let network = scalar_network(&circuit, &terms);
+    let plan = plan_with_restarts(&network.tensors);
+    let metas: Vec<TensorMeta> = network.tensors.iter().map(TensorMeta::of).collect();
+    let limits = ContractionLimits {
+        peak_cap: 1 << 8,
+        peak_source: LimitSource::Request,
+        slice_budget: 1 << 10,
+        tolerance: None,
+    };
+    assert!(plan.peak > limits.peak_cap, "the fixture never slices");
+    let uncached = choose_slices(&metas, &plan, limits).expect("the budget reaches the cap");
+
+    let mut tensors = network.tensors.clone();
+    let direct = contract_within(&mut tensors, &plan, limits, "tn", "test").unwrap();
+
+    let mut slot = None;
+    for expected_searches in [1, 0] {
+        let before = slice_searches();
+        let mut tensors = network.tensors.clone();
+        let cached = contract_cached(&mut tensors, &mut slot, limits, "tn", "test").unwrap();
+        assert_eq!(slot.as_ref().unwrap().cached_slice(), Some(Some(&uncached)));
+        assert_eq!(slice_searches() - before, expected_searches);
+        crate::test_support::assert_amps_close(&cached.data, &direct.data, 1e-12);
+    }
+}
+
+#[test]
 fn test_pinned_axes_keep_their_extent_at_one() {
     let tensor = Tensor {
         data: (0..6).map(|i| Complex64::new(i as f64, 0.0)).collect(),
@@ -1065,6 +1098,49 @@ fn test_plan_cache_plans_each_position_once() {
     let before = planner_calls();
     tn.sample_native(8, 42).unwrap();
     assert_eq!(planner_calls() - before, n);
+}
+
+fn slice_searches() -> usize {
+    SLICE_SEARCHES.with(|calls| calls.get())
+}
+
+// Sample hardware_efficient_ansatz(8, 3) through the sweep at a 2^7 peak cap,
+// once searching on every contraction and once through the cache, and count
+// the slice searches of each run.
+fn sample_capped_with_and_without_cache(tolerance: Option<f64>, shots: usize) -> (usize, usize) {
+    let n = 8;
+    let limits = ResolvedLimits::resolve(Some(&crate::Limits::new().max_tn_peak_qubits(7)));
+    let mut tn = TensorNetworkBackend::with_limits(42, tolerance, &limits);
+    tn.init(n, 0).unwrap();
+    for inst in &crate::circuits::hardware_efficient_ansatz(n, 3, 42).instructions {
+        tn.apply(inst).unwrap();
+    }
+
+    let before = slice_searches();
+    let uncached = tn.sample_sweep(shots, 42, None).unwrap();
+    let uncached_searches = slice_searches() - before;
+    assert!(uncached_searches >= shots, "the fixture never sliced");
+
+    let before = slice_searches();
+    let cached = tn.sample_native(shots, 42).unwrap();
+    assert_eq!(cached.words, uncached.words);
+    (slice_searches() - before, uncached_searches)
+}
+
+#[test]
+fn test_slice_cache_searches_each_position_once() {
+    let shots = 4;
+    let (cached, uncached) = sample_capped_with_and_without_cache(None, shots);
+    assert_eq!(cached * shots, uncached);
+}
+
+// Truncation picks its kept rank from the data, so the network it leaves to
+// slicing can change between shots; the cache only has to stay transparent
+// and reuse a choice where the shape repeats.
+#[test]
+fn test_slice_cache_matches_uncached_truncated_sweep() {
+    let (cached, uncached) = sample_capped_with_and_without_cache(Some(1e-3), 4);
+    assert!(cached < uncached, "{cached} searches against {uncached}");
 }
 
 #[test]

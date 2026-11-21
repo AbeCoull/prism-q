@@ -129,7 +129,7 @@ use expectation::{
     GateTensorOp, append_gate_tensor, for_each_gate_tensor, observable_axes, pauli_tensor,
 };
 use plan::{TensorMeta, greedy_contract, plan_pairs};
-use slice::{CachedPlan, ContractionLimits, cached_plan, contract_within, last_discarded};
+use slice::{CachedPlan, ContractionLimits, contract_cached, last_discarded};
 use tensor::{Tensor, contract, transpose};
 
 pub(crate) use expectation::{
@@ -282,11 +282,11 @@ impl TensorNetworkBackend {
     /// Qubit-by-qubit conditional sampling, one doubled-network contraction
     /// per qubit per shot; the module docstring carries the cost trade.
     ///
-    /// Each position's contraction is planned on the first shot and replayed
-    /// on the rest: the projector is absorbed into its owner and leg ids
-    /// restart with the state, so the doubled network at a position carries
-    /// the same metadata in every shot. The cache lives for this call only,
-    /// and a fingerprint of that metadata guards every replay.
+    /// Each position's contraction is planned, and past the cap sliced, on the
+    /// first shot and replayed on the rest: the projector is absorbed into its
+    /// owner and leg ids restart with the state, so the doubled network at a
+    /// position carries the same metadata in every shot. The cache lives for
+    /// this call only, and a fingerprint of that metadata guards every replay.
     fn sample_native(&mut self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
         let mut plans: Vec<Option<CachedPlan>> = std::iter::repeat_with(|| None)
             .take(self.num_qubits)
@@ -433,16 +433,13 @@ impl TensorNetworkBackend {
         let bra_leg = ket_leg + self.next_leg;
         let operation = "reduced density matrix";
         let rho = match plan {
-            Some(slot) => {
-                let plan = cached_plan(&network, slot);
-                contract_within(
-                    &mut network,
-                    plan,
-                    self.contraction_limits(),
-                    self.name(),
-                    operation,
-                )?
-            }
+            Some(slot) => contract_cached(
+                &mut network,
+                slot,
+                self.contraction_limits(),
+                self.name(),
+                operation,
+            )?,
             None => greedy_contract(
                 &mut network,
                 self.contraction_limits(),

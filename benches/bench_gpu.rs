@@ -452,6 +452,104 @@ fn bench_gpu_readout(c: &mut Criterion) {
     group.finish();
 }
 
+// `gpu/sample` times terminal shots and counts on the device statevector through the
+// public builder: allocation, one HEA layer, the probability readback and the host walk.
+// `counts_partial` measures 10 qubits spread across the register into 10 bits, and
+// `counts/14_1m` draws a million shots from a narrow register.
+
+fn sampled_hea(n: usize, measured: &[usize]) -> Circuit {
+    let mut circuit = Circuit::new(n, measured.len());
+    circuit
+        .instructions
+        .extend(circuits::hardware_efficient_ansatz(n, 1, SEED).instructions);
+    for (cbit, &q) in measured.iter().enumerate() {
+        circuit.add_measure(q, cbit);
+    }
+    circuit
+}
+
+fn bench_gpu_sample(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let mut group = c.benchmark_group("gpu/sample");
+    let fast = is_fast();
+    let counts_sizes: &[usize] = if fast { &[24] } else { &[24, 26, 28] };
+    let shots_sizes: &[usize] = if fast { &[24] } else { &[24, 26] };
+    let partial_sizes: &[usize] = if fast { &[26] } else { &[26, 28] };
+    let kind = gpu_kind(&ctx);
+    let fits = |n: usize| {
+        let fits = ctx.fits_statevector_with_scratch(n).unwrap_or(false);
+        if !fits {
+            eprintln!("SKIP: {n} qubits do not fit free VRAM");
+        }
+        fits
+    };
+    let counts = |kind: &BackendKind, circuit: &Circuit, shots: usize| {
+        sim::simulate(circuit)
+            .backend(kind.clone())
+            .seed(42)
+            .sample_counts(shots)
+            .unwrap()
+    };
+
+    if !fast && fits(14) {
+        let all: Vec<usize> = (0..14).collect();
+        let circuit = sampled_hea(14, &all);
+        configure_width(&mut group, 14);
+        group.bench_function(BenchmarkId::new("counts", "14_1m"), |b| {
+            b.iter(|| counts(&kind, &circuit, 1_000_000));
+        });
+    }
+
+    for &n in counts_sizes {
+        if !fits(n) {
+            continue;
+        }
+        let all: Vec<usize> = (0..n).collect();
+        let circuit = sampled_hea(n, &all);
+        configure_width(&mut group, n);
+        group.bench_function(BenchmarkId::new("counts", n), |b| {
+            b.iter(|| counts(&kind, &circuit, 100_000));
+        });
+        if n == 28 && !fast {
+            group.bench_function(BenchmarkId::new("counts", "28_1m"), |b| {
+                b.iter(|| counts(&kind, &circuit, 1_000_000));
+            });
+        }
+    }
+
+    for &n in shots_sizes {
+        if !fits(n) {
+            continue;
+        }
+        let all: Vec<usize> = (0..n).collect();
+        let circuit = sampled_hea(n, &all);
+        configure_width(&mut group, n);
+        group.bench_function(BenchmarkId::new("shots", n), |b| {
+            b.iter(|| {
+                sim::simulate(&circuit)
+                    .backend(kind.clone())
+                    .seed(42)
+                    .shots(10_000)
+                    .unwrap()
+            });
+        });
+    }
+
+    for &n in partial_sizes {
+        if !fits(n) {
+            continue;
+        }
+        let spread: Vec<usize> = (0..10).map(|i| i * n / 10).collect();
+        let circuit = sampled_hea(n, &spread);
+        configure_width(&mut group, n);
+        group.bench_function(BenchmarkId::new("counts_partial", n), |b| {
+            b.iter(|| counts(&kind, &circuit, 100_000));
+        });
+    }
+
+    group.finish();
+}
+
 // ============================================================================
 // Noisy trajectory (general noise on the GPU statevector)
 // ============================================================================
@@ -1537,6 +1635,7 @@ criterion_group! {
     bench_gpu_throughput,
     bench_gpu_floor,
     bench_gpu_readout,
+    bench_gpu_sample,
     bench_gpu_noisy_kraus,
     bench_gpu_noisy_kraus_mid_measure,
     bench_cpu_noisy_kraus,

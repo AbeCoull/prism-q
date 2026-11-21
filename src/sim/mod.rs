@@ -96,8 +96,8 @@ use shots::{
     sample_shots, shots_from_basis_samples,
 };
 use terminal_sampling::{
-    sample_counts_from_probs, sample_counts_from_state, sample_shots_from_probs,
-    sample_shots_from_state,
+    sample_counts_from_probs, sample_counts_from_state, sample_counts_from_walk,
+    sample_shots_from_probs, sample_shots_from_state, sample_shots_from_walk,
 };
 use unified_pauli::{PauliTerm, SpdTruncation};
 

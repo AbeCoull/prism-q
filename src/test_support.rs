@@ -118,3 +118,20 @@ pub(crate) fn group_strings(backend: &StabilizerBackend) -> Vec<Vec<PauliTerm>> 
     strings.extend((n..2 * n - 1).map(|r| string_of(&[r, r + 1])));
     strings
 }
+
+/// The device context for a test, or `None` after printing a skip line when no GPU is
+/// usable; panics instead under `PRISM_REQUIRE_GPU`.
+#[cfg(feature = "gpu")]
+pub(crate) fn gpu_context_or_skip() -> Option<std::sync::Arc<crate::gpu::GpuContext>> {
+    match crate::gpu::GpuContext::new(0) {
+        Ok(ctx) => Some(ctx),
+        Err(e) => {
+            assert!(
+                std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
+                "PRISM_REQUIRE_GPU is set but no usable GPU was found ({e})"
+            );
+            eprintln!("SKIP: no usable GPU ({e})");
+            None
+        }
+    }
+}

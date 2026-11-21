@@ -144,6 +144,12 @@ pub(crate) struct LauncherScratch {
     /// Three f64s per block for [`super::dense::group_moments`]. Exact length, like
     /// `pauli_result`.
     pub(crate) moment_partials: Option<GpuBuffer<f64>>,
+    /// Terminal sampling buffers of [`super::dense::sample_sorted`]: block totals and
+    /// the walk's state indices at exact length, the job list and offsets grow only.
+    pub(crate) sample_sums: Option<GpuBuffer<f64>>,
+    pub(crate) sample_jobs: Option<GpuBuffer<u32>>,
+    pub(crate) sample_offsets: Option<GpuBuffer<f64>>,
+    pub(crate) sample_out: Option<GpuBuffer<u32>>,
     /// One upload per gate for what does not fit parameter space; see [`stage_blob`].
     pub(crate) blob: BlobScratch,
 }
@@ -267,14 +273,14 @@ pub(crate) fn ensure_capacity<'a, T: DeviceRepr + ValidAsZeroBits>(
 
 /// A device buffer of exactly `len` elements in `slot`, reallocated on any size
 /// change so a readback of its full length matches the request.
-pub(crate) fn ensure_exact<'a>(
-    slot: &'a mut Option<GpuBuffer<f64>>,
+pub(crate) fn ensure_exact<'a, T: DeviceRepr + ValidAsZeroBits>(
+    slot: &'a mut Option<GpuBuffer<T>>,
     device: &GpuDevice,
     len: usize,
-) -> Result<&'a mut GpuBuffer<f64>> {
+) -> Result<&'a mut GpuBuffer<T>> {
     let len = len.max(1);
     if slot.as_ref().is_none_or(|buf| buf.len() != len) {
-        *slot = Some(GpuBuffer::<f64>::alloc_zeros(device, len)?);
+        *slot = Some(GpuBuffer::<T>::alloc_zeros(device, len)?);
     }
     Ok(slot.as_mut().unwrap())
 }
@@ -367,6 +373,8 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "measure_collapse_logged",
     "reset_fold_logged",
     "compute_probabilities",
+    "sample_block_sums",
+    "sample_walk",
     "apply_multi_fused_diagonal",
     "apply_batch_phase",
     "apply_batch_rzz",

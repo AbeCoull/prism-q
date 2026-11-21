@@ -2769,9 +2769,9 @@ fn one_frequencies_from_counts(
         .collect()
 }
 
-// Terminal counts under `gpu_auto` simulate on device and sample from the
-// device-reduced probabilities. CPU `Auto` uses a different sampler over the
-// same distribution, so the frequency comparison is statistical.
+// Terminal counts under `gpu_auto` simulate and sample on the device. CPU `Auto`
+// uses a different sampler over the same distribution, so the frequency comparison is
+// statistical.
 #[test]
 fn auto_gpu_terminal_counts_match_cpu_auto() {
     use prism_q::{BackendKind, simulate};
@@ -2879,8 +2879,8 @@ fn auto_gpu_terminal_shots_match_cpu_auto() {
 }
 
 // Explicit `StatevectorGpu` terminal counts route through the same terminal
-// fast path as `AutoGpu`: device simulation, device-reduced probabilities,
-// and the same host sampler, so identical seeds produce identical counts.
+// fast path as `AutoGpu`: device simulation and the same device sampler, so
+// identical seeds produce identical counts.
 #[test]
 fn statevector_gpu_terminal_counts_match_auto_gpu() {
     use prism_q::simulate;
@@ -2900,6 +2900,58 @@ fn statevector_gpu_terminal_counts_match_auto_gpu() {
         .sample_counts(num_shots)
         .unwrap();
     assert_eq!(auto_gpu.counts, explicit.counts);
+}
+
+// Terminal counts and shots drawn on the device follow the CPU probabilities over a
+// partial map of qubits that are not a prefix of the register, and repeat for a seed.
+#[test]
+fn statevector_gpu_terminal_sampling_matches_cpu_marginals() {
+    use prism_q::{BackendKind, Circuit, simulate};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let n = 16;
+    let measured = [3usize, 9, 14];
+    let shots = 200_000;
+    let unmeasured = prism_q::circuits::random_circuit(n, 6, common::SEED);
+    let probs = simulate(&unmeasured)
+        .backend(BackendKind::Statevector)
+        .seed(42)
+        .run()
+        .expect("cpu run failed")
+        .probabilities
+        .expect("cpu probs missing")
+        .to_vec();
+    let mut marginal = [0.0_f64; 8];
+    for (i, p) in probs.iter().enumerate() {
+        let key: usize = measured
+            .iter()
+            .enumerate()
+            .map(|(bit, &q)| ((i >> q) & 1) << bit)
+            .sum();
+        marginal[key] += p;
+    }
+
+    let mut circuit = Circuit::new(n, measured.len());
+    circuit.instructions.extend(unmeasured.instructions);
+    for (bit, &q) in measured.iter().enumerate() {
+        circuit.add_measure(q, bit);
+    }
+    let gpu = |seed| simulate(&circuit).gpu(f.ctx.clone()).seed(seed);
+    let counts = gpu(42).sample_counts(shots).unwrap().counts;
+    assert_eq!(gpu(42).sample_counts(shots).unwrap().counts, counts);
+    let shot_counts = gpu(43).shots(shots).unwrap().counts();
+    for (label, table) in [("counts", &counts), ("shots", &shot_counts)] {
+        for (key, &p) in marginal.iter().enumerate() {
+            let seen = table.get(&vec![key as u64]).copied().unwrap_or(0);
+            let five_sigma = 5.0 * (p * (1.0 - p) / shots as f64).sqrt();
+            let freq = seen as f64 / shots as f64;
+            assert!(
+                (freq - p).abs() <= five_sigma,
+                "{label} key {key}: {freq} against {p}"
+            );
+        }
+    }
 }
 
 // Expectation values under `gpu_auto` and explicit `.gpu(...)` simulate on

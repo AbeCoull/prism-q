@@ -151,3 +151,11 @@ Seeded output has changed in these releases:
     from one seed per call and one stream per 64 shots and 32 parity columns, in place of
     bits drawn on the host. Fixed-seed shots, counts and marginals from the device
     sampler changed, and they no longer depend on the Rayon thread count.
+  - Terminal shots and counts from a GPU statevector are drawn on the device against a
+    scan of the state in blocks of 4096 amplitudes, with each uniform scaled by the
+    total weight, in place of a host walk over the probability vector. The uniforms are
+    unchanged, so a fixed-seed shot over the full register moves only where its draw
+    lands within rounding of the boundary between two outcomes, and then to the
+    neighbouring outcome. Counts whose map is anything but qubit `i` into bit `i` across
+    the whole register, a partial or permuted map, walk the full state where they sampled
+    a table keyed by the measured bits, so fixed-seed counts on those circuits changed.

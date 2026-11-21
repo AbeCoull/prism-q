@@ -304,8 +304,16 @@ pub(crate) fn run_counts_with(
             backend, meas_map, ..
         } => {
             if backend.is_gpu_resident() {
-                let probs = backend.probabilities()?;
-                sample_counts_from_probs(&probs, &meas_map, bits, num_shots, seed, limits)
+                let walked = sample_counts_from_walk(&meas_map, bits, num_shots, seed, |sorted| {
+                    backend.sample_sorted_on_device(sorted)
+                })?;
+                match walked {
+                    Some(counts) => counts,
+                    None => {
+                        let probs = backend.probabilities()?;
+                        sample_counts_from_probs(&probs, &meas_map, bits, num_shots, seed, limits)
+                    }
+                }
             } else {
                 sample_counts_from_state(
                     backend.state_vector(),
@@ -509,8 +517,16 @@ pub(crate) fn run_shots_with(
             backend, meas_map, ..
         } => {
             let shots = if backend.is_gpu_resident() {
-                let probs = backend.probabilities()?;
-                sample_shots_from_probs(&probs, &meas_map, bits, num_shots, seed)
+                let walked = sample_shots_from_walk(&meas_map, bits, num_shots, seed, |sorted| {
+                    backend.sample_sorted_on_device(sorted)
+                })?;
+                match walked {
+                    Some(shots) => shots,
+                    None => {
+                        let probs = backend.probabilities()?;
+                        sample_shots_from_probs(&probs, &meas_map, bits, num_shots, seed)
+                    }
+                }
             } else {
                 sample_shots_from_state(
                     backend.state_vector(),

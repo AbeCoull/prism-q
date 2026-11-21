@@ -691,6 +691,22 @@ impl StatevectorBackend {
         ))
     }
 
+    /// One state index per ascending uniform, walked on the device through
+    /// [`sample_sorted`](crate::gpu::kernels::dense::sample_sorted). `None` when the
+    /// state lives on the host or the device declines.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn sample_sorted_on_device(&self, sorted: &[f64]) -> Result<Option<Vec<u32>>> {
+        match self.gpu_state.as_ref() {
+            Some(gpu) => crate::gpu::kernels::dense::sample_sorted(gpu.context(), gpu, sorted),
+            None => Ok(None),
+        }
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    pub(crate) fn sample_sorted_on_device(&self, _sorted: &[f64]) -> Result<Option<Vec<u32>>> {
+        Ok(None)
+    }
+
     #[cfg(not(feature = "gpu"))]
     pub(crate) fn group_moments_on_device(
         &self,

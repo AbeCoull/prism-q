@@ -15,6 +15,7 @@ use rayon::prelude::*;
 
 use super::shots::{build_cdf, sample_from_cdf};
 use crate::backend::simd::pack_masked_bits;
+use crate::error::Result;
 use crate::limits::ResolvedLimits;
 
 #[cfg(not(prism_lowered_thresholds))]
@@ -474,6 +475,73 @@ fn sample_counts_from_probs_capped(
     } else {
         streaming_counts(probs, |&p| p, &map, num_classical_bits, num_shots, seed)
     }
+}
+
+/// Counts from a walk that maps the ascending uniforms to one state index each, as
+/// the device sampler does. `None` when `walk` declines; the caller then samples the
+/// probability vector.
+pub(super) fn sample_counts_from_walk(
+    meas_map: &[(usize, usize)],
+    num_classical_bits: usize,
+    num_shots: usize,
+    seed: u64,
+    walk: impl FnOnce(&[f64]) -> Result<Option<Vec<u32>>>,
+) -> Result<Option<HashMap<Vec<u64>, u64>>> {
+    if num_shots == 0 {
+        return Ok(Some(HashMap::new()));
+    }
+    let m_words = num_classical_bits.div_ceil(64).max(1);
+    let map = (!meas_map.is_empty())
+        .then(|| CompactMeasurementMap::new(meas_map, num_classical_bits))
+        .filter(|map| map.num_bits() != 0);
+    let Some(map) = map else {
+        return Ok(Some(HashMap::from([(
+            vec![0u64; m_words],
+            num_shots as u64,
+        )])));
+    };
+
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut uniforms: Vec<f64> = (0..num_shots).map(|_| rng.random()).collect();
+    uniforms.sort_unstable_by(f64::total_cmp);
+    let Some(indices) = walk(&uniforms)? else {
+        return Ok(None);
+    };
+    let mut counts = HashMap::new();
+    for run in indices.chunk_by(|a, b| a == b) {
+        let packed = map.packed_key_from_state_index(run[0] as usize, m_words);
+        *counts.entry(packed).or_insert(0) += run.len() as u64;
+    }
+    Ok(Some(counts))
+}
+
+/// Shot rows from a walk that maps the ascending thresholds to one state index each;
+/// see [`sample_counts_from_walk`].
+pub(super) fn sample_shots_from_walk(
+    meas_map: &[(usize, usize)],
+    num_classical_bits: usize,
+    num_shots: usize,
+    seed: u64,
+    walk: impl FnOnce(&[f64]) -> Result<Option<Vec<u32>>>,
+) -> Result<Option<Vec<Vec<bool>>>> {
+    let mut shots = vec![vec![false; num_classical_bits]; num_shots];
+    if meas_map.is_empty() || num_shots == 0 {
+        return Ok(Some(shots));
+    }
+    let map = CompactMeasurementMap::new(meas_map, num_classical_bits);
+    if map.num_bits() == 0 {
+        return Ok(Some(shots));
+    }
+
+    let thresholds = sorted_thresholds(num_shots, seed);
+    let sorted: Vec<f64> = thresholds.iter().map(|&(u, _)| u).collect();
+    let Some(indices) = walk(&sorted)? else {
+        return Ok(None);
+    };
+    for (&(_, shot), &state_idx) in thresholds.iter().zip(&indices) {
+        map.fill_shot_from_state_index(state_idx as usize, &mut shots[shot]);
+    }
+    Ok(Some(shots))
 }
 
 pub(super) fn sample_shots_from_state(

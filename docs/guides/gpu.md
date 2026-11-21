@@ -42,6 +42,8 @@ directly:
   the run or before a classically conditioned gate or region. A noisy trajectory shot
   keeps them on the device across its noise sites until a conditional, a region, a
   readout flip, a Kraus branch picked on the host, or the end of the shot.
+  Terminal shots and counts are drawn on the device, and one state index per shot comes
+  back in place of the `2^n` probability vector.
 - `BackendKind::StabilizerGpu { context }`. Gates apply to a device tableau through
   one word-grouped batched Clifford kernel (`stab_apply_word_grouped`). Measurement and
   reset keep pivot search, row cascade, phase fixup and deterministic outcomes on the
@@ -168,7 +170,7 @@ opens a device; `scripts/test-gpu.ps1` runs them on a host with one.
 
 ### Shot reproducibility
 
-The golden equality tests do not cover two limits on what a seed guarantees.
+The golden equality tests do not cover three limits on what a seed guarantees.
 
 - CPU against GPU: agreement in distribution, not bit for bit. Both paths draw the
   same RNG stream for a given shot seed, but the device reduction behind a measurement
@@ -179,6 +181,12 @@ The golden equality tests do not cover two limits on what a seed guarantees.
   `statevector_gpu_mid_measure_shots_match_cpu` pins.
   `statevector_gpu_shot_frequencies_match_cpu_off_dyadic` pins the general case: equal
   frequencies within 5 sigma after `Rx(0.3)`.
+- Terminal shots and counts on the GPU statevector: the device walks a scan of the state
+  in blocks of 4096 amplitudes, which rounds differently from the host's running sum, so
+  a draw within rounding of the boundary between two outcomes can land on the
+  neighbouring one. The result does not depend on the card or the Rayon thread count.
+  `statevector_gpu_terminal_sampling_matches_cpu_marginals` pins the frequencies against
+  the CPU probabilities.
 - GPU BTS sampling: reproducible outright. The random bits are drawn on the device from
   one seed per call, one xoshiro256++ stream per 64-shot batch and block of 32 parity
   columns, so the shots do not depend on the Rayon thread count or on how a call is split

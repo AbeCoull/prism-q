@@ -1213,6 +1213,130 @@ extern "C" __global__ void compute_probabilities(
     out[i] = (a.x * a.x + a.y * a.y) * norm_sq;
 }
 
+// Terminal sampling over blocks of SAMPLE_BLOCK amplitudes. sample_block_sums writes each
+// block's total weight; the host scans those totals and hands sample_walk the blocks that
+// own thresholds. Both kernels build the block's inclusive scan with sample_scan_block, so
+// the total a block reports is bit for bit the last value its walk sees.
+//
+// The square is spelled out with __fma_rn so the weights do not depend on NVRTC's
+// contraction default. The scan is fixed: a serial run of SAMPLE_RUN per thread, an
+// inclusive shuffle scan of run totals per warp, then a serial pass over the warp totals.
+// SAMPLE_PAD skips one slot per run so the serial runs fall in distinct banks.
+
+#define SAMPLE_BLOCK_LOG 12
+#define SAMPLE_BLOCK (1 << SAMPLE_BLOCK_LOG)
+#define SAMPLE_THREADS 256
+#define SAMPLE_RUN (SAMPLE_BLOCK / SAMPLE_THREADS)
+#define SAMPLE_WARPS (SAMPLE_THREADS / 32)
+#define SAMPLE_PAD(i) ((i) + ((i) / SAMPLE_RUN))
+
+__device__ __forceinline__ void sample_scan_block(
+    const double2 *state, unsigned long long dim, unsigned long long start,
+    double *incl, double *warp_base)
+{
+    int t = (int)threadIdx.x;
+    for (int k = 0; k < SAMPLE_RUN; ++k) {
+        int i = k * SAMPLE_THREADS + t;
+        unsigned long long g = start + (unsigned long long)i;
+        double w = 0.0;
+        if (g < dim) {
+            double2 a = state[g];
+            w = __fma_rn(a.x, a.x, __dmul_rn(a.y, a.y));
+        }
+        incl[SAMPLE_PAD(i)] = w;
+    }
+    __syncthreads();
+
+    int first = t * SAMPLE_RUN;
+    double run = 0.0;
+    for (int j = 0; j < SAMPLE_RUN; ++j) {
+        run += incl[SAMPLE_PAD(first + j)];
+        incl[SAMPLE_PAD(first + j)] = run;
+    }
+
+    int lane = t & 31;
+    int warp = t >> 5;
+    double prefix = run;
+    for (int off = 1; off < 32; off <<= 1) {
+        double up = __shfl_up_sync(0xffffffffu, prefix, off);
+        if (lane >= off) prefix += up;
+    }
+    double before = __shfl_up_sync(0xffffffffu, prefix, 1);
+    if (lane == 0) before = 0.0;
+    if (lane == 31) warp_base[warp] = prefix;
+    __syncthreads();
+    if (t == 0) {
+        double acc = 0.0;
+        for (int w = 0; w < SAMPLE_WARPS; ++w) {
+            double total = warp_base[w];
+            warp_base[w] = acc;
+            acc += total;
+        }
+    }
+    __syncthreads();
+
+    double offset = warp_base[warp] + before;
+    for (int j = 0; j < SAMPLE_RUN; ++j) {
+        incl[SAMPLE_PAD(first + j)] += offset;
+    }
+    __syncthreads();
+}
+
+extern "C" __global__ void sample_block_sums(
+    const double2 *state, unsigned long long dim, double *block_sums)
+{
+    __shared__ double incl[SAMPLE_PAD(SAMPLE_BLOCK)];
+    __shared__ double warp_base[SAMPLE_WARPS];
+    unsigned long long start = (unsigned long long)blockIdx.x << SAMPLE_BLOCK_LOG;
+    sample_scan_block(state, dim, start, incl, warp_base);
+    if (threadIdx.x == 0) block_sums[blockIdx.x] = incl[SAMPLE_PAD(SAMPLE_BLOCK - 1)];
+}
+
+// One CTA per job (block, lo, hi): thresholds lo..hi belong to `block`, and r[j] is the
+// threshold less the block's base. Each takes the first index whose inclusive weight
+// exceeds r[j], or reaches the block total when rounding leaves r[j] at or above it.
+// Each run and warp adds its offset separately, so the scan can step by an ulp across a
+// boundary with no weight under it; the search then backs up to the nearest weighted
+// index, which exists because the inclusive weight there is positive.
+extern "C" __global__ void sample_walk(
+    const double2 *state, unsigned long long dim, const unsigned int *jobs,
+    const double *r, unsigned int *out)
+{
+    __shared__ double incl[SAMPLE_PAD(SAMPLE_BLOCK)];
+    __shared__ double warp_base[SAMPLE_WARPS];
+    unsigned int block = jobs[3 * blockIdx.x];
+    unsigned int lo = jobs[3 * blockIdx.x + 1];
+    unsigned int hi = jobs[3 * blockIdx.x + 2];
+    unsigned long long start = (unsigned long long)block << SAMPLE_BLOCK_LOG;
+    sample_scan_block(state, dim, start, incl, warp_base);
+
+    double total = incl[SAMPLE_PAD(SAMPLE_BLOCK - 1)];
+    for (unsigned int j = lo + threadIdx.x; j < hi; j += blockDim.x) {
+        double v = r[j];
+        bool inside = v < total;
+        int a = 0;
+        int b = SAMPLE_BLOCK - 1;
+        while (a < b) {
+            int m = (a + b) >> 1;
+            double c = incl[SAMPLE_PAD(m)];
+            if (inside ? c > v : c >= total) {
+                b = m;
+            } else {
+                a = m + 1;
+            }
+        }
+        while (a > 0) {
+            unsigned long long g = start + (unsigned long long)a;
+            if (g < dim) {
+                double2 x = state[g];
+                if (__fma_rn(x.x, x.x, __dmul_rn(x.y, x.y)) != 0.0) break;
+            }
+            --a;
+        }
+        out[j] = (unsigned int)(start + (unsigned long long)a);
+    }
+}
+
 // apply_multi_fused_tiled: batched non-diagonal MultiFused via shared-memory tiles.
 //
 // Each block loads the TILE_SIZE amplitudes spanned by the tile qubits into shared memory,

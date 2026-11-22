@@ -31,9 +31,11 @@ enum Op {
     H(usize),
     Cx(usize, usize),
     Swap(usize, usize),
+    Rx(usize, f64),
     Ry(usize, f64),
     Rz(usize, f64),
     Cp(usize, usize, f64),
+    Rzz(usize, usize, f64),
 }
 
 struct Program {
@@ -71,14 +73,16 @@ fn parse_gate_list(text: &str) -> Program {
             ["h", t] => Op::H(q(t)),
             ["cx", c, t] => Op::Cx(q(c), q(t)),
             ["swap", x, y] => Op::Swap(q(x), q(y)),
+            ["rx", t, theta] => Op::Rx(q(t), a(theta)),
             ["ry", t, theta] => Op::Ry(q(t), a(theta)),
             ["rz", t, theta] => Op::Rz(q(t), a(theta)),
             ["cp", c, t, theta] => Op::Cp(q(c), q(t), a(theta)),
+            ["rzz", x, y, theta] => Op::Rzz(q(x), q(y), a(theta)),
             _ => fail(3, format!("unsupported gate line `{line}`")),
         };
         let (first, second) = match op {
-            Op::H(t) | Op::Ry(t, _) | Op::Rz(t, _) => (t, None),
-            Op::Cx(x, y) | Op::Swap(x, y) | Op::Cp(x, y, _) => (x, Some(y)),
+            Op::H(t) | Op::Rx(t, _) | Op::Ry(t, _) | Op::Rz(t, _) => (t, None),
+            Op::Cx(x, y) | Op::Swap(x, y) | Op::Cp(x, y, _) | Op::Rzz(x, y, _) => (x, Some(y)),
         };
         if let Some(bad) = std::iter::once(first)
             .chain(second)
@@ -125,9 +129,17 @@ fn run_spinoza(program: &Program, lsb_first: bool) -> Vec<f64> {
             Op::H(t) => circuit.h(t),
             Op::Cx(c, t) => circuit.cx(c, t),
             Op::Swap(x, y) => circuit.swap(x, y),
+            Op::Rx(t, theta) => circuit.rx(theta, t),
             Op::Ry(t, theta) => circuit.ry(theta, t),
             Op::Rz(t, theta) => circuit.rz(theta, t),
             Op::Cp(c, t, theta) => circuit.cp(theta, c, t),
+            // Spinoza has no ZZ rotation: rzz(theta) is p(theta) on each qubit and
+            // cp(-2 theta), equal up to the global phase exp(-i theta / 2).
+            Op::Rzz(x, y, theta) => {
+                circuit.p(theta, x);
+                circuit.p(theta, y);
+                circuit.cp(-2.0 * theta, x, y);
+            }
         }
     }
     circuit.execute();
@@ -188,6 +200,20 @@ fn build_qip(program: &Program) -> LocalBuilder<f64> {
                         .unwrap_or_else(|e| fail(4, format!("qip: {e:?}"))),
                 );
             }
+            Op::Rx(t, theta) => {
+                let r = take(&mut qubits, t);
+                let (c, s) = ((theta / 2.0).cos(), (theta / 2.0).sin());
+                let m = vec![
+                    Complex::new(c, 0.0),
+                    Complex::new(0.0, -s),
+                    Complex::new(0.0, -s),
+                    Complex::new(c, 0.0),
+                ];
+                qubits[t] = Some(
+                    b.apply_vec_matrix(r, m)
+                        .unwrap_or_else(|e| fail(4, format!("qip: {e:?}"))),
+                );
+            }
             Op::Rz(t, theta) => {
                 let r = take(&mut qubits, t);
                 let m = vec![
@@ -219,6 +245,27 @@ fn build_qip(program: &Program) -> LocalBuilder<f64> {
                 let (rc, rt) = b.split_first_qubit(pair);
                 qubits[c] = Some(rc.unwrap_or_else(|| fail(4, "qip: merged pair lost a qubit")));
                 qubits[t] = Some(rt);
+            }
+            Op::Rzz(x, y, theta) => {
+                // Like the controlled phase, one diagonal 4x4 on the merged pair; the
+                // ZZ diagonal is symmetric too.
+                let pair = b.merge_two_registers(take(&mut qubits, x), take(&mut qubits, y));
+                let zero = Complex::new(0.0, 0.0);
+                let (even, odd) = (
+                    Complex::from_polar(1.0, -theta / 2.0),
+                    Complex::from_polar(1.0, theta / 2.0),
+                );
+                let mut m = vec![zero; 16];
+                m[0] = even;
+                m[5] = odd;
+                m[10] = odd;
+                m[15] = even;
+                let pair = b
+                    .apply_vec_matrix(pair, m)
+                    .unwrap_or_else(|e| fail(4, format!("qip: {e:?}")));
+                let (rx, ry) = b.split_first_qubit(pair);
+                qubits[x] = Some(rx.unwrap_or_else(|| fail(4, "qip: merged pair lost a qubit")));
+                qubits[y] = Some(ry);
             }
         }
     }

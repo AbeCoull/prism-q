@@ -247,9 +247,11 @@ class ZooWorkloadTests(unittest.TestCase):
         for make in (ZOO[1], ZOO[2], ZOO[6]):
             self.assertNotEqual(make(workloads.CIRCUIT_SEED).text, make(1).text)
 
-    def test_legacy_peers_take_the_adder_but_not_rzz(self) -> None:
-        self.assertLessEqual(workloads.gate_names(workloads.adder(4).text), runners.LEGACY_GATES)
-        self.assertIn("rzz", runners.applicable(runners.resolve("quest"), workloads.qaoa(12)))
+    def test_legacy_peers_take_the_adder_qaoa_and_ising(self) -> None:
+        for wl in (workloads.adder(4), workloads.qaoa(12), workloads.tfim(12, 2)):
+            self.assertLessEqual(workloads.gate_names(wl.text), runners.LEGACY_GATES)
+            for name in ("quest", "spinoza", "qip"):
+                self.assertNotIn("adapter carries no", runners.applicable(runners.resolve(name), wl) or "", name)
 
     def test_ghz_and_bv_are_clifford(self) -> None:
         for wl in (workloads.ghz(10, 10), workloads.bv(10, 10)):
@@ -466,6 +468,18 @@ class ValidateRowTests(unittest.TestCase):
         self.assertEqual((v["reference"], v["reference_run_id"]), ("aer-statevector", "a"))
         self.assertFalse(v["pass"])
         self.assertAlmostEqual(v["tvd"], 1e-3)
+
+    def test_forced_bond_capped_mps_in_dispatch_reports_without_failing(self) -> None:
+        names = ("prismq:mps-64", "prismq:statevector", "aer-statevector")
+        records = [{**_probs_record("a", s), "group": "dispatch"} for s in names]
+        outputs = {s: self._output(s, self.vector) for s in names[1:]}
+        outputs["prismq:mps-64"] = self._output("mps", self.vector[::-1].copy())
+        matrix._validate_row(self.cell, records, outputs)
+        by = {r["simulator"]: r["validation"] for r in records}
+        self.assertIs(by["prismq:mps-64"]["pass"], False)
+        self.assertIs(by["prismq:mps-64"]["pass_required"], False)
+        self.assertNotIn("pass_required", by["prismq:statevector"])
+        self.assertFalse(aggregate.valid({**records[0], "status": "ok", "samples_ms": [1.0]}))
 
     def test_counts_with_the_wrong_shot_total_fail(self) -> None:
         wl = workloads.sampling(4, 200, seed=5)
@@ -712,17 +726,14 @@ class ProfileCellTests(unittest.TestCase):
         pair = [k for k in validate.keys_for(tn[0].workload) if k.count("Z") == 2][:1]
         self.assertIsNotNone(validate.exact_expectations(inst, pair)[pair[0]]["value"])
 
-    def test_deep_mps_rows_share_a_cap_and_declare_quimb_limits(self) -> None:
+    def test_deep_mps_rows_share_a_cap_and_run_quimb_on_every_row(self) -> None:
         deep = self._group("mpsdeep")
         base = [c for c in deep if c.workload.shots == profiles.DEEP_MPS_SHOTS]
         power = [c for c in deep if c.workload.shots == profiles.DEEP_MPS_POWER_SHOTS]
         self.assertEqual((len(base), len(power)), (10, 5))
         for cell in base:
             self.assertEqual(cell.simulators, ["prismq:mps-256", "aer-mps:256", "quimb-mps:256"])
-            depth, n = cell.workload.params["depth"], cell.workload.num_qubits
-            limit = profiles.QUIMB_MPS_COST[depth][1]
-            reason = matrix.not_applicable(cell, "quimb-mps:256", runners.resolve("quimb-mps:256"))
-            self.assertEqual(reason is not None, n > limit)
+            self.assertIsNone(matrix.not_applicable(cell, "quimb-mps:256", runners.resolve("quimb-mps:256")))
         for cell in power:
             self.assertEqual(cell.workload.params["depth"], 12)
             self.assertEqual(cell.simulators, ["prismq:mps-256", "aer-mps:256"])
@@ -779,8 +790,8 @@ class PublishedProfileTests(unittest.TestCase):
         for cell in self.reference.cells:
             if cell.ladder:
                 top[cell.ladder] = max(top.get(cell.ladder, 0), cell.workload.num_qubits)
-        self.assertGreaterEqual(top["dense/rcs"], 30)
-        self.assertGreaterEqual(top["stabilizer/ghz"], 100_000)
+        self.assertGreaterEqual(top["dense/rcs"], 28)
+        self.assertGreaterEqual(top["stabilizer/ghz"], 10_000)
         self.assertGreaterEqual(top["mps/lowent"], 1000)
         self.assertGreaterEqual(top["tn/tfim"], 1024)
         self.assertGreaterEqual(top["factored/disjoint"], 1000)
@@ -1164,19 +1175,44 @@ class PageTests(unittest.TestCase):
         self.assertEqual(
             tiles,
             [
-                ("statevector-fp64", "Statevector, fp64", "5.11x to 69.2x",
-                 "Aer, QuEST, Spinoza and qip over PRISM-Q · 12 rows"),
-                ("statevector-against-fp32-peers", "Statevector against fp32 peers", "1.42x to 14.8x",
-                 "Aer fp32 and qsim fp32 over PRISM-Q · 12 rows · fp32 peers, PRISM-Q fp64"),
+                (
+                    "statevector-fp64",
+                    "Statevector, fp64",
+                    "5.11x to 69.2x",
+                    "Aer, QuEST, Spinoza and qip over PRISM-Q · 12 rows",
+                ),
+                (
+                    "statevector-against-fp32-peers",
+                    "Statevector against fp32 peers",
+                    "1.42x to 14.8x",
+                    "Aer fp32 and qsim fp32 over PRISM-Q · 12 rows · fp32 peers, PRISM-Q fp64",
+                ),
                 ("stabilizer", "Stabilizer", "0.54x to 1.12x", "Stim over PRISM-Q · 3 rows · 1 thread"),
-                ("high-shot-stabilizer", "High-shot stabilizer", "44.0x to 71.7x", "Stim over PRISM-Q · 5 rows · 1 thread"),
+                (
+                    "high-shot-stabilizer",
+                    "High-shot stabilizer",
+                    "44.0x to 71.7x",
+                    "Stim over PRISM-Q · 5 rows · 1 thread",
+                ),
                 ("matrix-product-state", "Matrix product state", "13.5x to 62.0x", "Aer MPS over PRISM-Q · 6 rows"),
-                ("deep-mps", "Deep MPS", "2.09x to 18.1x",
-                 "Aer MPS cap 256 and quimb MPS cap 256 over PRISM-Q MPS cap 256 · 15 rows"),
-                ("tensor-network-expectation-values", "Tensor network expectation values", "2.71x to 303x",
-                 "quimb TN and Aer MPS over PRISM-Q · 4 rows"),
-                ("shot-sampling", "Shot sampling", "1.57x to 69.7x",
-                 "Aer, Aer fp32 and qsim fp32 over PRISM-Q · 6 rows · PRISM-Q fp64"),
+                (
+                    "deep-mps",
+                    "Deep MPS",
+                    "2.09x to 18.1x",
+                    "Aer MPS cap 256 and quimb MPS cap 256 over PRISM-Q MPS cap 256 · 15 rows",
+                ),
+                (
+                    "tensor-network-expectation-values",
+                    "Tensor network expectation values",
+                    "2.71x to 303x",
+                    "quimb TN and Aer MPS over PRISM-Q · 4 rows",
+                ),
+                (
+                    "shot-sampling",
+                    "Shot sampling",
+                    "1.57x to 69.7x",
+                    "Aer, Aer fp32 and qsim fp32 over PRISM-Q · 6 rows · PRISM-Q fp64",
+                ),
                 ("disjoint-components", "Disjoint components", "2.83x to 142x", "Aer MPS over PRISM-Q · 4 rows"),
             ],
         )
@@ -1200,13 +1236,19 @@ class PageTests(unittest.TestCase):
         sv = next(
             r
             for r in data["observations"]
-            if r["simulator"] == "aer-statevector" and r["group"] == "headline" and r["workload"].startswith("rcs")
-            and r["threads"] == 8 and r["status"] == "ok"
+            if r["simulator"] == "aer-statevector"
+            and r["group"] == "headline"
+            and r["workload"].startswith("rcs")
+            and r["threads"] == 8
+            and r["status"] == "ok"
         )
         pq = next(
             r
             for r in data["observations"]
-            if r["simulator"] == "prismq" and r["group"] == "headline" and r["workload"] == sv["workload"] and r["threads"] == 8
+            if r["simulator"] == "prismq"
+            and r["group"] == "headline"
+            and r["workload"] == sv["workload"]
+            and r["threads"] == 8
         )
         self.assertIn("ratio", sv)
         self.assertNotIn("ratio", pq)

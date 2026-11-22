@@ -270,6 +270,12 @@ def _stored_sources(stored: list[dict], names: tuple[str, ...] | None, out_dir: 
     return found
 
 
+def _pass_optional(r: dict) -> bool:
+    """Whether a record's check is reported but not required to pass: the accuracy groups, and a
+    bond-capped MPS forced in dispatch, whose truncation is what the cell shows."""
+    return r["group"] in NOT_PASS_FAIL or (r["group"] == "dispatch" and r["simulator"].startswith("prismq:mps-"))
+
+
 def _validate_row(
     cell: profiles.Cell,
     records: list[dict],
@@ -332,7 +338,7 @@ def _validate_probs(ok: list[dict], outputs: dict[str, str], stored: list[dict],
             "tolerance": tolerance,
             "pass": distance is not None and distance <= tolerance,
         }
-        if r["group"] in NOT_PASS_FAIL:
+        if _pass_optional(r):
             r["validation"]["pass_required"] = False
         del vec
 
@@ -427,6 +433,8 @@ def _validate_counts(
         if used in stored_runs:
             check["fallback_run_id"] = stored_runs[used]
         check["exact_reference_s"] = round(exact_s, 3)
+        if _pass_optional(r):
+            check["pass_required"] = False
         r["validation"] = check
 
 
@@ -464,7 +472,7 @@ def _validate_expval(
         if check["agreement_simulator"] in stored_runs:
             check["agreement_run_id"] = stored_runs[check["agreement_simulator"]]
         check["exact_reference_s"] = round(exact_s, 3)
-        if r["group"] in NOT_PASS_FAIL:
+        if _pass_optional(r):
             check["pass_required"] = False
         r["validation"] = check
 

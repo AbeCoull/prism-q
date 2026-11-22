@@ -60,7 +60,7 @@ comparison/.venv/Scripts/python comparison/matrix.py report comparison/results/m
 | Profile | Contents | Wall time |
 | --- | --- | --- |
 | `smoke` | every family, zoo circuit and adapter at a small size, a short ladder per method, a few seconds per row | about 10 minutes |
-| `reference` | the published run: 163 workloads, 791 measurements and 58 not-applicable cells, sized for 24 threads and 32 GB | most of a day, run detached |
+| `reference` | the published run: 156 workloads, 750 measurements and 29 not-applicable cells, sized for 24 threads and 32 GB | about 6 hours, run detached |
 | `full` | adds every peer at every dense size, QV at 26 qubits and more thread counts | longer than `reference` |
 
 A scaling ladder (group `scaling`) is a run of rows sharing one `ladder` key, from
@@ -72,7 +72,9 @@ as a `memory` ceiling, and `--append` keeps ceilings already recorded. The cold 
 timed inside every runner, the native peers included, so process start and the output
 write stay out of the cutoff. The page shows the widest rung each simulator ran and what
 stopped it, PRISM-Q on the CPU beside fp64 peers, with fp32, 1-thread and GPU results
-apart. Dense ladders force PRISM-Q's statevector, so every rung is exact, with
+apart. Dense ladders climb from 20 to 28 qubits in steps of 2, so a simulator that
+clears 28 shows the top of the ladder rather than a ceiling. They force PRISM-Q's
+statevector, so every rung is exact, with
 `PRISM_MAX_SV_QUBITS` set to the width the harness admits for a dense peer (80% of RAM)
 in place of PRISM-Q's default of half of physical memory, and add `prismq:gpu` on CUDA
 device 0. Where no fp64 peer reached a dense rung, the two PRISM-Q statevectors are
@@ -157,5 +159,7 @@ builds with CUDA under MSVC, was built CPU-only, so PRISM-Q's GPU statevector on
 dense ladders has no GPU peer. Also ISA variants (PRISM-Q has no switch to
 force its scalar kernels), Qulacs (no wheel for Python 3.14 on Windows), noise,
 sampling or mid-circuit rows on QuEST, Spinoza and qip (their adapters implement
-the dense output only), and the QAOA and Ising rows on those three (their adapters
-carry no RX or RZZ). The methodology page lists each with its reason.
+the dense output only), and Aer fp32 on rows with CP or RZZ (it exits with an access
+violation on CP when fusion is on and on RZZ). Spinoza has no ZZ rotation, so its
+adapter applies RZZ as two phase gates and a controlled phase. The methodology page
+lists each with its reason.

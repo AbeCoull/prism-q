@@ -30,7 +30,7 @@
 namespace {
 
 struct Op {
-    char kind;  // h, x (cx), s (swap), y (ry), z (rz), p (cp)
+    char kind;  // h, x (cx), s (swap), r (rx), y (ry), z (rz), p (cp), g (rzz)
     int a;
     int b;
     double angle;
@@ -69,6 +69,9 @@ Program parseGateList(std::istream& in) {
         } else if (name == "swap") {
             op.kind = 's';
             fields >> op.a >> op.b;
+        } else if (name == "rx") {
+            op.kind = 'r';
+            fields >> op.a >> op.angle;
         } else if (name == "ry") {
             op.kind = 'y';
             fields >> op.a >> op.angle;
@@ -77,6 +80,9 @@ Program parseGateList(std::istream& in) {
             fields >> op.a >> op.angle;
         } else if (name == "cp") {
             op.kind = 'p';
+            fields >> op.a >> op.b >> op.angle;
+        } else if (name == "rzz") {
+            op.kind = 'g';
             fields >> op.a >> op.b >> op.angle;
         } else {
             fail(3, "unsupported gate line `" + line + "`");
@@ -100,9 +106,15 @@ Probs run(const Program& program) {
             case 'h': applyHadamard(qureg, op.a); break;
             case 'x': applyControlledPauliX(qureg, op.a, op.b); break;
             case 's': applySwap(qureg, op.a, op.b); break;
+            case 'r': applyRotateX(qureg, op.a, op.angle); break;
             case 'y': applyRotateY(qureg, op.a, op.angle); break;
             case 'z': applyRotateZ(qureg, op.a, op.angle); break;
             case 'p': applyTwoQubitPhaseShift(qureg, op.a, op.b, op.angle); break;
+            case 'g': {
+                int targets[2] = {op.a, op.b};
+                applyPhaseGadget(qureg, targets, 2, op.angle);
+                break;
+            }
             default: fail(3, "unknown op");
         }
     }

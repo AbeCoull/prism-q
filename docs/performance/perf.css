@@ -60,6 +60,10 @@
 }
 .pq-kpi-b i { position: absolute; top: 50%; height: 6px; margin-top: -3px; border-radius: 3px; background: var(--pq-ref); transition: background-color var(--pq-fast); }
 .pq-kpi a:is(:hover, :focus-visible) .pq-kpi-b i { background: var(--pq-text); }
+.pq-kpi-b i.cut { border-radius: 3px 0 0 3px; }
+.pq-kpi-b i.cut::after { content: ""; position: absolute; left: 100%; top: -3px; border-style: solid; border-width: 6px 0 6px 7px;
+  border-color: transparent transparent transparent var(--pq-ref); transition: border-color var(--pq-fast); }
+.pq-kpi a:is(:hover, :focus-visible) .pq-kpi-b i.cut::after { border-left-color: var(--pq-text); }
 .pq-kpi-b b { position: absolute; top: -1px; bottom: 0; width: 1px; background: var(--pq-beam); }
 :is(.coal, .navy, .ayu) .pq-kpi-b b { box-shadow: -1px 0 0 rgba(93, 180, 245, .55), 1px 0 0 rgba(240, 106, 112, .55), 0 0 7px rgba(255, 255, 255, .35); }
 html:not(.pq-perf) .pq-kpi-b { visibility: hidden; }
@@ -250,6 +254,34 @@ html.pq-pinned .pq-key[aria-pressed="true"] i { box-shadow: 0 0 0 2px var(--pq-g
 .pq-svg :is(.pq-rule, .pq-beam) { filter: var(--pq-halo, none); }
 :is(.coal, .navy, .ayu) .pq-svg .pq-line.pq { filter: drop-shadow(0 -1px 0 rgba(93, 180, 245, .8)) drop-shadow(0 1px 0 rgba(240, 106, 112, .8)); }
 
+/* Peer identity: one hue per simulator family, from a palette checked for colour-vision separation
+   (at most three hues share a chart); Spinoza and qip keep the neutral peer tone. Text stays in ink. */
+.light, .rust, html:not(.js) { --pq-c-aer: #2a78d6; --pq-c-qsim: #eb6834; --pq-c-quest: #1baf7a; --pq-c-stim: #eda100; --pq-c-quimb: #e87ba4; }
+.coal, .navy, .ayu { --pq-c-aer: #3987e5; --pq-c-qsim: #d95926; --pq-c-quest: #199e70; --pq-c-stim: #c98500; --pq-c-quimb: #d55181; }
+[data-k^="aer"] { --pq-sc: var(--pq-c-aer); }
+[data-k^="qsim"] { --pq-sc: var(--pq-c-qsim); }
+[data-k^="quest"] { --pq-sc: var(--pq-c-quest); }
+[data-k^="stim"] { --pq-sc: var(--pq-c-stim); }
+[data-k^="quimb"] { --pq-sc: var(--pq-c-quimb); }
+.pq-svg :is(.pq-dot, .pq-pt, .pq-rbar, .pq-bar).peer[data-k]:not(.hollow) { fill: var(--pq-sc, var(--pq-peer)); }
+.pq-svg :is(.pq-dot, .pq-pt, .pq-rbar, .pq-bar).ref[data-k]:not(.hollow) { fill: var(--pq-sc, var(--pq-ref)); }
+.pq-svg :is(.pq-dot, .pq-pt).peer.hollow[data-k], .pq-svg .pq-line.peer[data-k] { stroke: var(--pq-sc, var(--pq-peer)); }
+.pq-svg :is(.pq-dot, .pq-pt).ref.hollow[data-k], .pq-svg .pq-line.ref[data-k] { stroke: var(--pq-sc, var(--pq-ref)); }
+.pq-svg .pq-whisk.peer[data-k] { stroke: var(--pq-sc, var(--pq-peer)); }
+.pq-key[data-k] i { background: var(--pq-sc, var(--pq-peer)); }
+.pq-key.ref[data-k] i { background: var(--pq-sc, var(--pq-ref)); }
+/* PRISM-Q variants share the beam and differ by stroke: automatic dispatch and the CPU statevector
+   solid, other forced backends dashed, the GPU dash-dot, one thread dotted. */
+.pq-svg .pq-line.pq[data-k^="prismq:"] { stroke-dasharray: 5 3; }
+.pq-svg .pq-line.pq[data-k="prismq:statevector"] { stroke-dasharray: none; }
+.pq-svg .pq-line.pq[data-k="prismq:gpu"] { stroke-dasharray: 8 3 2 3; }
+.pq-svg .pq-line.pq[data-k="prismq@1"] { stroke-dasharray: 1.5 3.5; }
+.pq-key.pq:is([data-k^="prismq:"], [data-k="prismq@1"]) i { width: 18px; height: 2.5px; border-radius: 1px; box-shadow: none; }
+.pq-key.pq[data-k^="prismq:"] i { background: repeating-linear-gradient(90deg, var(--pq-beam) 0 5px, transparent 5px 8px); }
+.pq-key.pq[data-k="prismq:statevector"] i { background: var(--pq-beam); }
+.pq-key.pq[data-k="prismq:gpu"] i { background: repeating-linear-gradient(90deg, var(--pq-beam) 0 7px, transparent 7px 9px, var(--pq-beam) 9px 11px, transparent 11px 13px); }
+.pq-key.pq[data-k="prismq@1"] i { background: repeating-linear-gradient(90deg, var(--pq-beam) 0 2px, transparent 2px 5px); }
+
 /* Summary range bars; the hovered row gets a beam from the 1x line. */
 .pq-svg .pq-subhead { fill: var(--pq-text); font-size: var(--pq-svg-text); font-weight: 650; }
 .pq-svg .pq-rbar.peer { fill: var(--pq-peer); }
@@ -326,8 +358,8 @@ html.pq-pinned .pq-key[aria-pressed="true"] i { box-shadow: 0 0 0 2px var(--pq-g
 .pq-plot .pq-matrix .pq-dim { opacity: .35; }
 .pq-plot .pq-matrix .pq-dim[data-k="prismq"] { opacity: 1; }
 .pq-svg .pq-hl.pq-dot.peer:not(.hollow), .pq-svg .pq-hl.pq-pt.peer:not(.hollow),
-.pq-svg .pq-hl.pq-bar.peer, .pq-svg .pq-hl.pq-rbar.peer { fill: var(--pq-ref); }
-.pq-svg .pq-hl.pq-dot.peer.hollow, .pq-svg .pq-hl.pq-line.peer { stroke: var(--pq-ref); }
+.pq-svg .pq-hl.pq-bar.peer, .pq-svg .pq-hl.pq-rbar.peer { fill: var(--pq-sc, var(--pq-ref)); }
+.pq-svg .pq-hl.pq-dot.peer.hollow, .pq-svg .pq-hl.pq-line.peer { stroke: var(--pq-sc, var(--pq-ref)); }
 .pq-svg .pq-hl.pq-line.peer { stroke-width: 2.2; }
 .pq-svg text.pq-hl.pq-name { font-weight: 600; }
 .pq-svg text.pq-hl.pq-name.peer { fill: var(--pq-text); }
@@ -370,11 +402,13 @@ html.pq-pinned .pq-key[aria-pressed="true"] i { box-shadow: 0 0 0 2px var(--pq-g
 .content a.pq-issue:focus-visible { outline: 2px solid var(--pq-text); outline-offset: 3px; }
 .pq-actions-s { flex: 1 1 22em; color: var(--pq-text-muted); font-size: var(--pq-fs-caption); line-height: 1.5; }
 
-/* Jump links to every section. */
+/* Jump links to every section, inline in the page; from 1280px the theme's on-this-page rail takes over. */
 .content nav.pq-toc {
   display: flex; flex-wrap: wrap; gap: 6px 8px; margin: 30px 0 4px; padding: 12px 0; border-block: 1px solid var(--pq-line);
+  position: static; width: auto; max-height: none; overflow: visible;
   font: 500 1.25rem/1.4 var(--pq-font-sans);
 }
+@media (min-width: 1280px) { html.pq-has-toc .content nav.pq-toc { display: none; } }
 .content nav.pq-toc a { padding: 3px 10px; border: 1px solid var(--pq-line); border-radius: var(--pq-r-sm); color: var(--pq-text-muted); text-decoration: none; }
 .content nav.pq-toc a:is(:hover, :focus-visible) { border-color: var(--pq-line-strong); color: var(--pq-text); background: var(--pq-row); }
 

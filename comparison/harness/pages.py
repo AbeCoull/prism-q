@@ -219,7 +219,10 @@ SECTIONS = [
         [
             "Hardware-efficient ansatz, QAOA on a random 3-regular graph, a 10-step Trotterized Ising chain, "
             "and a ripple-carry adder over a superposed register.",
-            "QAOA and Ising rows use native RX and RZZ, which the QuEST, Spinoza and qip adapters do not carry.",
+            "QAOA and Ising rows use RX and RZZ. QuEST applies them natively and qip as one matrix each; "
+            "Spinoza has no ZZ rotation, so its adapter applies RZZ as two phase gates and a controlled phase.",
+            "Aer fp32 exits with an access violation on CP when fusion is on and on RZZ, so it has no QFT, QAOA "
+            "or Ising timings.",
             "qsim and Aer fp32 store single-precision amplitudes and are checked at 1e-5.",
         ],
     ),
@@ -772,7 +775,9 @@ def _summary(records: list[dict], ratio: dict, derived: dict) -> list[str]:
     return _figure("summary", "All sections · peer time over PRISM-Q time", title, _html_table(header, table), note)
 
 
-def _tiles(built: list[tuple[tuple, dict, list[float], str, set[str]]], records: list[dict], derived: dict) -> list[str]:
+def _tiles(
+    built: list[tuple[tuple, dict, list[float], str, set[str]]], records: list[dict], derived: dict
+) -> list[str]:
     """One link per section to its heading, with the range over every validated peer; `perf.js` draws the track."""
     tops = _top_ratios(derived)
     precision = {r["simulator"]: r.get("precision") for r in records}
@@ -1521,8 +1526,10 @@ def page(results_dir: str, manifest: dict, records: list[dict], derived: dict, s
         f"- {SPEC.format('Run')} {_run_line(manifest)}.",
         f"- {SPEC.format('Protocol')} One process per measurement: a cold call, then {warm_text}; the median warm "
         "call is reported.",
-        f"- {SPEC.format('Ratio')} Peer median time / PRISM-Q median time. Cross-process timing of identical code "
-        "moves by up to about 10%, so ratios within 0.9x to 1.1x are not distinguishable.",
+        f"- {SPEC.format('Ratio')} Peer median time / PRISM-Q median time. Warm samples within one process agree "
+        "closely, but between runs of identical code on this host most rows moved by up to about 10% and some, "
+        "mostly MPS and tensor network calls, by up to about 2x. Ratios within 0.9x to 1.1x are not "
+        "distinguishable, and on those rows a gap under 2x is indicative only.",
         f"- {SPEC.format('Raw data')} `comparison/results/{os.path.basename(results_dir)}/`; how it was taken: "
         "[Benchmark Methodology](../guides/benchmarking.md).",
         "",

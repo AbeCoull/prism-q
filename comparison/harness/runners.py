@@ -48,7 +48,7 @@ WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker.py")
 
 UNITARY = {"h", "x", "z", "s", "sdg", "rx", "ry", "rz", "cx", "cz", "swap", "cp", "rzz"}
 CLIFFORD = {"h", "x", "z", "s", "sdg", "cx", "cz", "swap", "measure", "reset", "if"}
-LEGACY_GATES = {"h", "cx", "swap", "ry", "rz", "cp"}
+LEGACY_GATES = {"h", "cx", "swap", "rx", "ry", "rz", "cp", "rzz"}
 PROBS_BYTES_PER_AMP = 8
 THREAD_ENV_KEYS = ("RAYON_NUM_THREADS", "OMP_NUM_THREADS")
 DENSE_MEMORY_FRACTION = 0.8

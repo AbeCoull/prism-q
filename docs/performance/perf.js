@@ -43,6 +43,8 @@ const fdist = t => t == null ? 'n/a' : t >= 0.01 ? String(+t.toPrecision(2)) : t
 const span = rs => { const a = fx(Math.min.apply(null, rs)), b = fx(Math.max.apply(null, rs)); return a === b ? a : a + ' to ' + b; };
 const ftick = v => v < 1 ? +(v * 1000).toPrecision(3) + ' us' : v < 1000 ? +v.toPrecision(3) + ' ms' : +(v / 1000).toPrecision(3) + ' s';
 const fxt = v => +v.toPrecision(3) + 'x';
+// Ratio axes stop here; a range past it ends in an arrow at the edge and keeps its true label.
+const RATIO_CAP = 1000, capR = v => Math.min(v, RATIO_CAP);
 const ferr = t => t >= 0.01 ? String(t) : '1e' + Math.round(Math.log10(t));
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
 const median = a => { const s = a.slice().sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
@@ -643,7 +645,7 @@ function summary(fig) {
     const labW = narrow ? Math.min(W * 0.4, Math.ceil(Math.max(...all.map(p => tw(NAME[p.s], FS.text, p.ref)))) + 10) : 118;
     const ax0 = labW + 8, P = W - 4 - ax0;
     const wr = Math.max.apply(null, all.map(p => tw(span([p.lo, p.hi]), FS.value, true))) + 12;
-    const dom = fitLog(Math.min(1, ...all.map(p => p.lo)) / 1.12, Math.max(1, ...all.map(p => p.hi)), P, 6, wr), X = logScale(dom, ax0, P);
+    const dom = fitLog(Math.min(1, ...all.map(p => p.lo)) / 1.12, capR(Math.max(1, ...all.map(p => p.hi))), P, 6, wr), X = logScale(dom, ax0, P);
     const svg = svgEl(W, 100, title(fig));
     const gGrid = S('g', {}, svg), gRows = S('g', {}, svg);
     const y0 = 20, RH = narrow ? 24 : 26, SH = 26, spans = [];
@@ -657,13 +659,15 @@ function summary(fig) {
         const cy = y + RH / 2, row = S('g', {class: 'pq-row pq-srow'}, gRows), cls = p.ref ? 'ref' : 'peer';
         rowBg(row, W, y, RH);
         nameText(row, narrow ? 4 : 10, cy + 4, NAME[p.s], p.s, cls);
-        const x0 = X(p.lo), x1 = X(p.hi);
+        const x0 = X(capR(p.lo)), x1 = X(capR(p.hi)), cut = p.hi > RATIO_CAP;
         S('line', {class: 'pq-beam', x1: X(1), x2: x0, y1: cy, y2: cy}, row);
         S('rect', {class: 'pq-rbar ' + cls, 'data-k': p.s, x: x0 - 1, y: cy - 4, width: Math.max(2, x1 - x0) + 2, height: 8, rx: 4}, row);
-        S('line', {class: 'pq-medbg', x1: X(p.med), x2: X(p.med), y1: cy - 7.5, y2: cy + 7.5}, row);
-        S('line', {class: 'pq-med', x1: X(p.med), x2: X(p.med), y1: cy - 7.5, y2: cy + 7.5}, row);
-        p.pts.forEach(q => S('circle', {class: 'pq-spt', cx: X(q.x), cy: cy, r: 3.4}, row));
-        T(row, x1 + 9, cy + 4, span([p.lo, p.hi]), 'pq-rlab');
+        if (cut) S('path', {class: 'pq-rbar pq-cut ' + cls, 'data-k': p.s, d: 'M' + (x1 + 1) + ',' + (cy - 6) + 'L' + (x1 + 8) + ',' + cy + 'L' + (x1 + 1) + ',' + (cy + 6) + 'Z'}, row);
+        const xm = X(capR(p.med));
+        S('line', {class: 'pq-medbg', x1: xm, x2: xm, y1: cy - 7.5, y2: cy + 7.5}, row);
+        S('line', {class: 'pq-med', x1: xm, x2: xm, y1: cy - 7.5, y2: cy + 7.5}, row);
+        p.pts.forEach(q => S('circle', {class: 'pq-spt', cx: X(capR(q.x)), cy: cy, r: 3.4}, row));
+        T(row, x1 + (cut ? 14 : 9), cy + 4, span([p.lo, p.hi]), 'pq-rlab');
         const rs = p.pts.slice().sort((a, b) => a.x - b.x);
         hot(row, () => '<div class="pq-th">' + esc(NAME[p.s]) + ' <span>' + esc(g.sec.name) + '</span></div><div class="pq-tm">peer time over PRISM-Q time, median ' +
           fx(p.med) + '</div>' + tgrid(rs.map(q => [q.r.label, fx(q.x)])),
@@ -973,9 +977,8 @@ function scalingPanel(fig) {
       const sk = o => o.simulator + (o.threads === most[o.simulator] ? '' : '@' + o.threads);
       const label = id => { const p = id.split('@'), b = SCALE_NAME[p[0]] || NAME[p[0]] || p[0]; return p[1] ? b + ' ' + plural(+p[1], 'thread') : b; };
       const xs = uniq(rs.map(o => o.qubits)).sort((a, b) => a - b), sims = uniq(rs.map(sk));
-      const pqs = sims.filter(s => !peerOf(s));
       const drawn = o => usable(o) || o.status === 'invalid' && o.median_ms != null;
-      const series = sims.map(s => ({k: s, name: label(s), cls: peerOf(s) ? 'peer' : 'pq', dash: pqs.indexOf(s) > 0,
+      const series = sims.map(s => ({k: s, name: label(s), cls: peerOf(s) ? 'peer' : 'pq',
         pts: rs.filter(o => sk(o) === s && drawn(o)).sort((a, b) => a.qubits - b.qubits).map(o => ({x: o.qubits, o: o}))}));
       const ceilings = rs.filter(o => o.ceiling).map(o => ({x: o.qubits, o: o, k: sk(o), word: label(sk(o)) + ' ' + CEIL[o.ceiling]}));
       if (lineCell(box, {xs: xs, xscale: xs.length > 1 && xs[xs.length - 1] / xs[0] > 20 ? 'log' : 'lin', xticks: xs, xfmt: fq,
@@ -1039,9 +1042,11 @@ const PANELS = {
         sub: 'auto ' + pq.resolved_backend + ', fastest ' + best.simulator.slice(7)};
     }).sort((a, b) => a.ratio - b.ratio);
     const strip = rows.map(r => ({label: r.label, pq: r.pq, peers: [], ratio: r.ratio, sub: r.sub, ref: r.ref}));
+    const rs = rows.map(r => r.ratio), dom = [Math.min(0.9, Math.min(...rs) / 1.08), Math.max(1.1, Math.max(...rs) * 1.08)];
+    const wide = dom[1] / dom[0] > 2;
     dotPanel(fig, {ctl: 'View', legend: false, name: o => o.simulator === 'prismq' ? 'auto' : o.simulator.slice(7),
       kOf: o => o.simulator, cols: [{h: ['auto /', 'fastest'], w: 60, f: r => ({t: fx(r.ratio)})}],
-      views: [{label: 'Against the fastest', rows: strip, scale: 'lin', domain: [0.9, 1.1], band: [0.95, 1.05], refLine: 1,
+      views: [{label: 'Against the fastest', rows: strip, scale: wide ? 'log' : 'lin', domain: dom, band: [0.95, 1.05], refLine: 1,
         val: (o, r) => r.ratio, tick: x => x.toFixed(2) + 'x'}, {label: 'All backends', rows: rows, labelAll: true}]});
   },
   memory: memPanel,
@@ -1080,7 +1085,7 @@ function tiles() {
   const bs = Array.prototype.slice.call(document.querySelectorAll('.pq-kpi-b'));
   if (!bs.length) return;
   const v = bs.map(b => [+b.getAttribute('data-lo'), +b.getAttribute('data-hi')]);
-  const Q = logScale([Math.log(Math.min(1, ...v.map(x => x[0])) / 1.25), Math.log(Math.max(1, ...v.map(x => x[1])) * 1.25)], 0, 100);
+  const Q = logScale([Math.log(Math.min(1, ...v.map(x => x[0])) / 1.25), Math.log(capR(Math.max(1, ...v.map(x => x[1]))) * 1.25)], 0, 100);
   const list = document.querySelector('ul.pq-kpis');
   if (list) {
     const ax = H('p', 'pq-kpis-ax');
@@ -1093,9 +1098,9 @@ function tiles() {
     bs.forEach(b => { b.style.setProperty('--pq-x10', Q(10) + '%'); b.style.setProperty('--pq-x100', Q(100) + '%'); });
   }
   bs.forEach((b, i) => {
-    const r = H('i', '', b);
-    r.style.left = Q(v[i][0]) + '%';
-    r.style.width = Math.max(1.5, Q(v[i][1]) - Q(v[i][0])) + '%';
+    const r = H('i', v[i][1] > RATIO_CAP ? 'cut' : '', b);
+    r.style.left = Q(capR(v[i][0])) + '%';
+    r.style.width = Math.max(1.5, Q(capR(v[i][1])) - Q(capR(v[i][0]))) + '%';
     H('b', '', b).style.left = Q(1) + '%';
   });
 }

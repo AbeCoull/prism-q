@@ -42,7 +42,7 @@ class Cell:
     simulators: list[str]
     threads: list[int] = field(default_factory=lambda: [8])
     iterations: int = 5
-    min_iterations: int = 3
+    min_iterations: int = 2
     budget_s: float = 30.0
     timeout_s: float = 600.0
     sim_threads: dict[str, list[int]] = field(default_factory=dict)
@@ -104,25 +104,10 @@ DEEP_MPS_SHOTS = 100
 # their check detects from about 0.23 to 0.07; depth 16 rows cost too much per call to repeat.
 DEEP_MPS_POWER_SHOTS = 1000
 SWEEP_CAPS = (2, 4, 8, 16, 32)
-# Cost of one quimb CircuitMPS call (gates plus 100 samples, bond cap 256) per qubit, measured on the
-# 24-thread host, and the widest row it runs at so cold call plus warm calls stay near two minutes.
-QUIMB_MPS_COST = {12: (0.054, 500), 16: (0.39, 100)}
 
 
 def _sweep_sims() -> list[str]:
     return [f"{sim}{c}" for sim in ("prismq:mps-", "aer-mps:", "quimb-mps:") for c in SWEEP_CAPS]
-
-
-def _quimb_mps_excluded(n: int, depth: int) -> dict[str, str]:
-    rate, limit = QUIMB_MPS_COST[depth]
-    if n <= limit:
-        return {}
-    return {
-        "quimb-mps:256": (
-            f"one quimb CircuitMPS call costs about {rate:g} s per qubit at depth {depth} on the 24-thread "
-            f"host; rows past {limit} qubits would exceed the row budget"
-        )
-    }
 
 
 def _wide_cells(threads: int) -> list[Cell]:
@@ -139,7 +124,6 @@ def _wide_cells(threads: int) -> list[Cell]:
                     w.lowent(n, depth, DEEP_MPS_SHOTS),
                     list(DEEP_MPS_PEERS),
                     t,
-                    excluded=_quimb_mps_excluded(n, depth),
                     **policy,
                 )
             )
@@ -167,7 +151,9 @@ AER_STABILIZER_SLOW = (
     "one Aer stabilizer call on a 1,000-qubit GHZ circuit took about 14 s on the 24-thread host; the "
     "stabilizer ladder times its wider rows instead"
 )
-LADDER_POLICY = {"iterations": 3, "min_iterations": 1, "budget_s": 15.0, "timeout_s": 600.0, "ceiling_s": 60.0}
+LADDER_POLICY = {"iterations": 3, "min_iterations": 1, "budget_s": 15.0, "timeout_s": 120.0, "ceiling_s": 60.0}
+# Dense and MPS ladders let a rung over the 60 s budget finish, so its time is plotted beside the ceiling.
+LONG_LADDER = {"timeout_s": 300.0}
 DENSE_LADDER_SIMS = ["prismq:statevector", "prismq:gpu", "aer-statevector", "qsim", "quest"]
 STABILIZER_LADDER_SIMS = ["prismq", "stim", "aer-stabilizer"]
 MPS_LADDER_SIMS = ["prismq", "prismq:mps-64", "aer-mps", "quimb-mps:64"]
@@ -202,23 +188,23 @@ def ladder(key: str, workloads: list[w.Workload], sims: list[str], threads: list
 
 
 def _scaling_cells(runner: str, threads: int) -> list[Cell]:
-    """Every family climbed until each simulator reaches its ceiling on the host."""
+    """Every family climbed to its ceiling on the host, the dense ladders no further than 28 qubits."""
     t = [threads]
     cells: list[Cell] = []
     for family in ("rcs", "qft", "hea", "qaoa"):
-        widths = [n for n in (20, 24, 26, 28, 29, 30) if n % 2 == 0 or family in ("rcs", "qft", "hea")]
+        widths = (20, 22, 24, 26, 28)
         rungs = [_dense_ladder(runner, family, n) for n in widths]
-        cells += ladder(f"dense/{family}", rungs, DENSE_LADDER_SIMS, t)
-    wide = (1000, 10_000, 100_000)
-    stab = {"timeout_s": 300.0, "sim_threads": _with_one_thread(threads)}
+        cells += ladder(f"dense/{family}", rungs, DENSE_LADDER_SIMS, t, **LONG_LADDER)
+    wide = (100, 1000, 10_000)
+    stab = {"sim_threads": _with_one_thread(threads)}
     cells += ladder("stabilizer/ghz", [w.ghz(n, 1000) for n in wide], STABILIZER_LADDER_SIMS, t, **stab)
     cells += ladder("stabilizer/bv", [w.bv(n, 1000) for n in wide], STABILIZER_LADDER_SIMS, t, **stab)
-    rungs = [w.clifford(n, 1000) for n in (1000, 10_000, 30_000)]
+    rungs = [w.clifford(n, 1000) for n in (1000, 3000, 10_000)]
     cells += ladder("stabilizer/clifford", rungs, STABILIZER_LADDER_SIMS, t, **stab)
-    long = (100, 300, 1000, 3000, 10_000)
-    cells += ladder("mps/lowent", [w.lowent(n, 4, 1000) for n in long], MPS_LADDER_SIMS, t)
-    cells += ladder("mps/wstate", [w.wstate(n, 1000) for n in long], MPS_LADDER_SIMS, t)
-    expval = (64, 256, 1024, 4096)
+    long = (100, 300, 1000, 3000)
+    cells += ladder("mps/lowent", [w.lowent(n, 4, 1000) for n in long], MPS_LADDER_SIMS, t, **LONG_LADDER)
+    cells += ladder("mps/wstate", [w.wstate(n, 1000) for n in long], MPS_LADDER_SIMS, t, **LONG_LADDER)
+    expval = (64, 256, 1024)
     cells += ladder("tn/rcs", [w.expval(n, 8, 4) for n in expval], TN_LADDER_SIMS, t)
     cells += ladder("tn/tfim", [w.tfim(n, 4, "expval", observables=4) for n in expval], TN_LADDER_SIMS, t)
     cells += ladder(
@@ -336,11 +322,11 @@ def reference(runner: str, threads: int) -> Profile:
     mid = ["prismq", "qsim"]
     for shots in (1000, 10_000):
         cells.append(Cell("headline", w.midcircuit(12, shots), mid, t, timeout_s=600.0))
-    cells.append(Cell("headline", w.midcircuit(18, 1000), mid, t, min_iterations=2, timeout_s=600.0))
+    cells.append(Cell("headline", w.midcircuit(18, 1000), mid, t, timeout_s=600.0))
 
     scaling = ["prismq", "aer-statevector", "qsim", "quest"]
     for wl in (w.rcs(24, 10), w.qft(runner, 24), w.exported(runner, "qv", 22), w.qaoa(24)):
-        cells.append(Cell("threads", wl, scaling, _thread_counts((1, 2, 4, 8, 12, 16), threads)))
+        cells.append(Cell("threads", wl, scaling, _thread_counts((1, 4, 12), threads)))
 
     for wl in (
         w.rcs(20, 10),

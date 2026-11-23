@@ -91,8 +91,9 @@
 //!   [`parse_dynamic`] writes them
 //! - a classical bit read as a value outside a guard, `int x = c[0] + c[1];`,
 //!   which [`parse_dynamic`] evaluates at runtime
-//! - `while`, `break` and `continue`, which [`parse_dynamic`] reads into a
-//!   control-flow graph
+//! - `while`, which [`parse_dynamic`] reads into a control-flow graph, and a
+//!   `break` or `continue` under a measurement-dependent branch, which it
+//!   lowers into the graph
 //! - a measurement-dependent scalar `def` result or early `return` under
 //!   `parse`; `parse_dynamic` lowers these into the graph
 //! - under `parse`, a dropped `bit` result; under both, a runtime `complex` value, a runtime duration in a
@@ -102,14 +103,14 @@
 //!   declares, but not a measurement into a bit parameter
 //! - `ctrl @` on a `def` call: a subroutine is not a gate and the language
 //!   gives it no controlled form
-//! - `ctrl @` and a fractional `pow(k) @` on a call spanning more than four
-//!   qubits: both reduce the call to a dense matrix first, and that matrix is
-//!   where the width bound sits
+//! - a fractional `pow(k) @` on a call spanning more than four qubits: it
+//!   reduces the call to a dense matrix first, and that matrix is where the
+//!   width bound sits
+//! - `ctrl @` on a body that measures, resets or branches, or that holds a gate
+//!   with no controlled form. The control applies to each instruction the call
+//!   expanded to, so the width of the call sets no bound
 //! - a `qubit` or `qreg` declaration in a program that also names physical
 //!   qubits (`$0`)
-//! - Bit literal comparisons against integers other than `0` / `1`
-//! - Negative integer literals in `if` register comparisons
-//! - `switch` with a `default` and more case labels than the region depth bound
 //! - a condition or `switch` target over classical bits that no bit or
 //!   register guard spells, such as `c[0] && c[1]`, which [`parse_dynamic`]
 //!   evaluates at runtime
@@ -134,7 +135,11 @@
 //! with the source line number. The parser never panics on user input. An `else`
 //! whose `if` body measures into a bit the condition reads, and a `switch` whose
 //! arm measures into the switched register, return `Parse`: both lowerings re-read
-//! the bits after an earlier body ran.
+//! the bits after an earlier body ran. Under `parse`, an `if` comparing a bit
+//! against anything but `0` or `1`, or a bit or register against a negative
+//! integer, returns `Parse`; [`parse_dynamic`] evaluates both at runtime. A
+//! `switch` with a `default` and more case labels than the region depth bound
+//! returns `Parse` under both.
 //!
 //! The reverse direction is [`qasm_export`](super::qasm_export).
 

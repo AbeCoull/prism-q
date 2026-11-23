@@ -1,0 +1,106 @@
+name: Benchmark result
+description: Report a benchmark number that differs on your machine, question the method, or ask for a simulator or workload.
+title: "[Benchmark]: "
+labels: ["benchmarks"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for checking the numbers. The Performance page and `comparison/README.md` describe how each row is measured; a report that names the host, the command and the rows can be reproduced.
+
+  - type: dropdown
+    id: report-type
+    attributes:
+      label: Report type
+      description: Select the primary reason for the report.
+      options:
+        - A number differs on my machine
+        - The method or a comparison looks wrong
+        - A simulator or workload should be added
+        - The page shows something broken or unclear
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: host
+    attributes:
+      label: Host
+      description: The machine the numbers came from. Timing depends on all of these.
+      value: |
+        - CPU model and core count:
+        - GPU and memory (if a GPU row is involved):
+        - RAM:
+        - OS:
+        - Power plan or governor:
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: PRISM-Q version or commit
+      description: The crate version, or the output of `git rev-parse HEAD` for a checkout.
+      placeholder: "Example: 0.38.0, or 2036e608"
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command or profile
+      description: The exact commands run, including the profile, filters and thread count.
+      placeholder: |
+        comparison/.venv/Scripts/python comparison/matrix.py run --profile reference --match qaoa --out comparison/results/my-run
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: rows
+    attributes:
+      label: Page rows or workloads
+      description: Name the section, workload ids and simulators involved, as the page or `summary.csv` shows them.
+      placeholder: "Example: Circuit zoo, statevector; qaoa/n24/degree=3/layers=1/seed=deadbeef/probs; PRISM-Q and Aer"
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed numbers
+      description: Paste the medians and spread you measured, or attach the run's `summary.csv` (and `manifest.json` if you can).
+      placeholder: |
+        | Workload | Simulator | Threads | Median | p25 to p75 |
+        | --- | --- | --- | --- | --- |
+        |  |  |  |  |  |
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result or comparison
+      description: What you expected instead, and what it is based on (the published row, another simulator, an earlier run).
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproducibility
+    attributes:
+      label: Reproducibility notes
+      description: How many times the result repeated, what else ran on the machine, and anything changed from the defaults.
+      placeholder: |
+        - Repeated runs and their spread:
+        - Background load during the run:
+        - Environment variables or flags changed (RAYON_NUM_THREADS, PRISM_MAX_SV_QUBITS, RUSTFLAGS):
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Add links, screenshots of the page, logs, or related issues.
+    validations:
+      required: false

@@ -215,6 +215,113 @@ class WorkloadTests(unittest.TestCase):
         self.assertEqual(workloads.gate_names(wl.text) >= {"measure", "reset", "if"}, True)
 
 
+ZOO = [
+    lambda seed: workloads.ghz(40, 100),
+    lambda seed: workloads.bv(40, 100, seed=seed),
+    lambda seed: workloads.qaoa(12, layers=2, seed=seed),
+    lambda seed: workloads.tfim(12, 3),
+    lambda seed: workloads.tfim(64, 4, "expval", observables=4),
+    lambda seed: workloads.wstate(30, 100),
+    lambda seed: workloads.adder(4, seed=seed),
+    lambda seed: workloads.adder(4, 100, seed=seed),
+]
+
+
+class ZooWorkloadTests(unittest.TestCase):
+    def test_zoo_text_is_deterministic_and_parses(self) -> None:
+        for make in ZOO:
+            wl = make(workloads.CIRCUIT_SEED)
+            self.assertEqual(wl.text, make(workloads.CIRCUIT_SEED).text, wl.workload_id)
+            n, clbits, inst = workloads.parse(wl.text)
+            self.assertEqual((n, clbits), (wl.num_qubits, wl.num_clbits))
+            self.assertTrue(inst)
+
+    def test_zoo_uses_only_gates_the_runners_carry(self) -> None:
+        accepted = runners.UNITARY | {"measure"}
+        for make in ZOO:
+            wl = make(workloads.CIRCUIT_SEED)
+            self.assertLessEqual(workloads.gate_names(wl.text), accepted, wl.workload_id)
+            self.assertLessEqual(workloads.gate_names(wl.text), set(workloads.GATE_SET))
+
+    def test_seeded_families_follow_their_seed(self) -> None:
+        for make in (ZOO[1], ZOO[2], ZOO[6]):
+            self.assertNotEqual(make(workloads.CIRCUIT_SEED).text, make(1).text)
+
+    def test_legacy_peers_take_the_adder_qaoa_and_ising(self) -> None:
+        for wl in (workloads.adder(4), workloads.qaoa(12), workloads.tfim(12, 2)):
+            self.assertLessEqual(workloads.gate_names(wl.text), runners.LEGACY_GATES)
+            for name in ("quest", "spinoza", "qip"):
+                self.assertNotIn("adapter carries no", runners.applicable(runners.resolve(name), wl) or "", name)
+
+    def test_ghz_and_bv_are_clifford(self) -> None:
+        for wl in (workloads.ghz(10, 10), workloads.bv(10, 10)):
+            self.assertLessEqual(workloads.gate_names(wl.text), runners.CLIFFORD)
+            self.assertIsNone(runners.applicable(runners.resolve("stim"), wl))
+
+    def test_bv_reads_its_secret_on_every_shot(self) -> None:
+        wl = workloads.bv(9, 100, seed=5)
+        _, clbits, inst = workloads.parse(wl.text)
+        secret = {int(line.split()[1]) for line in wl.text.split("\n") if line.startswith("cx ")}
+        exact = reference.statistics(inst, list(range(clbits)), [])
+        for bit in range(clbits):
+            self.assertAlmostEqual(exact[f"b{bit}"]["p"], 1.0 if bit in secret else 0.0, places=12)
+
+    def test_w_state_spreads_one_excitation(self) -> None:
+        probs = _dense_probabilities(workloads.wstate(6, 0, mode="probs").text)
+        one_hot = [1 << q for q in range(6)]
+        np.testing.assert_allclose(probs[one_hot], 1 / 6, atol=1e-12)
+        self.assertAlmostEqual(float(probs.sum() - probs[one_hot].sum()), 0.0, places=12)
+
+    def test_adder_writes_the_sum_into_b(self) -> None:
+        bits = 3
+        wl = workloads.adder(bits, seed=11)
+        probs = _dense_probabilities(wl.text)
+        b0 = wl.params["b"]
+        support = np.nonzero(probs > 1e-12)[0]
+        self.assertEqual(len(support), 2**bits)
+        for index in support:
+            a = sum(((index >> (2 * i + 2)) & 1) << i for i in range(bits))
+            b = sum(((index >> (2 * i + 1)) & 1) << i for i in range(bits))
+            carry = (index >> (2 * bits + 1)) & 1
+            self.assertEqual((index & 1, b + (carry << bits)), (0, a + b0))
+
+    def test_qaoa_graph_is_three_regular(self) -> None:
+        wl = workloads.qaoa(16)
+        edges = [tuple(map(int, line.split()[1:3])) for line in wl.text.split("\n") if line.startswith("rzz ")]
+        degree = np.bincount(np.array(edges).ravel(), minlength=16)
+        self.assertTrue((degree == 3).all())
+        self.assertEqual(len(set(edges)), len(edges))
+        with self.assertRaises(ValueError):
+            workloads.qaoa(15)
+
+    def test_tfim_matches_its_trotter_layers(self) -> None:
+        wl = workloads.tfim(5, 2, dt=0.25)
+        lines = wl.text.strip().split("\n")[1:]
+        self.assertEqual(sum(line.startswith("rzz ") for line in lines), 2 * 4)
+        self.assertEqual(sum(line.startswith("rx ") for line in lines), 2 * 5)
+        self.assertTrue(all(line.endswith(" 0.5") for line in lines))
+
+    def test_new_gates_match_their_matrices(self) -> None:
+        theta = 0.73
+        c, s = np.cos(theta / 2), np.sin(theta / 2)
+        np.testing.assert_allclose(reference._matrix("rx", theta), [[c, -1j * s], [-1j * s, c]], atol=1e-12)
+        zz = np.array([1.0, -1.0, -1.0, 1.0])
+        rzz = reference._matrix("rzz", theta).reshape(4, 4)
+        np.testing.assert_allclose(rzz, np.diag(np.exp(-0.5j * theta * zz)), atol=1e-12)
+
+    def test_ladder_cells_climb_in_width_order(self) -> None:
+        cells = profiles.ladder("mps/wstate", [workloads.wstate(n, 10) for n in (300, 100, 200)], ["prismq"], [8])
+        self.assertEqual([c.workload.num_qubits for c in cells], [100, 200, 300])
+        self.assertTrue(all(c.group == "scaling" and c.ladder == "mps/wstate" for c in cells))
+        self.assertEqual({c.ceiling_s for c in cells}, {profiles.LADDER_POLICY["ceiling_s"]})
+
+    def test_gate_smoke_covers_the_new_gates(self) -> None:
+        for gate in ("rx", "rzz"):
+            text = matrix.gate_smoke_text(gate)
+            self.assertIn(f"\n{gate} 3 ", text)
+            workloads.parse(text)
+
+
 def _record(run_id: str, simulator: str, wid: str, median: float, **validation) -> dict:
     return {
         "run_id": run_id,
@@ -310,6 +417,26 @@ class ValidateRowTests(unittest.TestCase):
         vec.astype("<f8").tofile(path)
         return path
 
+    def test_prismq_statevectors_check_each_other_without_a_reference(self) -> None:
+        names = ("prismq:statevector", "prismq:gpu", "qsim")
+        records = [_probs_record("a", s, "single" if s == "qsim" else "double") for s in names]
+        outputs = {s: self._output(s, self.vector) for s in names}
+        matrix._validate_row(self.cell, records, outputs)
+        by = {r["simulator"]: r["validation"] for r in records}
+        for name in names[:2]:
+            self.assertEqual((by[name]["pass"], by[name]["role"]), (None, "untested"))
+            self.assertEqual(by[name]["cross_check"]["tvd"], 0.0)
+            self.assertIn("agrees with", by[name]["reason"])
+        self.assertEqual(by["qsim"], {"pass": None, "role": "untested", "reason": matrix.NO_REFERENCE})
+        self.assertTrue(aggregate.valid({**records[0], "status": "ok", "samples_ms": [1.0]}))
+        outputs["prismq:gpu"] = self._output("gpu", self.vector[::-1].copy())
+        records = [_probs_record("a", s) for s in names[:2]]
+        matrix._validate_row(self.cell, records, outputs)
+        for r in records:
+            self.assertIs(r["validation"]["pass"], False)
+            self.assertNotIn("role", r["validation"])
+            self.assertIn("disagrees", r["validation"]["failures"][0])
+
     def test_aer_is_the_reference_only_when_quest_agrees(self) -> None:
         records = [_probs_record("a", s) for s in ("prismq", "aer-statevector", "quest")]
         outputs = {s: self._output(s, self.vector) for s in ("prismq", "aer-statevector", "quest")}
@@ -327,7 +454,7 @@ class ValidateRowTests(unittest.TestCase):
         matrix._validate_row(self.cell, records, outputs)
         for r in records:
             self.assertIsNone(r["validation"]["pass"], r["simulator"])
-            self.assertNotIn("role", r["validation"])
+            self.assertEqual(r["validation"]["role"], "untested")
             self.assertIn("disagree", r["validation"]["reason"])
 
     def test_rerun_without_the_reference_uses_the_stored_one(self) -> None:
@@ -341,6 +468,18 @@ class ValidateRowTests(unittest.TestCase):
         self.assertEqual((v["reference"], v["reference_run_id"]), ("aer-statevector", "a"))
         self.assertFalse(v["pass"])
         self.assertAlmostEqual(v["tvd"], 1e-3)
+
+    def test_forced_bond_capped_mps_in_dispatch_reports_without_failing(self) -> None:
+        names = ("prismq:mps-64", "prismq:statevector", "aer-statevector")
+        records = [{**_probs_record("a", s), "group": "dispatch"} for s in names]
+        outputs = {s: self._output(s, self.vector) for s in names[1:]}
+        outputs["prismq:mps-64"] = self._output("mps", self.vector[::-1].copy())
+        matrix._validate_row(self.cell, records, outputs)
+        by = {r["simulator"]: r["validation"] for r in records}
+        self.assertIs(by["prismq:mps-64"]["pass"], False)
+        self.assertIs(by["prismq:mps-64"]["pass_required"], False)
+        self.assertNotIn("pass_required", by["prismq:statevector"])
+        self.assertFalse(aggregate.valid({**records[0], "status": "ok", "samples_ms": [1.0]}))
 
     def test_counts_with_the_wrong_shot_total_fail(self) -> None:
         wl = workloads.sampling(4, 200, seed=5)
@@ -587,17 +726,14 @@ class ProfileCellTests(unittest.TestCase):
         pair = [k for k in validate.keys_for(tn[0].workload) if k.count("Z") == 2][:1]
         self.assertIsNotNone(validate.exact_expectations(inst, pair)[pair[0]]["value"])
 
-    def test_deep_mps_rows_share_a_cap_and_declare_quimb_limits(self) -> None:
+    def test_deep_mps_rows_share_a_cap_and_run_quimb_on_every_row(self) -> None:
         deep = self._group("mpsdeep")
         base = [c for c in deep if c.workload.shots == profiles.DEEP_MPS_SHOTS]
         power = [c for c in deep if c.workload.shots == profiles.DEEP_MPS_POWER_SHOTS]
         self.assertEqual((len(base), len(power)), (10, 5))
         for cell in base:
             self.assertEqual(cell.simulators, ["prismq:mps-256", "aer-mps:256", "quimb-mps:256"])
-            depth, n = cell.workload.params["depth"], cell.workload.num_qubits
-            limit = profiles.QUIMB_MPS_COST[depth][1]
-            reason = matrix.not_applicable(cell, "quimb-mps:256", runners.resolve("quimb-mps:256"))
-            self.assertEqual(reason is not None, n > limit)
+            self.assertIsNone(matrix.not_applicable(cell, "quimb-mps:256", runners.resolve("quimb-mps:256")))
         for cell in power:
             self.assertEqual(cell.workload.params["depth"], 12)
             self.assertEqual(cell.simulators, ["prismq:mps-256", "aer-mps:256"])
@@ -623,6 +759,259 @@ class ProfileCellTests(unittest.TestCase):
             self.assertEqual(cell.threads_for("stim"), [1])
             self.assertIsNone(runners.applicable(runners.resolve("stim"), cell.workload))
         self.assertIn("statistics-only", runners.applicable(runners.resolve("aer-statevector"), rows[0].workload))
+
+
+@unittest.skipUnless(os.path.exists(runners.RUNNER), "compare_runner is not built")
+class PublishedProfileTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.reference = profiles.reference(runners.RUNNER, 24)
+        cls.smoke = profiles.smoke(runners.RUNNER, 24)
+
+    def test_every_zoo_family_runs_in_both_profiles(self) -> None:
+        zoo = {"ghz", "bv", "qaoa", "hea", "tfim", "wstate", "adder"}
+        for profile in (self.reference, self.smoke):
+            self.assertLessEqual(zoo, {c.workload.family for c in profile.cells if c.group == "zoo"})
+
+    def test_ladders_are_ordered_and_share_one_policy(self) -> None:
+        ladders: dict[str, list[profiles.Cell]] = {}
+        for cell in self.reference.cells:
+            if cell.ladder:
+                self.assertEqual(cell.group, "scaling")
+                ladders.setdefault(cell.ladder, []).append(cell)
+        self.assertGreaterEqual(len(ladders), 10)
+        for key, cells in ladders.items():
+            widths = [c.workload.num_qubits for c in cells]
+            self.assertEqual(widths, sorted(set(widths)), key)
+            self.assertEqual(len({(c.timeout_s, c.ceiling_s, tuple(c.simulators)) for c in cells}), 1, key)
+
+    def test_ladders_reach_past_the_peers(self) -> None:
+        top = {}
+        for cell in self.reference.cells:
+            if cell.ladder:
+                top[cell.ladder] = max(top.get(cell.ladder, 0), cell.workload.num_qubits)
+        self.assertGreaterEqual(top["dense/rcs"], 28)
+        self.assertGreaterEqual(top["stabilizer/ghz"], 10_000)
+        self.assertGreaterEqual(top["mps/lowent"], 1000)
+        self.assertGreaterEqual(top["tn/tfim"], 1024)
+        self.assertGreaterEqual(top["factored/disjoint"], 1000)
+
+    def test_dense_ladders_force_an_exact_statevector_and_offer_the_gpu(self) -> None:
+        dense = [c for c in self.reference.cells if (c.ladder or "").startswith("dense/")]
+        self.assertTrue(dense)
+        for cell in dense:
+            self.assertIn("prismq:statevector", cell.simulators)
+            self.assertIn("prismq:gpu", cell.simulators)
+            self.assertNotIn("prismq", cell.simulators)
+
+    def test_thread_scaling_reaches_every_core(self) -> None:
+        rows = [c for c in self.reference.cells if c.group == "threads"]
+        self.assertTrue(rows)
+        for cell in rows:
+            self.assertEqual(cell.threads[0], 1)
+            self.assertEqual(cell.threads[-1], 24)
+
+    def test_gpu_rungs_clear_the_device_crossover(self) -> None:
+        for profile in (self.reference, self.smoke):
+            for cell in profile.cells:
+                if "prismq:gpu" in cell.simulators:
+                    self.assertGreaterEqual(cell.workload.num_qubits, 14, cell.workload.workload_id)
+
+    def test_stabilizer_ladders_pair_prismq_with_single_threaded_stim(self) -> None:
+        cells = [c for c in self.reference.cells if (c.ladder or "").startswith("stabilizer/")]
+        self.assertTrue(cells)
+        for cell in cells:
+            self.assertEqual(cell.threads_for("prismq"), [1, 24])
+            self.assertEqual(cell.threads_for("stim"), [1])
+
+    def test_gpu_runner_has_its_own_executable(self) -> None:
+        sim = runners.resolve("prismq:gpu")
+        self.assertEqual(sim.backend, "gpu")
+        self.assertEqual(runners._executable(sim), runners.RUNNER_GPU)
+        self.assertNotEqual(runners.RUNNER_GPU, runners.RUNNER)
+
+
+class StoreTests(unittest.TestCase):
+    def test_generated_workloads_store_a_recipe_that_rebuilds_them(self) -> None:
+        made = [workloads.rcs(6, 3), workloads.disjoint(20, 100, layout="strided"), workloads.adder(3, 50)]
+        made += [workloads.tfim(8, 2, "expval", observables=2), workloads.qaoa(8, seed=3)]
+        with tempfile.TemporaryDirectory() as tmp:
+            known: set[str] = set()
+            for wl in made:
+                matrix._save_circuit(tmp, wl, known)
+            matrix._save_circuit(tmp, made[0], known)
+            entries = matrix._store_entries(tmp)
+            self.assertEqual(len(entries), len(made))
+            self.assertTrue(all("recipe" in e and "text" not in e for e in entries))
+            texts = matrix.load_circuits(tmp)
+        self.assertEqual(texts, {wl.sha256: wl.text for wl in made})
+
+    def test_exported_lists_keep_their_text_and_a_stale_recipe_is_refused(self) -> None:
+        exported = workloads.Workload("qv", 2, "probs", "qubits 2\nh 0\ncx 0 1\n", {"seed": 1})
+        with tempfile.TemporaryDirectory() as tmp:
+            matrix._save_circuit(tmp, exported, set())
+            self.assertEqual(matrix._store_entries(tmp)[0]["text"], exported.text)
+            stale = {"sha256": "0" * 64, "recipe": workloads.rcs(4, 2).recipe}
+            with gzip.open(os.path.join(tmp, matrix.CIRCUITS), "at", encoding="utf-8") as handle:
+                handle.write(json.dumps(stale) + "\n")
+            with self.assertRaises(ValueError):
+                matrix.load_circuits(tmp)
+
+
+class NativeTimingTests(unittest.TestCase):
+    def test_native_peers_report_the_cold_call_from_inside_the_runner(self) -> None:
+        calls = []
+
+        def run_process(argv, stdin_text, env, timeout_s):
+            calls.append(argv)
+            if "probabilities" in argv:
+                out = json.dumps({"length": 4, "first_ms": 12.5})
+                return runners.ProcessResult(0, out, "", 900.0, 10.0, False)
+            return runners.ProcessResult(0, json.dumps({"times_ms": [11.0, 12.0]}), "", 50.0, 10.0, False)
+
+        with mock.patch.object(runners, "run_process", run_process):
+            obs = runners.execute(runners.resolve("quest"), workloads.rcs(2, 1), 8, 3, 1, 1.0, 60.0, "out.f64")
+        self.assertEqual(obs["phases"]["first_ms"], 12.5)
+        self.assertEqual(obs["phases"]["process_wall_ms"], 900.0)
+        cell = profiles.ladder("dense/rcs", [workloads.rcs(2, 1)], ["quest"], [8], ceiling_s=0.01)[0]
+        self.assertEqual(matrix.ceiling_cause({"status": "ok", "phases": obs["phases"]}, cell), "budget")
+        cell.ceiling_s = 0.5
+        self.assertIsNone(matrix.ceiling_cause({"status": "ok", "phases": obs["phases"]}, cell))
+
+    def test_prismq_statevector_faces_the_dense_peer_memory_limit(self) -> None:
+        memory = mock.Mock(total=int(31.5 * 1024**3))
+        with mock.patch.object(runners.psutil, "virtual_memory", lambda: memory):
+            self.assertEqual(runners.dense_qubit_limit(), 30)
+            sim = runners.resolve("prismq:statevector")
+            wl = workloads.Workload("rcs", 30, "probs", "qubits 30\nh 0\n", {})
+            with mock.patch.object(runners, "_executable", lambda sim: None):
+                self.assertIsNone(runners.applicable(runners.resolve("aer-statevector"), wl))
+        self.assertEqual(dict(sim.env), {"PRISM_MAX_SV_QUBITS": "30"})
+        self.assertEqual(runners.resolve("prismq:gpu").env, ())
+
+
+class CeilingTests(unittest.TestCase):
+    def _cell(self) -> profiles.Cell:
+        return profiles.ladder("dense/rcs", [workloads.rcs(4, 1)], ["prismq:statevector"], [8], ceiling_s=10.0)[0]
+
+    def test_timeouts_memory_and_slow_calls_end_a_climb(self) -> None:
+        cell = self._cell()
+        self.assertEqual(matrix.ceiling_cause({"status": "timeout"}, cell), "timeout")
+        self.assertEqual(matrix.ceiling_cause({"status": "oom"}, cell), "memory")
+        refused = {"status": "error", "reason": "backend `statevector`: needs 31 qubits, exceeding the cap of 29"}
+        self.assertEqual(matrix.ceiling_cause(refused, cell), "memory")
+        self.assertEqual(matrix.ceiling_cause({"status": "ok", "phases": {"first_ms": 11_000.0}}, cell), "budget")
+        self.assertIsNone(matrix.ceiling_cause({"status": "ok", "phases": {"first_ms": 9_000.0}}, cell))
+        legacy = {"status": "ok", "phases": {"process_wall_ms": 12_000.0}}
+        self.assertEqual(matrix.ceiling_cause(legacy, cell), "budget")
+        self.assertIsNone(matrix.ceiling_cause({"status": "crash", "reason": "exit 3"}, cell))
+
+    def test_run_skips_the_rungs_past_a_ceiling(self) -> None:
+        rungs = [workloads.ghz(n, 10) for n in (8, 16, 32)]
+        cells = profiles.ladder("stabilizer/ghz", rungs, ["prismq", "stim"], [8], ceiling_s=1.0)
+        profile = profiles.Profile("t", "", cells)
+
+        def execute(sim, wl, threads, *rest):
+            if sim.name == "stim" and wl.num_qubits >= 16:
+                return {"status": "timeout", "reason": None, "phases": {"process_wall_ms": 1.0}}
+            return {"status": "ok", "reason": None, "samples_ms": [1.0], "phases": {"first_ms": 1.0}}
+
+        args = mock.Mock(
+            no_build=True,
+            append=False,
+            replace=False,
+            retire=[],
+            drop_other_simulators=False,
+            skip_peer=[],
+            cooldown_s=0,
+            threads=8,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            args.out = tmp
+            with (
+                mock.patch.object(matrix, "load_profile", lambda a: profile),
+                mock.patch.object(matrix, "smoke_check", lambda p: {}),
+                mock.patch.object(matrix, "_validate_row", lambda *a, **k: None),
+                mock.patch.object(runners, "execute", execute),
+                mock.patch.object(runners, "version", lambda sim: "1"),
+                mock.patch.object(runners, "_executable", lambda sim: None),
+                mock.patch.object(provenance, "host_details", lambda: {}),
+                mock.patch.object(provenance, "quiet_machine_warnings", lambda: []),
+                mock.patch.object(runners, "native_builds", lambda: {}),
+            ):
+                self.assertEqual(matrix.cmd_run(args), 0)
+            with open(os.path.join(tmp, "observations.jsonl"), encoding="utf-8") as handle:
+                records = [json.loads(line) for line in handle]
+        stim = {r["workload"]["num_qubits"]: r for r in records if r["simulator"] == "stim"}
+        self.assertEqual(stim[8]["status"], "ok")
+        self.assertEqual((stim[16]["status"], stim[16]["ceiling"]), ("timeout", "timeout"))
+        self.assertEqual(stim[32]["status"], "skipped")
+        self.assertTrue(stim[32]["beyond_ceiling"])
+        self.assertIn("timeout at 16 qubits", stim[32]["reason"])
+        prismq = [r for r in records if r["simulator"] == "prismq"]
+        self.assertTrue(all(r["status"] == "ok" and r["ladder"] == "stabilizer/ghz" for r in prismq))
+        self.assertTrue(all(r["policy"]["ceiling_s"] == 1.0 for r in records))
+
+    def test_a_harness_memory_refusal_is_a_ceiling(self) -> None:
+        rungs = [workloads.rcs(n, 2) for n in (8, 16, 24)]
+        cells = profiles.ladder("dense/rcs", rungs, ["prismq:statevector", "aer-statevector"], [8], ceiling_s=60.0)
+
+        def applicable(sim, wl):
+            if sim.name == "aer-statevector" and wl.num_qubits >= 16:
+                return f"{runners.MEMORY_REFUSAL} 2^{wl.num_qubits} amplitudes needs 1 GiB"
+            return None
+
+        records = self._run(cells, applicable)
+        aer = {r["workload"]["num_qubits"]: r for r in records if r["simulator"] == "aer-statevector"}
+        self.assertEqual((aer[16]["status"], aer[16]["ceiling"]), ("not-applicable", "memory"))
+        self.assertTrue(aer[24]["beyond_ceiling"])
+        self.assertNotIn("ceiling", aer[8])
+        statevector = [r for r in records if r["simulator"] == "prismq:statevector"]
+        self.assertTrue(all(r["status"] == "ok" and "PRISM_MAX_SV_QUBITS" in r["env"] for r in statevector))
+
+    def test_appended_runs_keep_the_recorded_ceilings(self) -> None:
+        wl = workloads.ghz(16, 10)
+        stored = {
+            ("scaling", wl.workload_id): [
+                {
+                    **_ladder_rec("scaling", wl, "stim", 0, "stabilizer/ghz", threads=1, status="timeout"),
+                    "ceiling": "timeout",
+                },
+                _ladder_rec("scaling", wl, "prismq", 1.0, "stabilizer/ghz"),
+            ]
+        }
+        self.assertEqual(matrix._stored_ceilings(stored), {("stabilizer/ghz", "stim", 1): (16, "timeout at 16 qubits")})
+
+    def _run(self, cells: list[profiles.Cell], applicable) -> list[dict]:
+        def execute(sim, wl, threads, *rest):
+            return {"status": "ok", "reason": None, "samples_ms": [1.0], "phases": {"first_ms": 1.0}}
+
+        args = mock.Mock(
+            no_build=True,
+            append=False,
+            replace=False,
+            retire=[],
+            drop_other_simulators=False,
+            skip_peer=[],
+            cooldown_s=0,
+            threads=8,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            args.out = tmp
+            with (
+                mock.patch.object(matrix, "load_profile", lambda a: profiles.Profile("t", "", cells)),
+                mock.patch.object(matrix, "smoke_check", lambda p: {}),
+                mock.patch.object(matrix, "_validate_row", lambda *a, **k: None),
+                mock.patch.object(runners, "execute", execute),
+                mock.patch.object(runners, "applicable", applicable),
+                mock.patch.object(runners, "version", lambda sim: "1"),
+                mock.patch.object(provenance, "host_details", lambda: {}),
+                mock.patch.object(provenance, "quiet_machine_warnings", lambda: []),
+                mock.patch.object(runners, "native_builds", lambda: {}),
+            ):
+                self.assertEqual(matrix.cmd_run(args), 0)
+            with open(os.path.join(tmp, "observations.jsonl"), encoding="utf-8") as handle:
+                return [json.loads(line) for line in handle]
 
 
 class SmokeTests(unittest.TestCase):
@@ -717,11 +1106,16 @@ class SmokeTests(unittest.TestCase):
 
 
 class PageTests(unittest.TestCase):
-    REFERENCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "results", "matrix-reference-i7-6700k")
+    # A frozen copy of a complete reference run, so the page tests do not follow the published results.
+    FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "page-reference")
 
     def _render(self, tmp: str, keep=None, extra=None) -> tuple[str, dict]:
         results = os.path.join(tmp, "results")
-        shutil.copytree(self.REFERENCE, results)
+        os.makedirs(results)
+        for name in ("manifest.json", "observations.jsonl"):
+            with gzip.open(os.path.join(self.FIXTURE, name + ".gz"), "rb") as src:
+                with open(os.path.join(results, name), "wb") as dst:
+                    shutil.copyfileobj(src, dst)
         if keep is not None or extra:
             path = os.path.join(results, "observations.jsonl")
             with open(path, encoding="utf-8") as handle:
@@ -781,26 +1175,60 @@ class PageTests(unittest.TestCase):
         self.assertEqual(
             tiles,
             [
-                ("statevector-fp64", "Statevector, fp64", "5.11x to 69.2x",
-                 "Aer, QuEST, Spinoza and qip over PRISM-Q · 12 rows"),
-                ("statevector-against-fp32-peers", "Statevector against fp32 peers", "1.42x to 14.8x",
-                 "Aer fp32 and qsim fp32 over PRISM-Q · 12 rows · fp32 peers, PRISM-Q fp64"),
+                (
+                    "statevector-fp64",
+                    "Statevector, fp64",
+                    "5.11x to 69.2x",
+                    "Aer, QuEST, Spinoza and qip over PRISM-Q · 12 rows",
+                ),
+                (
+                    "statevector-against-fp32-peers",
+                    "Statevector against fp32 peers",
+                    "1.42x to 14.8x",
+                    "Aer fp32 and qsim fp32 over PRISM-Q · 12 rows · fp32 peers, PRISM-Q fp64",
+                ),
                 ("stabilizer", "Stabilizer", "0.54x to 1.12x", "Stim over PRISM-Q · 3 rows · 1 thread"),
-                ("high-shot-stabilizer", "High-shot stabilizer", "44.0x to 71.7x", "Stim over PRISM-Q · 5 rows · 1 thread"),
+                (
+                    "high-shot-stabilizer",
+                    "High-shot stabilizer",
+                    "44.0x to 71.7x",
+                    "Stim over PRISM-Q · 5 rows · 1 thread",
+                ),
                 ("matrix-product-state", "Matrix product state", "13.5x to 62.0x", "Aer MPS over PRISM-Q · 6 rows"),
-                ("deep-mps", "Deep MPS", "2.09x to 18.1x",
-                 "Aer MPS cap 256 and quimb MPS cap 256 over PRISM-Q MPS cap 256 · 15 rows"),
-                ("tensor-network-expectation-values", "Tensor network expectation values", "2.71x to 303x",
-                 "quimb TN and Aer MPS over PRISM-Q · 4 rows"),
-                ("shot-sampling", "Shot sampling", "1.57x to 69.7x",
-                 "Aer, Aer fp32 and qsim fp32 over PRISM-Q · 6 rows · PRISM-Q fp64"),
+                (
+                    "deep-mps",
+                    "Deep MPS",
+                    "2.09x to 18.1x",
+                    "Aer MPS cap 256 and quimb MPS cap 256 over PRISM-Q MPS cap 256 · 15 rows",
+                ),
+                (
+                    "tensor-network-expectation-values",
+                    "Tensor network expectation values",
+                    "2.71x to 303x",
+                    "quimb TN and Aer MPS over PRISM-Q · 4 rows",
+                ),
+                (
+                    "shot-sampling",
+                    "Shot sampling",
+                    "1.57x to 69.7x",
+                    "Aer, Aer fp32 and qsim fp32 over PRISM-Q · 6 rows · PRISM-Q fp64",
+                ),
                 ("disjoint-components", "Disjoint components", "2.83x to 142x", "Aer MPS over PRISM-Q · 4 rows"),
             ],
         )
         for href, heading, _, _ in tiles:
             self.assertIn(f"## {heading} {{#{href}}}", page)
         labels = re.findall(r'- <span class="pq-spec-l">([^<]+)</span> ', page)
-        self.assertEqual(labels, ["Host", "Protocol", "Ratio", "Raw data"])
+        self.assertEqual(labels, ["Host", "Run", "Protocol", "Ratio", "Raw data"])
+        self.assertIn("31.9 GB RAM, CPU only. Every number on this page comes from this host.", page)
+        self.assertIn("profile `reference`, started 2026-11-03", page)
+        self.assertLess(page.index('class="pq-issue"'), page.index("Median wall time per call"))
+        self.assertIn(f'href="{pages.ISSUE_URL}"', page)
+        toc = re.search(r'<nav class="pq-toc"[^>]*>(.+?)</nav>', page).group(1)
+        self.assertIn('<a href="#statevector-fp64">Statevector, fp64</a>', toc)
+        self.assertIn('<a href="#thread-scaling">Thread scaling</a>', toc)
+        self.assertNotIn("reference host", page)
+        self.assertNotIn('data-chart="scaling"', page)
         self.assertLess(page.index('pq-spec-l">Raw data<'), page.index('class="pq-kpis"'))
         self.assertLess(page.index('class="pq-kpis"'), page.index('data-chart="summary"'))
         self.assertIn('distance <span class="pq-nw">8.3e-15</span> in <span class="pq-nw">53.1 ms</span>', page)
@@ -808,13 +1236,19 @@ class PageTests(unittest.TestCase):
         sv = next(
             r
             for r in data["observations"]
-            if r["simulator"] == "aer-statevector" and r["group"] == "headline" and r["workload"].startswith("rcs")
-            and r["threads"] == 8 and r["status"] == "ok"
+            if r["simulator"] == "aer-statevector"
+            and r["group"] == "headline"
+            and r["workload"].startswith("rcs")
+            and r["threads"] == 8
+            and r["status"] == "ok"
         )
         pq = next(
             r
             for r in data["observations"]
-            if r["simulator"] == "prismq" and r["group"] == "headline" and r["workload"] == sv["workload"] and r["threads"] == 8
+            if r["simulator"] == "prismq"
+            and r["group"] == "headline"
+            and r["workload"] == sv["workload"]
+            and r["threads"] == 8
         )
         self.assertIn("ratio", sv)
         self.assertNotIn("ratio", pq)
@@ -867,6 +1301,93 @@ class PageTests(unittest.TestCase):
         self.assertEqual({o["bond_cap"] for o in sweep}, {2, 16})
         self.assertTrue(all("max_abs_error" in o for o in sweep))
 
+    def test_scaling_section_shows_each_ceiling_and_the_widest_run(self) -> None:
+        extra = _ladder_records()
+        with tempfile.TemporaryDirectory() as tmp:
+            page, data = self._render(tmp, None, extra)
+        self.assertIn("## Scaling to the ceiling {#scaling}", page)
+        self.assertIn('data-chart="scaling"', page)
+        self.assertIn('<a href="#scaling">Scaling to the ceiling</a>', page)
+        self.assertIn("Widest PRISM-Q run on the CPU per method: 29 statevector and 100,000 stabilizer", page)
+        self.assertNotIn("None at", page)
+        rows = dict(
+            (cells[1], cells[2:])
+            for cells in (
+                re.findall(r"<td>([^<]*)</td>", row)
+                for row in re.findall(r"<tr>(<td>(?:Random brickwork|GHZ)</td>.*?)</tr>", page)
+            )
+        )
+        self.assertEqual(rows["PRISM-Q statevector"], ["double", "29§", "8.00 s", "memory at 30 qubits"])
+        self.assertEqual(rows["PRISM-Q GPU"], ["double", "29§", "900 ms", "memory at 30 qubits"])
+        self.assertEqual(rows["Aer"], ["double", "20‡", "5.00 ms", "memory at 29 qubits"])
+        self.assertEqual(rows["QuEST"], ["double", "20", "6.00 ms", "wider rungs not run"])
+        self.assertEqual(rows["qsim fp32"], ["single", "29*", "30.00 s", "one call over the rung budget at 30 qubits"])
+        self.assertEqual(rows["Stim"], ["exact (tableau)", "1,000", "1.00 ms", "timeout at 10,000 qubits"])
+        self.assertEqual(rows["PRISM-Q 1 thread"], ["double", "100,000", "100 ms", "top of the ladder"])
+        tiles = re.findall(r'<li class="pq-reach-t" data-tab="([a-z]+)">(.*?)</li>', page)
+        self.assertEqual([t[0] for t in tiles], ["dense", "stabilizer"])
+        dense = re.findall(r'<span class="pq-reach-s">([^<]+)</span>', tiles[0][1])
+        self.assertIn("<em>Statevector</em>", tiles[0][1])
+        self.assertEqual(dense[0], "PRISM-Q statevector§ · 8.00 s · memory at 30 qubits")
+        self.assertRegex(dense[1], r"^widest fp64 peer: (Aer|QuEST) at 20$")
+        self.assertEqual(dense[2:], ["fp32 peer: qsim fp32 at 29", "GPU: PRISM-Q GPU at 29, no GPU peer"])
+        stabilizer = re.findall(r'<span class="pq-reach-s">([^<]+)</span>', tiles[1][1])
+        self.assertIn("1 thread: PRISM-Q 100,000, Stim 1,000", stabilizer)
+        self.assertIn("times out (300 s on the Stabilizer ladders; 600 s on the Statevector ladders)", page)
+        self.assertIn("`PRISM_MAX_SV_QUBITS=30`", page)
+        self.assertIn("so the stabilizer ladders also run PRISM-Q at 1 thread", page)
+        self.assertIn(pages.MARK_WORDS[pages.PAIRED], page)
+        failures = page[page.index("## Correctness") :]
+        self.assertIn("| qsim (fp32) | invalid | rcs 30q d10 |", failures)
+        self.assertNotIn("| Stim | timeout |", failures)
+        self.assertNotIn("PRISM-Q (statevector) | refused", failures)
+        ghz = [o for o in data["observations"] if o.get("ladder") == "stabilizer/ghz" and o["simulator"] == "stim"]
+        self.assertEqual({o["qubits"]: o.get("ceiling") for o in ghz}, {1000: None, 10000: "timeout", 100000: None})
+        self.assertTrue(next(o for o in ghz if o["qubits"] == 100000)["beyond_ceiling"])
+        qsim = {
+            o["qubits"]: o for o in data["observations"] if o.get("ladder") == "dense/rcs" and o["simulator"] == "qsim"
+        }
+        self.assertEqual((qsim[29]["status"], qsim[29]["valid"]), ("ok", True))
+        self.assertEqual((qsim[30]["status"], qsim[30]["ceiling"]), ("invalid", "budget"))
+        self.assertEqual(data["ladders"], {"dense/rcs": "Random brickwork", "stabilizer/ghz": "GHZ"})
+
+    def test_reach_handles_rungs_left_out_and_unchecked(self) -> None:
+        wl = [workloads.rcs(n, 10) for n in (20, 24)]
+        left = [_ladder_rec("scaling", w, "quest", 0, "dense/rcs", status="skipped", reason="left out") for w in wl]
+        self.assertEqual(pages._reach(left), {"n": None, "record": None, "stop": "wider rungs not run"})
+        cannot = [_ladder_rec("scaling", w, "quest", 0, "dense/rcs", status="not-applicable") for w in wl]
+        self.assertEqual(pages._reach(cannot)["stop"], "cannot run at 20 qubits")
+        unchecked = [
+            aggregate._normalize(_ladder_rec("scaling", w, "qsim", 1.0, "dense/rcs", validation={"pass": None}))
+            for w in wl
+        ]
+        reach = pages._reach(unchecked)
+        self.assertEqual((reach["n"], reach["stop"], pages._mark(reach["record"])), (24, "top of the ladder", "*"))
+        crashed = unchecked[:1] + [_ladder_rec("scaling", wl[1], "qsim", 0, "dense/rcs", status="crash")]
+        self.assertEqual(pages._reach(crashed)["stop"], "crash at 24 qubits")
+
+    def test_zoo_sections_render_beside_the_families(self) -> None:
+        extra = []
+        for wl in (workloads.qaoa(20), workloads.adder(9)):
+            extra += [
+                _ladder_rec("zoo", wl, "prismq", 2.0, ladder=None, validation={"pass": True, "tvd": 0.0}),
+                _ladder_rec("zoo", wl, "aer-statevector", 8.0, ladder=None, validation={"pass": True, "tvd": 0.0}),
+            ]
+        wl = workloads.ghz(1000, 1000)
+        passed = {"ladder": None, "validation": {"pass": True}}
+        extra += [
+            _ladder_rec("zoo", wl, "prismq", 1.0, **passed),
+            _ladder_rec("zoo", wl, "prismq", 2.0, threads=1, **passed),
+            _ladder_rec("zoo", wl, "stim", 3.0, threads=1, **passed),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            page, _ = self._render(tmp, None, extra)
+        self.assertIn("## Circuit zoo, statevector {#circuit-zoo-statevector}", page)
+        self.assertIn("Aer takes 4.00x the PRISM-Q time, 20 qubits", page)
+        self.assertIn("## Circuit zoo, stabilizer {#circuit-zoo-stabilizer}", page)
+        self.assertIn("Stim takes 1.50x the 1-thread PRISM-Q time, 1,000 qubits", page)
+        self.assertIn("<td>qaoa 20q</td>", page)
+
     def test_status_words_tell_skipped_from_unrunnable_and_mark_checks(self) -> None:
         wl = workloads.clifford(4, 100)
         self.assertEqual(pages._status(None), "not run")
@@ -905,10 +1426,10 @@ class PageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page, _ = self._render(tmp)
         intro = page.index("tables mark")
-        issue = page.index("[open an")
+        issue = page.index("[open a benchmark issue]")
         self.assertLess(intro, issue)
         self.assertLess(issue, page.index('- <span class="pq-spec-l">Host</span> Intel'))
-        self.assertIn("https://github.com/AbeCoull/prism-q/issues", page)
+        self.assertIn("https://github.com/AbeCoull/prism-q/issues/new?template=BENCHMARK.yml", page)
 
     def test_setup_names_a_dirty_commit_and_an_unrecorded_compiler(self) -> None:
         manifest = _provenance_manifest()
@@ -1038,6 +1559,99 @@ def _provenance_manifest() -> dict:
         **base,
         "supplementary_runs": [old_supplement, {"run_id": NEW_RUN, "command": "matrix.py run --append", **new}],
     }
+
+
+def _ladder_rec(group, wl, sim, median, ladder="", threads=8, status="ok", **extra) -> dict:
+    ran = status == "ok"
+    record = {
+        "schema": matrix.SCHEMA,
+        "run_id": "z",
+        "group": group,
+        "workload": wl.summary(),
+        "simulator": sim,
+        "precision": runners.resolve(sim).precision,
+        "threads": threads,
+        "status": status,
+        "samples_ms": [median] * 3 if ran else [],
+        "stats": stats.summarize([median] * 3 if ran else []),
+        "phases": {"first_ms": median} if ran else {},
+        "policy": {"iterations": 3, "min_iterations": 1, "budget_s": 15.0, "timeout_s": 600.0},
+        **extra,
+    }
+    if ladder:
+        record["ladder"] = ladder
+        record["policy"]["ceiling_s"] = 60.0
+    return record
+
+
+def _ladder_records() -> list[dict]:
+    """A dense and a stabilizer ladder covering every way a climb ends.
+
+    No fp64 reference past 20 qubits, a cross-checked PRISM-Q pair, a harness memory refusal, a
+    runner memory refusal, a budget ceiling whose output failed its check, rungs the profile left
+    out, a timeout, and PRISM-Q at 1 thread beside single-threaded Stim.
+    """
+    cap = {"env": {"PRISM_MAX_SV_QUBITS": "30"}, "resolved_backend": "Statevector"}
+    paired = {
+        "pass": None,
+        "role": "untested",
+        "reason": "no fp64 reference ran on this row; agrees",
+        "cross_check": {"tvd": 0.0},
+    }
+    out = []
+    for n in (20, 29, 30):
+        wl = workloads.rcs(n, 10)
+        dense = {"pass": True, "tvd": 0.0} if n == 20 else paired
+
+        def add(sim, median, **extra):
+            out.append(_ladder_rec("scaling", wl, sim, median, "dense/rcs", **extra))
+
+        if n < 30:
+            add("prismq:statevector", 0.5 if n == 20 else 8000.0, validation=dense, **cap)
+            add("prismq:gpu", 0.4 if n == 20 else 900.0, validation=dense)
+        else:
+            reason = "backend `statevector`: the state needs 31 qubits, exceeding the cap of 30"
+            add("prismq:statevector", 0, status="error", reason=reason, ceiling="memory", **cap)
+            add("prismq:gpu", 0, status="oom", reason="device allocation failed", ceiling="memory")
+        if n == 20:
+            add("aer-statevector", 5.0, validation={"pass": None, "role": "reference"})
+            add("quest", 6.0, validation={"pass": True, "tvd": 0.0})
+            add("qsim", 2.0, precision="single", validation={"pass": True, "tvd": 0.0})
+        elif n == 29:
+            add(
+                "aer-statevector", 0, status="not-applicable", reason="dense state of 2^29 amplitudes", ceiling="memory"
+            )
+            add("quest", 0, status="skipped", reason="left out")
+            add("qsim", 30_000.0, precision="single", validation={"pass": None, "reason": "no fp64 reference ran"})
+        else:
+            past = {"reason": "past this ladder's ceiling (memory at 29 qubits)", "beyond_ceiling": True}
+            add("aer-statevector", 0, status="skipped", **past)
+            add("quest", 0, status="skipped", reason="left out")
+            failed = {"pass": False, "failures": ["b3: p < 1e-6"], "tvd": 0.2}
+            add("qsim", 70_000.0, precision="single", validation=failed, ceiling="budget")
+    stab = {"timeout_s": 300.0}
+    for n in (1000, 10_000, 100_000):
+        wl = workloads.ghz(n, 1000)
+        passed = {"validation": {"pass": True}}
+        out.append(_ladder_rec("scaling", wl, "prismq", n / 2500, "stabilizer/ghz", **passed))
+        out.append(_ladder_rec("scaling", wl, "prismq", n / 1000, "stabilizer/ghz", threads=1, **passed))
+        if n == 1000:
+            out.append(
+                _ladder_rec(
+                    "scaling", wl, "stim", 1.0, "stabilizer/ghz", threads=1, precision="exact (tableau)", **passed
+                )
+            )
+        elif n == 10_000:
+            out.append(
+                _ladder_rec("scaling", wl, "stim", 0, "stabilizer/ghz", threads=1, status="timeout", ceiling="timeout")
+            )
+        else:
+            past = {"reason": "past this ladder's ceiling (timeout at 10,000 qubits)", "beyond_ceiling": True}
+            out.append(_ladder_rec("scaling", wl, "stim", 0, "stabilizer/ghz", threads=1, status="skipped", **past))
+    for r in out:
+        if r["ladder"].startswith("stabilizer"):
+            r["policy"].update(stab)
+    return out
 
 
 def _wide_records() -> list[dict]:

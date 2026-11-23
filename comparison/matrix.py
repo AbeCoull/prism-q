@@ -3,7 +3,7 @@
     python comparison/matrix.py list --profile reference
     python comparison/matrix.py run --profile smoke --out comparison/results/smoke
     python comparison/matrix.py aggregate comparison/results/smoke
-    python comparison/matrix.py report comparison/results/matrix-reference-i7-6700k --docs docs/performance
+    python comparison/matrix.py report comparison/results/my-run --docs docs/performance
 
 `run` writes `observations.jsonl` (one record per simulator, workload and
 thread count, failures included), `manifest.json` (host, toolchain, versions,
@@ -44,6 +44,8 @@ COUNTS_FALLBACKS = ("aer-statevector", "aer-stabilizer", "aer-mps", "aer-automat
 FP64_TOLERANCE = 1e-8
 FP32_TOLERANCE = 1e-5
 NOT_PASS_FAIL = ("accuracy", "bondsweep")
+NO_REFERENCE = "no fp64 reference ran on this row"
+PRISMQ_PAIR = ("prismq:statevector", "prismq:gpu")
 OUTPUTS = "outputs"
 MAX_STORED_BYTES = 1 << 26
 OUTPUT_SUFFIX = {"probs": ".f64", "counts": ".counts", "expval": ".values", "stats": ".stats"}
@@ -51,15 +53,20 @@ FRESH_RUN_REMOVES = ("superseded.jsonl", "fusion.json", "samples.csv", "summary.
 RUN_PROVENANCE_KEYS = ("memory_method", "timed_region", "repetition_policy", "validation", "provenance", "simulators")
 
 
-def build_runner() -> None:
-    print("building compare_runner ...", flush=True)
-    proc = subprocess.run(
-        ["cargo", "build", "--release", "--features", "parallel", "--example", "compare_runner"],
-        cwd=runners.REPO_ROOT,
-        check=False,
-    )
-    if proc.returncode != 0:
-        sys.exit("cargo build failed")
+def build_runner(gpu: bool = False) -> None:
+    """Build `compare_runner` with `parallel`, and a second copy with `gpu` in its own target directory."""
+    builds = [["--features", "parallel"]]
+    if gpu:
+        builds.append(["--features", "parallel gpu", "--target-dir", os.path.join("target", "gpu")])
+    for flags in builds:
+        print(f"building compare_runner {' '.join(flags)} ...", flush=True)
+        proc = subprocess.run(
+            ["cargo", "build", "--release", *flags, "--example", "compare_runner"],
+            cwd=runners.REPO_ROOT,
+            check=False,
+        )
+        if proc.returncode != 0:
+            sys.exit("cargo build failed")
 
 
 def load_profile(args: argparse.Namespace) -> profiles.Profile:
@@ -122,7 +129,8 @@ def _sha256(path: str) -> str | None:
 def _code_hashes() -> dict[str, str | None]:
     """SHA-256 of every binary and script a measurement runs through."""
     here = os.path.dirname(os.path.abspath(__file__))
-    paths = {"compare_runner": runners.RUNNER, "peers": runners.PEERS, "quest_runner": runners.QUEST}
+    paths = {"compare_runner": runners.RUNNER, "compare_runner_gpu": runners.RUNNER_GPU}
+    paths.update({"peers": runners.PEERS, "quest_runner": runners.QUEST})
     paths["matrix.py"] = os.path.abspath(__file__)
     for path in sorted(glob.glob(os.path.join(here, "harness", "*.py"))):
         paths[f"harness/{os.path.basename(path)}"] = path
@@ -208,19 +216,39 @@ def _manifest(args: argparse.Namespace, profile: profiles.Profile, run_id: str, 
 CIRCUITS = "circuits.jsonl.gz"
 
 
-def load_circuits(results_dir: str) -> dict[str, str]:
-    """Gate list text by SHA-256 from a results directory's circuit store."""
+def _store_entries(results_dir: str) -> list[dict]:
     path = os.path.join(results_dir, CIRCUITS)
     if not os.path.exists(path):
-        return {}
+        return []
     with gzip.open(path, "rt", encoding="utf-8") as handle:
-        return {entry["sha256"]: entry["text"] for entry in map(json.loads, handle)}
+        return [json.loads(line) for line in handle if line.strip()]
+
+
+def load_circuits(results_dir: str) -> dict[str, str]:
+    """Gate list text by SHA-256 from a results directory's circuit store.
+
+    An entry holds the text itself, or the recipe of a harness generator, which is rebuilt
+    here and must hash to the recorded SHA-256.
+    """
+    texts = {}
+    for entry in _store_entries(results_dir):
+        if "recipe" in entry:
+            text = workloads.from_recipe(entry["recipe"]).text
+            if hashlib.sha256(text.encode("utf-8")).hexdigest() != entry["sha256"]:
+                raise ValueError(f"recipe {entry['recipe']} no longer reproduces {entry['sha256']}")
+        else:
+            text = entry["text"]
+        texts[entry["sha256"]] = text
+    return texts
 
 
 def _save_circuit(out_dir: str, workload: workloads.Workload, known: set[str]) -> str:
+    """Store a workload once: its recipe when a harness generator built it, otherwise its text."""
     if workload.sha256 not in known:
+        entry = {"sha256": workload.sha256}
+        entry.update({"recipe": workload.recipe} if workload.recipe else {"text": workload.text})
         with gzip.open(os.path.join(out_dir, CIRCUITS), "at", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps({"sha256": workload.sha256, "text": workload.text}) + "\n")
+            handle.write(json.dumps(entry) + "\n")
         known.add(workload.sha256)
     return CIRCUITS
 
@@ -240,6 +268,12 @@ def _stored_sources(stored: list[dict], names: tuple[str, ...] | None, out_dir: 
         if (names is None or r["simulator"] in names) and aggregate.validated(r) and path and os.path.exists(path):
             found[r["simulator"]] = (path, r)
     return found
+
+
+def _pass_optional(r: dict) -> bool:
+    """Whether a record's check is reported but not required to pass: the accuracy groups, and a
+    bond-capped MPS forced in dispatch, whose truncation is what the cell shows."""
+    return r["group"] in NOT_PASS_FAIL or (r["group"] == "dispatch" and r["simulator"].startswith("prismq:mps-"))
 
 
 def _validate_row(
@@ -270,7 +304,8 @@ def _validate_probs(ok: list[dict], outputs: dict[str, str], stored: list[dict],
     ref_name = next((n for n in PROBS_REFERENCES if n in sources), None)
     if ref_name is None:
         for r in ok:
-            r["validation"] = {"pass": None, "reason": "no fp64 reference ran on this row"}
+            r["validation"] = {"pass": None, "role": "untested", "reason": NO_REFERENCE}
+        _cross_check_prismq(ok, outputs)
         return
     ref_path, ref_record = sources[ref_name]
     ref = _read_vector(ref_path)
@@ -282,7 +317,7 @@ def _validate_probs(ok: list[dict], outputs: dict[str, str], stored: list[dict],
             shown = "different lengths" if distance is None else f"{distance:.2g}"
             reason = f"Aer and QuEST disagree (distance {shown}, tolerance {FP64_TOLERANCE:g}); no trusted reference"
             for r in ok:
-                r["validation"] = {"pass": None, "reason": reason}
+                r["validation"] = {"pass": None, "role": "untested", "reason": reason}
             return
         cross_check = {"simulator": "quest", "tvd": distance, "tolerance": FP64_TOLERANCE}
     for r in ok:
@@ -303,9 +338,31 @@ def _validate_probs(ok: list[dict], outputs: dict[str, str], stored: list[dict],
             "tolerance": tolerance,
             "pass": distance is not None and distance <= tolerance,
         }
-        if r["group"] in NOT_PASS_FAIL:
+        if _pass_optional(r):
             r["validation"]["pass_required"] = False
         del vec
+
+
+def _cross_check_prismq(ok: list[dict], outputs: dict[str, str]) -> None:
+    """Check PRISM-Q's host and device statevectors against each other on a row no fp64 peer reached.
+
+    Agreement leaves both untested with the distance attached; a disagreement fails both.
+    """
+    pair = [r for r in ok if r["simulator"] in PRISMQ_PAIR]
+    if len(pair) != 2:
+        return
+    distance = validate.tvd(_read_vector(outputs[pair[0]["simulator"]]), _read_vector(outputs[pair[1]["simulator"]]))
+    agree = distance is not None and distance <= FP64_TOLERANCE
+    for r, other in ((pair[0], pair[1]), (pair[1], pair[0])):
+        check = {"simulator": other["simulator"], "tvd": distance, "tolerance": FP64_TOLERANCE}
+        r["validation"]["cross_check"] = check
+        if agree:
+            r["validation"]["reason"] = f"{NO_REFERENCE}; agrees with {other['simulator']} only"
+        else:
+            shown = "different lengths" if distance is None else f"{distance:.2g}"
+            failure = f"{other['simulator']} disagrees (distance {shown}, tolerance {FP64_TOLERANCE:g})"
+            r["validation"].pop("role")
+            r["validation"].update({"pass": False, "failures": [failure]})
 
 
 def _preference(names: list[str]) -> list[str]:
@@ -376,6 +433,8 @@ def _validate_counts(
         if used in stored_runs:
             check["fallback_run_id"] = stored_runs[used]
         check["exact_reference_s"] = round(exact_s, 3)
+        if _pass_optional(r):
+            check["pass_required"] = False
         r["validation"] = check
 
 
@@ -413,7 +472,7 @@ def _validate_expval(
         if check["agreement_simulator"] in stored_runs:
             check["agreement_run_id"] = stored_runs[check["agreement_simulator"]]
         check["exact_reference_s"] = round(exact_s, 3)
-        if r["group"] in NOT_PASS_FAIL:
+        if _pass_optional(r):
             check["pass_required"] = False
         r["validation"] = check
 
@@ -492,10 +551,45 @@ def _stored_rows(obs_path: str) -> dict[tuple[str, str], list[dict]]:
     return rows
 
 
+CEILING_STATUS = {"timeout": "timeout", "oom": "memory"}
+CAP_MARKER = "exceeding the cap of"
+
+
+def ceiling_cause(record: dict, cell: profiles.Cell) -> str | None:
+    """Why a ladder rung ends its simulator's climb: a timeout, a memory refusal, or a cold call over `ceiling_s`.
+
+    A native peer without a cold call split is judged on its first process, which runs the circuit once.
+    """
+    status = record["status"]
+    if status in CEILING_STATUS:
+        return CEILING_STATUS[status]
+    if status == "error" and CAP_MARKER in (record.get("reason") or ""):
+        return "memory"
+    phases = record.get("phases") or {}
+    call_ms = phases.get("first_ms", phases.get("process_wall_ms"))
+    if status == "ok" and cell.ceiling_s is not None and call_ms is not None and call_ms > cell.ceiling_s * 1000.0:
+        return "budget"
+    return None
+
+
+def _stored_ceilings(stored_rows: dict[tuple[str, str], list[dict]]) -> dict[tuple[str, str, int], tuple[int, str]]:
+    """The narrowest recorded ceiling per ladder, simulator and thread count, so an appended run keeps it."""
+    found: dict[tuple[str, str, int], tuple[int, str]] = {}
+    for recs in stored_rows.values():
+        for r in recs:
+            if not (r.get("ladder") and r.get("ceiling")):
+                continue
+            n = r["workload"]["num_qubits"]
+            key = (r["ladder"], r["simulator"], r["threads"])
+            if key not in found or n < found[key][0]:
+                found[key] = (n, f"{r['ceiling']} at {n:,} qubits")
+    return found
+
+
 def cmd_run(args: argparse.Namespace) -> int:
-    if not args.no_build:
-        build_runner()
     profile = load_profile(args)
+    if not args.no_build:
+        build_runner(gpu=any(name == "prismq:gpu" for c in profile.cells for name in c.simulators))
     checks = smoke_check(profile)
     failed = sorted(name for name, check in checks.items() if not check["ok"])
     if failed:
@@ -509,7 +603,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     run_id = f"{dt.datetime.now():%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}"
 
     names = sorted({n for c in profile.cells for n in c.simulators})
-    versions = {n: runners.version(runners.resolve(n)) for n in sorted({n.partition(":")[0] for n in names})}
+    distinct = {n.partition(":")[0] for n in names} | ({"prismq:gpu"} & set(names))
+    versions = {n: runners.version(runners.resolve(n)) for n in sorted(distinct)}
     manifest = _manifest(args, profile, run_id, versions)
     manifest["skipped_peers"] = list(args.skip_peer)
     manifest["smoke"] = checks
@@ -545,11 +640,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     with open(manifest_path, "w", encoding="utf-8") as handle:
         json.dump(base_manifest or manifest, handle, indent=2)
 
-    known = set(load_circuits(out_dir))
+    known = {entry["sha256"] for entry in _store_entries(out_dir)}
     stored_rows = _stored_rows(obs_path) if args.append else {}
     order_rng = np.random.Generator(np.random.PCG64(ORDER_SEED))
     started = time.perf_counter()
     replaced = 0
+    ceilings = _stored_ceilings(stored_rows)
     for index, cell in enumerate(profile.cells, start=1):
         wl = cell.workload
         circuit_file = _save_circuit(out_dir, wl, known)
@@ -591,12 +687,26 @@ def cmd_run(args: argparse.Namespace) -> int:
                         "budget_s": cell.budget_s,
                         "timeout_s": cell.timeout_s,
                     },
-                    "version": versions.get(name.partition(":")[0]),
+                    "version": versions.get(name, versions.get(name.partition(":")[0])),
                 }
+                if sim.env:
+                    record["env"] = dict(sim.env)
+                if cell.ladder:
+                    record["ladder"] = cell.ladder
+                    record["policy"]["ceiling_s"] = cell.ceiling_s
                 reason = not_applicable(cell, name, sim)
-                if reason:
+                ceiling = ceilings.get((cell.ladder, name, threads)) if cell.ladder else None
+                climbed = ceiling if ceiling and wl.num_qubits > ceiling[0] else None
+                if climbed:
+                    record.update({"status": "skipped", "reason": f"past this ladder's ceiling ({climbed[1]})"})
+                    record["beyond_ceiling"] = True
+                    print(f"      {name:30s} {'past ceiling':>13s}  {climbed[1]}", flush=True)
+                elif reason:
                     status = "skipped" if name in cell.excluded else "not-applicable"
                     record.update({"status": status, "reason": reason})
+                    if cell.ladder and reason.startswith(runners.MEMORY_REFUSAL):
+                        record["ceiling"] = "memory"
+                        ceilings[(cell.ladder, name, threads)] = (wl.num_qubits, f"memory at {wl.num_qubits:,} qubits")
                 else:
                     out_path = runners.temp_output(OUTPUT_SUFFIX[wl.mode])
                     temps.append(out_path)
@@ -617,6 +727,10 @@ def cmd_run(args: argparse.Namespace) -> int:
                     except Exception as exc:
                         record.update({"status": "error", "reason": f"harness: {type(exc).__name__}: {exc}"})
                     record["stats"] = stats.summarize(record.get("samples_ms", []))
+                    cause = ceiling_cause(record, cell) if cell.ladder else None
+                    if cause:
+                        record["ceiling"] = cause
+                        ceilings[(cell.ladder, name, threads)] = (wl.num_qubits, f"{cause} at {wl.num_qubits:,} qubits")
                     if record["status"] == "ok" and threads == top[name]:
                         outputs[name] = out_path
                     elif record["status"] == "ok" and name in cell.sim_threads:
@@ -742,12 +856,12 @@ def gate_smoke_text(gate: str | None) -> str:
     a, b = GATE_SMOKE_PAIR
     if gate in ("h", "x", "z", "s", "sdg"):
         lines.append(f"{gate} {a}")
-    elif gate in ("ry", "rz"):
+    elif gate in ("rx", "ry", "rz"):
         lines.append(f"{gate} {a} 1.1")
     elif gate in ("cx", "cz", "swap"):
         lines.append(f"{gate} {a} {b}")
-    elif gate == "cp":
-        lines.append(f"cp {a} {b} 0.9")
+    elif gate in ("cp", "rzz"):
+        lines.append(f"{gate} {a} {b} 0.9")
     lines += [f"ry {q} {0.7 + 0.11 * q!r}" for q in range(n)]
     return "\n".join(lines) + "\n"
 

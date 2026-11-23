@@ -17,12 +17,15 @@ const NS = 'http://www.w3.org/2000/svg', O = D.observations, draws = [];
 const NAME = {prismq: 'PRISM-Q', 'aer-statevector': 'Aer', 'aer-statevector-f32': 'Aer fp32', 'aer-automatic': 'Aer automatic',
   'aer-mps': 'Aer MPS', qsim: 'qsim fp32', quest: 'QuEST', spinoza: 'Spinoza', qip: 'qip', stim: 'Stim',
   'quimb-tn': 'quimb TN', 'quimb-mps:256': 'quimb MPS cap 256', 'aer-mps:256': 'Aer MPS cap 256',
-  'prismq:mps-256': 'PRISM-Q MPS cap 256', 'prismq:tensor-network': 'PRISM-Q TN', 'prismq:no-qft-block': 'PRISM-Q, QFT recognition off'};
+  'prismq:mps-256': 'PRISM-Q MPS cap 256', 'prismq:tensor-network': 'PRISM-Q TN', 'prismq:no-qft-block': 'PRISM-Q, QFT recognition off',
+  'prismq:statevector': 'PRISM-Q statevector', 'prismq:gpu': 'PRISM-Q GPU', 'prismq:mps-64': 'PRISM-Q MPS cap 64',
+  'prismq:factored': 'PRISM-Q factored', 'aer-stabilizer': 'Aer stabilizer', 'quimb-mps:64': 'quimb MPS cap 64'};
 const VER = {prismq: 'PRISM-Q', 'aer-statevector': 'Aer statevector', 'aer-statevector-f32': 'Aer statevector (fp32)',
-  'aer-automatic': 'Aer automatic', 'aer-mps': 'Aer MPS', qsim: 'qsim (fp32)', quest: 'QuEST', spinoza: 'Spinoza', qip: 'qip', stim: 'Stim',
-  'quimb-tn': 'quimb TN', 'quimb-mps': 'quimb MPS'};
+  'aer-automatic': 'Aer automatic', 'aer-mps': 'Aer MPS', 'aer-stabilizer': 'Aer stabilizer', qsim: 'qsim (fp32)', quest: 'QuEST',
+  spinoza: 'Spinoza', qip: 'qip', stim: 'Stim', 'quimb-tn': 'quimb TN', 'quimb-mps': 'quimb MPS'};
 const STAT = {oom: 'out of memory', crash: 'crash', timeout: 'timeout', invalid: 'invalid', error: 'refused',
   'not-applicable': 'cannot run', skipped: 'not run'};
+const CEIL = {timeout: 'timeout', memory: 'memory', budget: 'over budget'};
 const STUB = Object.assign({}, STAT, {oom: 'oom'});
 const key = s => s.split(':')[0];
 const nm = o => NAME[o.simulator] || o.name;
@@ -40,6 +43,8 @@ const fdist = t => t == null ? 'n/a' : t >= 0.01 ? String(+t.toPrecision(2)) : t
 const span = rs => { const a = fx(Math.min.apply(null, rs)), b = fx(Math.max.apply(null, rs)); return a === b ? a : a + ' to ' + b; };
 const ftick = v => v < 1 ? +(v * 1000).toPrecision(3) + ' us' : v < 1000 ? +v.toPrecision(3) + ' ms' : +(v / 1000).toPrecision(3) + ' s';
 const fxt = v => +v.toPrecision(3) + 'x';
+// Ratio axes stop here; a range past it ends in an arrow at the edge and keeps its true label.
+const RATIO_CAP = 1000, capR = v => Math.min(v, RATIO_CAP);
 const ferr = t => t >= 0.01 ? String(t) : '1e' + Math.round(Math.log10(t));
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
 const median = a => { const s = a.slice().sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
@@ -73,31 +78,38 @@ const pairRatio = (o, q) => o.ratio != null && q.threads === o.threads && q.simu
 const ratio = (p, q) => { q = p && mate(p, q); return valid(p) && valid(q) ? pairRatio(p, q) : null; };
 const peerOf = s => s.indexOf('prismq') !== 0;
 
-// `split` names the field and values of a section's View control; `base` is the ratio column's
-// denominator when it is not plain PRISM-Q.
+// `split` names the field a section's View control splits its rows by; `base` is the ratio
+// column's denominator when it is not plain PRISM-Q.
 const SEC = [
   {id: 'sv64', name: 'Statevector, fp64', chip: 'Statevector fp64', g: 'headline', fam: ['rcs', 'qft', 'qv'],
-    sims: ['prismq', 'aer-statevector', 'quest', 'spinoza', 'qip'], ref: 'aer-statevector', split: ['qubits', [16, 20, 24, 26]]},
+    sims: ['prismq', 'aer-statevector', 'quest', 'spinoza', 'qip'], ref: 'aer-statevector', split: 'qubits'},
   {id: 'sv32', name: 'Statevector against fp32 peers', chip: 'fp32 peers', g: 'headline', fam: ['rcs', 'qft', 'qv'],
-    sims: ['prismq', 'aer-statevector-f32', 'qsim'], ref: 'qsim', split: ['qubits', [16, 20, 24, 26]]},
+    sims: ['prismq', 'aer-statevector-f32', 'qsim'], ref: 'qsim', split: 'qubits'},
   {id: 'stabilizer', name: 'Stabilizer', chip: 'Stabilizer', g: 'headline', fam: ['clifford'], sims: ['prismq', 'prismq@1', 'stim'],
     ref: 'stim'},
   {id: 'highshot', name: 'High-shot stabilizer', chip: 'High-shot', g: 'highshot', fam: ['clifford'],
     sims: ['prismq', 'prismq@1', 'stim'], ref: 'stim', base: 'PRISM-Q 1t', byThreads: true},
   {id: 'mps', name: 'Matrix product state', chip: 'MPS', g: 'headline', fam: ['lowent'],
-    sims: ['prismq', 'aer-mps', 'aer-automatic'], ref: 'aer-mps', split: ['depth', [4, 8]]},
+    sims: ['prismq', 'aer-mps', 'aer-automatic'], ref: 'aer-mps', split: 'depth'},
   {id: 'mpsdeep', name: 'Deep MPS', chip: 'Deep MPS', g: 'mpsdeep', fam: ['lowent'],
-    sims: ['prismq:mps-256', 'aer-mps:256', 'quimb-mps:256'], ref: 'aer-mps:256', split: ['depth', [12, 16]], base: 'PRISM-Q MPS'},
-  {id: 'tn', name: 'Tensor network expectation values', chip: 'TN expval', g: 'tn', fam: ['rcs'],
+    sims: ['prismq:mps-256', 'aer-mps:256', 'quimb-mps:256'], ref: 'aer-mps:256', split: 'depth', base: 'PRISM-Q MPS'},
+  {id: 'tn', name: 'Tensor network expectation values', chip: 'TN expval', g: 'tn', fam: ['rcs', 'tfim'],
     sims: ['prismq', 'prismq:tensor-network', 'prismq:mps-256', 'quimb-tn', 'aer-mps'], ref: 'quimb-tn'},
   {id: 'sampling', name: 'Shot sampling', chip: 'Sampling', g: 'sampling', fam: ['sampling'],
-    sims: ['prismq', 'aer-statevector', 'aer-statevector-f32', 'qsim'], ref: 'aer-statevector', split: ['qubits', [16, 20, 24]]},
+    sims: ['prismq', 'aer-statevector', 'aer-statevector-f32', 'qsim'], ref: 'aer-statevector', split: 'qubits'},
   {id: 'disjoint', name: 'Disjoint components', chip: 'Disjoint', g: 'headline', fam: ['disjoint'],
+    sims: ['prismq', 'aer-mps', 'aer-automatic'], ref: 'aer-mps'},
+  {id: 'zoodense', name: 'Circuit zoo, statevector', chip: 'Zoo dense', g: 'zoo', fam: ['hea', 'qaoa', 'tfim', 'adder'],
+    sims: ['prismq', 'aer-statevector', 'quest', 'spinoza', 'qip', 'aer-statevector-f32', 'qsim'], ref: 'aer-statevector',
+    split: 'family'},
+  {id: 'zooclifford', name: 'Circuit zoo, stabilizer', chip: 'Zoo stabilizer', g: 'zoo', fam: ['ghz', 'bv'],
+    sims: ['prismq', 'prismq@1', 'stim', 'aer-stabilizer'], ref: 'stim'},
+  {id: 'zoosampled', name: 'Circuit zoo, W state', chip: 'Zoo W state', g: 'zoo', fam: ['wstate'],
     sims: ['prismq', 'aer-mps', 'aer-automatic'], ref: 'aer-mps'}
 ];
 const SECM = {};
 SEC.forEach(s => { SECM[s.id] = s; });
-const FAM = ['rcs', 'qft', 'qv', 'clifford', 'lowent', 'sampling', 'disjoint'];
+const FAM = ['rcs', 'qft', 'qv', 'hea', 'qaoa', 'tfim', 'adder', 'clifford', 'ghz', 'bv', 'lowent', 'wstate', 'sampling', 'disjoint'];
 const order = (a, b) => FAM.indexOf(a.family) - FAM.indexOf(b.family) || (a.depth || 0) - (b.depth || 0) || a.qubits - b.qubits ||
   (a.measured === 'half') - (b.measured === 'half') || String(a.layout || '').localeCompare(String(b.layout || '')) || (a.shots || 0) - (b.shots || 0);
 function secRows(sec) {
@@ -272,6 +284,7 @@ function tipHTML(o) {
   if (o.precision) meta.push(esc(o.precision));
   if (o.resolved_backend) meta.push(esc(o.resolved_backend));
   else if (o.method) meta.push(esc(o.method));
+  if (o.placement === 'Device') meta.push('on the GPU');
   const G = [];
   const pq = peerOf(o.simulator) && mate(o, get(o.group, o.workload, baseOf(o.group))), r = pq && ratio(o, pq);
   if (r) G.push(['x ' + (NAME[pq.simulator] || pq.name) + ' (' + fms(pq.median_ms) +
@@ -290,8 +303,10 @@ function tipHTML(o) {
   if (o.status !== 'ok') s = esc(statusWord(o)) + (o.reason ? ': ' + esc(o.reason) : '');
   else if (o.role === 'too-few-shots') s = 'under 100 shots: checked on deterministic bits only, no ratio';
   else if (o.role === 'reference') s = 'reference output' + (o.cross_checked ? ', cross-checked' : ', no cross-check');
+  else if (o.role === 'untested' && o.cross_checked) s = 'no fp64 reference reached this row; checked only against the other PRISM-Q statevector';
   else if (o.role === 'weakly-tested') s = 'weakly tested: detects shifts above ' + fdist(o.min_detectable) + ' in a marginal';
   else if (!o.validated) s = 'timed, output not checked';
+  if (o.ceiling) s = (s ? s + '; ' : '') + 'ceiling on this ladder: ' + CEIL[o.ceiling] + ', wider rungs skipped';
   return '<div class="pq-th">' + esc(nm(o)) + ' <span>' + esc(ver(o)) + '</span></div><div class="pq-tm">' + meta.join(' · ') + '</div>' +
     (G.length ? tgrid(G) : '') + (s ? '<div class="pq-ts">' + s + '</div>' : '');
 }
@@ -542,19 +557,29 @@ function linePanel(fig, spec) {
 function lineCell(box, m, label) {
   const W = box.clientWidth || 260, Hh = m.h || 196;
   const ser = m.series.map(s => ({s: s, pts: s.pts.map(p => ({x: p.x, o: p.o, y: m.y(p.o, s)})).filter(p => p.y != null)}))
-    .filter(s => s.pts.length > 1);
+    .filter(s => s.pts.length > (m.single ? 0 : 1));
   if (!ser.length) { box.replaceChildren(); return false; }
-  const ys = [];
-  ser.forEach(s => s.pts.forEach(p => ys.push(p.y)));
+  const ys = [], whisk = p => m.spread && m.spread(p.o);
+  ser.forEach(s => s.pts.forEach(p => { ys.push(p.y); const w = whisk(p); if (w) ys.push(w[0], w[1]); }));
   let lo = Math.min.apply(null, ys), hi = Math.max.apply(null, ys);
   if (m.log) { lo /= 1.5; hi *= 1.5; } else { lo = 0; hi = Math.max(hi * 1.1, m.minHi || 2); }
   const tk = ticks(lo, hi, m.log, m.log ? 5 : Math.min(6, Math.ceil(hi)));
   const lw = Math.max(0, ...ser.map(s => tw(s.s.name, FS.label, s.s.cls !== 'peer')));
-  const l = Math.max(...tk.map(t => tw(m.tick(t), FS.tick))) + 10, r = lw + 16, t = 10, b = 24, iw = W - l - r, ih = Hh - t - b;
-  const xs = m.xs, xl = xs[0], xh = xs[xs.length - 1];
-  const xi = m.xscale === 'cat' ? x => xs.indexOf(x) / (xs.length - 1) : m.xscale === 'log' ? x => Math.log(x / xl) / Math.log(xh / xl)
-    : x => (x - xl) / (xh - xl);
+  const l = Math.max(...tk.map(k => tw(m.tick(k), FS.tick))) + 10, r = lw + 16, b = 24, iw = W - l - r;
+  const xs = m.xs, xl = xs[0], xh = xs[xs.length - 1], one = xs.length < 2;
+  const xi = one ? () => 0.5 : m.xscale === 'cat' ? x => xs.indexOf(x) / (xs.length - 1)
+    : m.xscale === 'log' ? x => Math.log(x / xl) / Math.log(xh / xl) : x => (x - xl) / (xh - xl);
   const X = x => l + xi(x) * iw;
+  // Ceiling labels sit above the plot, each in the first row where it overlaps no earlier label.
+  const placed = [], marks = (m.ceilings || []).map(c => {
+    const w = tw(c.word, FS.tick), cx = Math.min(Math.max(X(c.x), l + w / 2), l + iw + r - w / 2);
+    let row = 0;
+    while (placed.some(q => q.row === row && cx - w / 2 < q.x1 + 6 && cx + w / 2 > q.x0 - 6)) row++;
+    placed.push({row: row, x0: cx - w / 2, x1: cx + w / 2});
+    return {c: c, cx: cx, row: row};
+  });
+  const rows = marks.length ? Math.max(...marks.map(q => q.row)) + 1 : 0;
+  const t = 10 + rows * 12, ih = Hh - t - b;
   const Y = yv => t + ih - (m.log ? Math.log(yv / lo) / Math.log(hi / lo) : (yv - lo) / (hi - lo)) * ih;
   const svg = svgEl(W, Hh, label);
   tk.forEach(k => {
@@ -565,6 +590,10 @@ function lineCell(box, m, label) {
   const xt = m.xticks || xs;
   xAxis(svg, xt, X, m.xfmt, {W: W, y: Hh - 7});
   if (m.xtitle) T(svg, X(xt[xt.length - 1]) + tw(m.xfmt(xt[xt.length - 1]), FS.tick) / 2 + 6, Hh - 7, m.xtitle, 'pq-tick');
+  marks.forEach(q => {
+    S('line', {class: 'pq-ceil', 'data-k': q.c.k, x1: X(q.c.x), x2: X(q.c.x), y1: t - 2, y2: t + ih}, svg);
+    mark(T(svg, q.cx, t - 6 - (rows - 1 - q.row) * 12, q.c.word, 'pq-ceilt', 'middle'), q.c.o, q.c.k);
+  });
   const ends = [];
   let failed = false;
   ser.sort((a, c) => (a.s.cls === 'pq') - (c.s.cls === 'pq')).forEach(s => {
@@ -572,6 +601,8 @@ function lineCell(box, m, label) {
     S('path', {class: 'pq-line ' + cls + (s.s.dash ? ' dash' : ''), 'data-k': s.s.k,
       d: s.pts.map((p, i) => (i ? 'L' : 'M') + X(p.x).toFixed(1) + ',' + Y(p.y).toFixed(1)).join('')}, svg);
     s.pts.forEach(p => {
+      const w = whisk(p);
+      if (w) S('line', {class: 'pq-whisk ' + cls, 'data-k': s.s.k, x1: X(p.x), x2: X(p.x), y1: Y(w[0]), y2: Y(w[1])}, svg);
       if (p.o.status !== 'ok') failed = true;
       mark(S('circle', {class: 'pq-pt ' + cls + (p.o.status !== 'ok' ? ' hollow' : ''), cx: X(p.x), cy: Y(p.y), r: cls === 'pq' ? 3.6 : 3}, svg),
         p.o, s.s.k);
@@ -614,7 +645,7 @@ function summary(fig) {
     const labW = narrow ? Math.min(W * 0.4, Math.ceil(Math.max(...all.map(p => tw(NAME[p.s], FS.text, p.ref)))) + 10) : 118;
     const ax0 = labW + 8, P = W - 4 - ax0;
     const wr = Math.max.apply(null, all.map(p => tw(span([p.lo, p.hi]), FS.value, true))) + 12;
-    const dom = fitLog(Math.min(1, ...all.map(p => p.lo)) / 1.12, Math.max(1, ...all.map(p => p.hi)), P, 6, wr), X = logScale(dom, ax0, P);
+    const dom = fitLog(Math.min(1, ...all.map(p => p.lo)) / 1.12, capR(Math.max(1, ...all.map(p => p.hi))), P, 6, wr), X = logScale(dom, ax0, P);
     const svg = svgEl(W, 100, title(fig));
     const gGrid = S('g', {}, svg), gRows = S('g', {}, svg);
     const y0 = 20, RH = narrow ? 24 : 26, SH = 26, spans = [];
@@ -628,13 +659,15 @@ function summary(fig) {
         const cy = y + RH / 2, row = S('g', {class: 'pq-row pq-srow'}, gRows), cls = p.ref ? 'ref' : 'peer';
         rowBg(row, W, y, RH);
         nameText(row, narrow ? 4 : 10, cy + 4, NAME[p.s], p.s, cls);
-        const x0 = X(p.lo), x1 = X(p.hi);
+        const x0 = X(capR(p.lo)), x1 = X(capR(p.hi)), cut = p.hi > RATIO_CAP;
         S('line', {class: 'pq-beam', x1: X(1), x2: x0, y1: cy, y2: cy}, row);
         S('rect', {class: 'pq-rbar ' + cls, 'data-k': p.s, x: x0 - 1, y: cy - 4, width: Math.max(2, x1 - x0) + 2, height: 8, rx: 4}, row);
-        S('line', {class: 'pq-medbg', x1: X(p.med), x2: X(p.med), y1: cy - 7.5, y2: cy + 7.5}, row);
-        S('line', {class: 'pq-med', x1: X(p.med), x2: X(p.med), y1: cy - 7.5, y2: cy + 7.5}, row);
-        p.pts.forEach(q => S('circle', {class: 'pq-spt', cx: X(q.x), cy: cy, r: 3.4}, row));
-        T(row, x1 + 9, cy + 4, span([p.lo, p.hi]), 'pq-rlab');
+        if (cut) S('path', {class: 'pq-rbar pq-cut ' + cls, 'data-k': p.s, d: 'M' + (x1 + 1) + ',' + (cy - 6) + 'L' + (x1 + 8) + ',' + cy + 'L' + (x1 + 1) + ',' + (cy + 6) + 'Z'}, row);
+        const xm = X(capR(p.med));
+        S('line', {class: 'pq-medbg', x1: xm, x2: xm, y1: cy - 7.5, y2: cy + 7.5}, row);
+        S('line', {class: 'pq-med', x1: xm, x2: xm, y1: cy - 7.5, y2: cy + 7.5}, row);
+        p.pts.forEach(q => S('circle', {class: 'pq-spt', cx: X(capR(q.x)), cy: cy, r: 3.4}, row));
+        T(row, x1 + (cut ? 14 : 9), cy + 4, span([p.lo, p.hi]), 'pq-rlab');
         const rs = p.pts.slice().sort((a, b) => a.x - b.x);
         hot(row, () => '<div class="pq-th">' + esc(NAME[p.s]) + ' <span>' + esc(g.sec.name) + '</span></div><div class="pq-tm">peer time over PRISM-Q time, median ' +
           fx(p.med) + '</div>' + tgrid(rs.map(q => [q.r.label, fx(q.x)])),
@@ -919,6 +952,44 @@ function memPanel(fig) {
   });
 }
 
+// ---- scaling: one small multiple per ladder, every simulator until its ceiling, a tab per method
+const SCALE_NAME = {'prismq:statevector': 'PRISM-Q', 'prismq:mps-64': 'PRISM-Q MPS', 'prismq:tensor-network': 'PRISM-Q TN',
+  'quimb-mps:64': 'quimb MPS'};
+const fq = x => x >= 10000 && x % 1000 === 0 ? x / 1000 + 'k' : x.toLocaleString('en-US');
+function scalingPanel(fig) {
+  const sc = O.filter(o => o.group === 'scaling' && o.ladder), plot = fig.querySelector('.pq-plot');
+  const keys = Object.keys(D.ladders || {}).filter(k => sc.some(o => o.ladder === k));
+  const tabs = (D.ladder_tabs || []).filter(tb => keys.some(k => k.split('/')[0] === tb[0]));
+  let tab = 0;
+  if (tabs.length > 1) seg(plot, ['All'].concat(tabs.map(tb => tb[1])), 0, i => { tab = i; run(); }, 'Method');
+  const lg = H('div', 'pq-legend', plot), grid = H('div', 'pq-mult', plot);
+  const run = mount(plot, () => {
+    const shown = keys.filter(k => !tab || k.split('/')[0] === tabs[tab - 1][0]), items = [];
+    let failed = false;
+    grid.replaceChildren();
+    grid.setAttribute('data-n', shown.length);
+    // Every cell exists before any is drawn, so each measures its final column width.
+    const boxes = shown.map(k => { const cell = H('div', 'pq-cell', grid); H('p', 'pq-mt', cell, D.ladders[k]); return H('div', '', cell); });
+    shown.forEach((k, ki) => {
+      const box = boxes[ki], rs = sc.filter(o => o.ladder === k), most = {};
+      rs.forEach(o => { most[o.simulator] = Math.max(most[o.simulator] || 0, o.threads); });
+      // A series is a simulator at its top thread count, or `sim@T` at another count.
+      const sk = o => o.simulator + (o.threads === most[o.simulator] ? '' : '@' + o.threads);
+      const label = id => { const p = id.split('@'), b = SCALE_NAME[p[0]] || NAME[p[0]] || p[0]; return p[1] ? b + ' ' + plural(+p[1], 'thread') : b; };
+      const xs = uniq(rs.map(o => o.qubits)).sort((a, b) => a - b), sims = uniq(rs.map(sk));
+      const drawn = o => usable(o) || o.status === 'invalid' && o.median_ms != null;
+      const series = sims.map(s => ({k: s, name: label(s), cls: peerOf(s) ? 'peer' : 'pq',
+        pts: rs.filter(o => sk(o) === s && drawn(o)).sort((a, b) => a.qubits - b.qubits).map(o => ({x: o.qubits, o: o}))}));
+      const ceilings = rs.filter(o => o.ceiling).map(o => ({x: o.qubits, o: o, k: sk(o), word: label(sk(o)) + ' ' + CEIL[o.ceiling]}));
+      if (lineCell(box, {xs: xs, xscale: xs.length > 1 && xs[xs.length - 1] / xs[0] > 20 ? 'log' : 'lin', xticks: xs, xfmt: fq,
+        log: true, y: o => o.median_ms, tick: ftick, series: series, single: true, h: 214, ceilings: ceilings,
+        spread: o => o.p25_ms != null && o.p75_ms != null ? [o.p25_ms, o.p75_ms] : null}, D.ladders[k])) failed = true;
+      series.forEach(s => { if (s.pts.length) items.push({k: s.k, cls: s.cls, name: s.k.indexOf('@') > 0 ? s.name : NAME[s.k] || s.name}); });
+    });
+    legend(lg, legendItems(items, failed));
+  });
+}
+
 // ---- panels
 const views = (rows, keyOf, labels) => [{label: 'All', rows: rows}].concat(labels.map(l => ({label: l[1], rows: rows.filter(r => keyOf(r.pq) === l[0])})));
 const ratioCol = (h, ref) => ({h: h, w: 62, f: r => {
@@ -952,12 +1023,15 @@ const PANELS = {
   threads: fig => {
     const th = O.filter(o => o.group === 'threads'), ws = uniq(th.map(o => o.workload)).sort((a, b) => order(th.find(o => o.workload === a), th.find(o => o.workload === b)));
     const find = (w, s, t) => th.find(o => o.workload === w && o.simulator === s && o.threads === t);
+    const ts = uniq(th.map(o => o.threads)).sort((a, b) => a - b);
     const mult = ws.map(w => ({title: th.find(o => o.workload === w).label, series: ['quest', 'qsim', 'aer-statevector', 'prismq'].map(s => ({k: s, name: NAME[s],
-      cls: s === 'prismq' ? 'pq' : 'peer', pts: [1, 2, 4, 8].map(t => ({x: t, o: find(w, s, t)})).filter(p => ok(p.o))}))}));
-    linePanel(fig, {mult: mult, xs: [1, 2, 4, 8], xscale: 'cat', xfmt: String, xtitle: 'threads', h: 200, views: [
+      cls: s === 'prismq' ? 'pq' : 'peer', pts: ts.map(t => ({x: t, o: find(w, s, t)})).filter(p => ok(p.o))}))}));
+    const one = (o, s) => { const p = s.pts[0].o; return p.threads === 1 ? p.median_ms / o.median_ms : null; };
+    linePanel(fig, {mult: mult, xs: ts, xscale: ts.length > 4 ? 'log' : 'cat', xfmt: String, xtitle: 'threads', h: 200, views: [
       {label: 'Median time', y: o => o.median_ms, log: true, tick: ftick},
-      {label: 'Speedup over 1 thread', y: (o, s) => { const p = s.pts[0].o; return p.threads === 1 ? p.median_ms / o.median_ms : null; },
-        log: false, tick: x => x + 'x', refLine: 1, minHi: 4}]});
+      {label: 'Speedup over 1 thread', y: one, log: false, tick: x => x + 'x', refLine: 1, minHi: 4},
+      {label: 'Efficiency', y: (o, s) => { const v = one(o, s); return v == null ? null : v / o.threads; }, log: false,
+        tick: x => Math.round(x * 100) + '%', refLine: 1, minHi: 1.1}]});
   },
   dispatch: fig => {
     const dp = O.filter(o => o.group === 'dispatch'), ws = uniq(dp.map(o => o.workload));
@@ -968,12 +1042,15 @@ const PANELS = {
         sub: 'auto ' + pq.resolved_backend + ', fastest ' + best.simulator.slice(7)};
     }).sort((a, b) => a.ratio - b.ratio);
     const strip = rows.map(r => ({label: r.label, pq: r.pq, peers: [], ratio: r.ratio, sub: r.sub, ref: r.ref}));
+    const rs = rows.map(r => r.ratio), dom = [Math.min(0.9, Math.min(...rs) / 1.08), Math.max(1.1, Math.max(...rs) * 1.08)];
+    const wide = dom[1] / dom[0] > 2;
     dotPanel(fig, {ctl: 'View', legend: false, name: o => o.simulator === 'prismq' ? 'auto' : o.simulator.slice(7),
       kOf: o => o.simulator, cols: [{h: ['auto /', 'fastest'], w: 60, f: r => ({t: fx(r.ratio)})}],
-      views: [{label: 'Against the fastest', rows: strip, scale: 'lin', domain: [0.9, 1.1], band: [0.95, 1.05], refLine: 1,
+      views: [{label: 'Against the fastest', rows: strip, scale: wide ? 'log' : 'lin', domain: dom, band: [0.95, 1.05], refLine: 1,
         val: (o, r) => r.ratio, tick: x => x.toFixed(2) + 'x'}, {label: 'All backends', rows: rows, labelAll: true}]});
   },
   memory: memPanel,
+  scaling: scalingPanel,
   suite: fig => {
     const R = D.suite.rows, so = r => ({name: 'PRISM-Q', simulator: 'prismq', version: D.suite.version, label: r.family + ' ' + r.qubits + 'q',
       median_ms: r.ms, threads: D.suite.rayon_threads, method: 'automatic', status: 'ok', valid: true, validated: true});
@@ -990,9 +1067,14 @@ const PANELS = {
 };
 SEC.forEach(sec => {
   PANELS[sec.id] = fig => {
-    const rows = secRows(sec), sp = sec.split, qb = sp && sp[0] === 'qubits';
+    const rows = secRows(sec), f = sec.split;
+    const vals = f ? uniq(rows.map(r => r.pq[f])).filter(v => v != null)
+      .sort((a, b) => f === 'family' ? FAM.indexOf(a) - FAM.indexOf(b) : a - b) : [];
+    const lab = x => f === 'qubits' ? x.toLocaleString('en-US') + 'q' : f === 'depth' ? 'depth ' + x : x;
+    const split = vals.length > 1;
     const spec = {ref: sec.ref, cols: [ratioCol([NAME[key(sec.ref)] + ' /', sec.base || 'PRISM-Q'], sec.ref)],
-      views: sp ? views(rows, o => o[sp[0]], sp[1].map(x => [x, qb ? x + 'q' : 'depth ' + x])) : [{rows: rows}], ctl: sp && (qb ? 'Qubits' : 'Depth')};
+      views: split ? views(rows, o => o[f], vals.map(x => [x, lab(x)])) : [{rows: rows}],
+      ctl: split && {qubits: 'Qubits', depth: 'Depth', family: 'Family'}[f]};
     if (sec.byThreads) Object.assign(spec, {name: o => o.simulator === 'prismq' ? 'PRISM-Q ' + o.threads + 't' : nm(o), kOf: o => key(o.simulator)});
     dotPanel(fig, spec);
   };
@@ -1003,7 +1085,7 @@ function tiles() {
   const bs = Array.prototype.slice.call(document.querySelectorAll('.pq-kpi-b'));
   if (!bs.length) return;
   const v = bs.map(b => [+b.getAttribute('data-lo'), +b.getAttribute('data-hi')]);
-  const Q = logScale([Math.log(Math.min(1, ...v.map(x => x[0])) / 1.25), Math.log(Math.max(1, ...v.map(x => x[1])) * 1.25)], 0, 100);
+  const Q = logScale([Math.log(Math.min(1, ...v.map(x => x[0])) / 1.25), Math.log(capR(Math.max(1, ...v.map(x => x[1]))) * 1.25)], 0, 100);
   const list = document.querySelector('ul.pq-kpis');
   if (list) {
     const ax = H('p', 'pq-kpis-ax');
@@ -1016,16 +1098,47 @@ function tiles() {
     bs.forEach(b => { b.style.setProperty('--pq-x10', Q(10) + '%'); b.style.setProperty('--pq-x100', Q(100) + '%'); });
   }
   bs.forEach((b, i) => {
-    const r = H('i', '', b);
-    r.style.left = Q(v[i][0]) + '%';
-    r.style.width = Math.max(1.5, Q(v[i][1]) - Q(v[i][0])) + '%';
+    const r = H('i', v[i][1] > RATIO_CAP ? 'cut' : '', b);
+    r.style.left = Q(capR(v[i][0])) + '%';
+    r.style.width = Math.max(1.5, Q(capR(v[i][1])) - Q(capR(v[i][0]))) + '%';
     H('b', '', b).style.left = Q(1) + '%';
+  });
+}
+
+// ---- sortable exact-number tables: numbers with a unit compare by value, words after them
+const UNIT = {us: 1e-3, ms: 1, s: 1000, MB: 1, GB: 1024, x: 1};
+function cellValue(text) {
+  const m = text.replace(/[*\u2020\u2021]/g, '').trim().match(/^([\d][\d.,]*(?:e[-+]?\d+)?)\s*(us|ms|s|MB|GB|x)?(?![\w])/);
+  return m ? parseFloat(m[1].replace(/,/g, '')) * (UNIT[m[2]] || 1) : null;
+}
+function sortable(tb) {
+  const head = tb.tHead && tb.tHead.rows[0], body = tb.tBodies[0];
+  if (!head || !body || body.rows.length < 3) return;
+  Array.prototype.forEach.call(head.cells, (th, i) => {
+    const b = H('button', 'pq-sort', null, th.textContent);
+    b.type = 'button';
+    th.replaceChildren(b);
+    th.setAttribute('aria-sort', 'none');
+    b.onclick = () => {
+      const dir = th.getAttribute('aria-sort') === 'ascending' ? -1 : 1;
+      Array.prototype.forEach.call(head.cells, c => c.setAttribute('aria-sort', 'none'));
+      th.setAttribute('aria-sort', dir > 0 ? 'ascending' : 'descending');
+      const rows = Array.prototype.slice.call(body.rows);
+      rows.sort((a, c) => {
+        const x = a.cells[i].textContent, y = c.cells[i].textContent, vx = cellValue(x), vy = cellValue(y);
+        if (vx != null && vy != null) return (vx - vy) * dir;
+        if (vx != null || vy != null) return vx != null ? -1 : 1;
+        return x.localeCompare(y, 'en', {numeric: true}) * dir;
+      });
+      rows.forEach(r => body.appendChild(r));
+    };
   });
 }
 
 function init() {
   FF = getComputedStyle(document.querySelector('.pq-figure') || document.body).fontFamily || 'sans-serif';
   tiles();
+  document.querySelectorAll('.pq-figure details.pq-table table').forEach(sortable);
   FIGS.forEach(fig => {
     const f = PANELS[fig.getAttribute('data-chart')];
     if (!f || !fig.querySelector('.pq-plot')) return;

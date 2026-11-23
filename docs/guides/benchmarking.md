@@ -148,34 +148,47 @@ A difference without its mechanism is not yet a finding.
 ### The benchmark matrix
 
 `comparison/matrix.py` applies those controls to the published comparison. PRISM-Q runs
-with automatic dispatch and, for the dispatch rows, with each backend forced; every peer
-runs at its defaults. [Performance](../performance/index.md) lists each simulator with its
-version and precision.
+with automatic dispatch and, for the dispatch rows, with each backend forced; the dense
+scaling ladders force its statevector, and the MPS ladders run every MPS simulator at
+bond cap 64 beside automatic dispatch. Every peer runs at its defaults otherwise.
+[Performance](../performance/index.md) lists each simulator with its version and
+precision.
 
 | Family | Sizes | Circuit |
 | --- | --- | --- |
-| `rcs` | 20 to 26 qubits, depth 10, 20 | Random rotations, CX brickwork |
-| `qft` | 20 to 26 | Textbook QFT on a random product state |
+| `rcs` | 20 to 28 qubits, depth 10, 20 | Random rotations, CX brickwork |
+| `qft` | 20 to 28 | Textbook QFT on a random product state |
 | `qv` | 16 to 24 | Quantum volume |
 | `clifford` | 100 to 10,000 | Random Clifford brickwork |
 | `lowent` | 50 to 200, depth 4, 8 | Shallow brickwork |
 | `disjoint` | 40 to 200 | Independent 10-qubit components |
 | `sampling` | 16 to 24, 1 to 1M shots | rcs depth 10, measured |
 | `midcircuit` | 12, 18 | Measure, feed forward, reset |
+| `hea`, `qaoa`, `tfim`, `adder` | 20 to 26 | Hardware-efficient ansatz, QAOA on a random 3-regular graph, Trotterized Ising chain, ripple-carry adder |
+| `ghz`, `bv` | 100 to 10,000 | GHZ preparation, Bernstein-Vazirani |
+| `wstate` | 50 to 200 | W state, sampled |
+
+Scaling ladders then take each method as wide as the host allows: dense families to 30
+qubits on the CPU and the GPU, stabilizer circuits to 100,000 qubits, MPS and factored
+circuits to 10,000, and tensor network expectation values to 4,096. Each simulator
+climbs until a rung times out, is refused for memory, or takes more than a minute for
+one call, and the page shows that rung as its ceiling.
 
 - Defaults everywhere, nothing tuned per row. Seed `0xDEADBEEF`; one gate list per
   workload, stored in `circuits.jsonl.gz`.
 - Timed call: run the circuit, return probabilities or shots; format conversion is
-  untimed. One process per measurement, one cold call, then up to five warm calls; the
-  median warm call is reported. Simulator order is shuffled per row (seed 42).
+  untimed. One process per measurement, one cold call, then up to five warm calls (three
+  on a ladder); the median warm call is reported. Simulator order is shuffled per row
+  (seed 42).
 - Failures are recorded with their reason and never retried. Re-measured rows move the
   replaced records to `superseded.jsonl`.
 - Dense outputs: total variation distance to an fp64 reference, at most 1e-8 (fp32:
   1e-5). Sampled outputs: bit marginals and pair parities against exact values from an
   independent light-cone reference, exact binomial tests at family-wise alpha 1e-3;
   under 100 shots, deterministic bits only.
-- Not covered: GPU, 16 threads, ISA variants, noise, simulators without a Windows wheel
-  for Python 3.14, and dense sizes past 26 qubits (the `full` profile).
+- Not covered: any peer GPU path (PRISM-Q's GPU statevector runs on the dense ladders
+  without a GPU peer), ISA variants, noise, and simulators without a Windows wheel for
+  Python 3.14.
 
 ## Profiling
 

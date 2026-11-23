@@ -127,6 +127,8 @@ class Aer:
         def gate(name, qubits, angle):
             if name in ("h", "x", "z", "s", "sdg"):
                 getattr(qc, name)(qubits[0])
+            elif name == "rx":
+                qc.rx(angle, qubits[0])
             elif name == "ry":
                 qc.ry(angle, qubits[0])
             elif name == "rz":
@@ -139,6 +141,8 @@ class Aer:
                 qc.swap(qubits[0], qubits[1])
             elif name == "cp":
                 qc.cp(angle, qubits[0], qubits[1])
+            elif name == "rzz":
+                qc.rzz(angle, qubits[0], qubits[1])
 
         for inst in instructions:
             kind = inst[0]
@@ -248,6 +252,8 @@ class Qsim:
                 ops.append(cirq.S(q[0]))
             elif name == "sdg":
                 ops.append(cirq.S(q[0]) ** -1)
+            elif name == "rx":
+                ops.append(cirq.rx(angle)(q[0]))
             elif name == "ry":
                 ops.append(cirq.ry(angle)(q[0]))
             elif name == "rz":
@@ -260,6 +266,8 @@ class Qsim:
                 ops.append(cirq.SWAP(q[0], q[1]))
             elif name == "cp":
                 ops.append(cirq.CZPowGate(exponent=angle / np.pi)(q[0], q[1]))
+            elif name == "rzz":
+                ops.append(cirq.ZZPowGate(exponent=angle / np.pi, global_shift=-0.5)(q[0], q[1]))
         self.num_bits = clbits
         if mode == "counts":
             if sorted(measured) != list(range(clbits)):

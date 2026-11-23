@@ -28,7 +28,9 @@
 //! ```
 //!
 //! `if c v <gate>` applies the gate when classical bit `c` reads `v`. The
-//! single-qubit gates are `h x z s sdg ry rz`, the two-qubit gates `cx cz swap cp`.
+//! single-qubit gates are `h x z s sdg rx ry rz`, the two-qubit gates
+//! `cx cz swap cp rzz`. With the `gpu` feature, `--backend gpu` runs the statevector
+//! on CUDA device 0.
 //!
 //! ```text
 //! cargo run --release --features parallel --example compare_runner -- export qft 16 > qft16.txt
@@ -147,12 +149,14 @@ fn parse_gate(parts: &[&str]) -> Option<(Gate, Vec<usize>)> {
         ["z", t] => (Gate::Z, vec![q(t)]),
         ["s", t] => (Gate::S, vec![q(t)]),
         ["sdg", t] => (Gate::Sdg, vec![q(t)]),
+        ["rx", t, theta] => (Gate::Rx(parse_angle(theta)), vec![q(t)]),
         ["ry", t, theta] => (Gate::Ry(parse_angle(theta)), vec![q(t)]),
         ["rz", t, theta] => (Gate::Rz(parse_angle(theta)), vec![q(t)]),
         ["cx", c, t] => (Gate::Cx, vec![q(c), q(t)]),
         ["cz", c, t] => (Gate::Cz, vec![q(c), q(t)]),
         ["swap", x, y] => (Gate::Swap, vec![q(x), q(y)]),
         ["cp", c, t, theta] => (Gate::cphase(parse_angle(theta)), vec![q(c), q(t)]),
+        ["rzz", a, b, theta] => (Gate::Rzz(parse_angle(theta)), vec![q(a), q(b)]),
         _ => return None,
     })
 }
@@ -252,6 +256,12 @@ fn parse_backend(name: &str) -> BackendKind {
             "factored" => BackendKind::Factored,
             "tensor-network" => BackendKind::TensorNetwork,
             "stabilizer-rank" => BackendKind::StabilizerRank,
+            #[cfg(feature = "gpu")]
+            "gpu" => BackendKind::StatevectorGpu {
+                context: prism_q::gpu::GpuContext::new(0).unwrap_or_else(|err| {
+                    fail(4, format!("simulation error: no CUDA device: {err}"))
+                }),
+            },
             other => fail(2, format!("unknown backend `{other}`")),
         },
     }
@@ -520,6 +530,7 @@ struct RunInfo {
     route: String,
     engine: String,
     exactness: String,
+    placement: String,
     bond: Option<String>,
 }
 
@@ -530,6 +541,7 @@ impl RunInfo {
             route: format!("{:?}", meta.reason),
             engine: format!("{:?}", meta.engine),
             exactness: format!("{:?}", meta.exactness),
+            placement: format!("{:?}", meta.placement),
             bond: meta.bond.as_ref().map(|b| format!("{b:?}")),
         }
     }
@@ -699,6 +711,7 @@ fn run_exec(args: &[String]) {
                     route: "compile_measurements".to_string(),
                     engine: "CompiledSampler".to_string(),
                     exactness: "Exact".to_string(),
+                    placement: "Host".to_string(),
                     bond: None,
                 };
                 (Output::Text(out), info, ms)
@@ -759,7 +772,7 @@ fn run_exec(args: &[String]) {
         "{{\"schema\":\"prismq-compare-runner/3\",\"simulator\":\"prismq\",\"version\":\"{}\",\
          \"num_qubits\":{},\"num_operations\":{},\"requested_backend\":{},\"threads\":{},\
          \"build_ms\":{build_ms:.4},\"plan_median_us\":{plan_median},\"plan\":{},\
-         \"resolved_backend\":{},\"route\":{},\"engine\":{},\"exactness\":{},\"bond\":{bond},\
+         \"resolved_backend\":{},\"route\":{},\"engine\":{},\"exactness\":{},\"placement\":{},\"bond\":{bond},\
          \"first_ms\":{first_ms:.4},\"times_ms\":[{}],\"output_hashes\":[{hash_list}]}}",
         env!("CARGO_PKG_VERSION"),
         circuit.num_qubits,
@@ -771,6 +784,7 @@ fn run_exec(args: &[String]) {
         json_str(&info.route),
         json_str(&info.engine),
         json_str(&info.exactness),
+        json_str(&info.placement),
         join_ms(&times_ms),
     );
 }

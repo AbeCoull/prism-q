@@ -7,28 +7,30 @@ expectation values on an unmeasured circuit) and `stats` (only the shot statisti
 the validator checks, for shot counts whose histogram would not fit in memory). The list is generated once,
 hashed, and handed unchanged to every simulator, so no simulator gets a
 private transpilation pass. Random families draw from NumPy's PCG64 seeded per
-workload; the structured families (QFT, QV) come from the `prism_q::circuits`
+workload; the structured families (QFT, QV, HEA) come from the `prism_q::circuits`
 generators through `compare_runner export`, the same circuits as the published
 benchmark suite.
 
 Gate list format (see `tools/compare_runner.rs`): `qubits N`, an optional
-`clbits M`, then one instruction per line. `h x z s sdg ry rz` act on one qubit,
-`cx cz swap cp` on two, `measure q c` writes classical bit `c`, `reset q`
+`clbits M`, then one instruction per line. `h x z s sdg rx ry rz` act on one qubit,
+`cx cz swap cp rzz` on two, `measure q c` writes classical bit `c`, `reset q`
 returns a qubit to |0>, and `if c v <gate>` applies a gate when bit `c` reads `v`.
 """
 
 from __future__ import annotations
 
+import functools
 import hashlib
+import inspect
 import math
 import subprocess
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field, replace
+from typing import Any, Callable
 
 import numpy as np
 
 CIRCUIT_SEED = 0xDEAD_BEEF
-GATE_SET = ("h", "x", "z", "s", "sdg", "ry", "rz", "cx", "cz", "swap", "cp", "measure", "reset", "if")
+GATE_SET = ("h", "x", "z", "s", "sdg", "rx", "ry", "rz", "cx", "cz", "swap", "cp", "rzz", "measure", "reset", "if")
 CLIFFORD_1Q = ("h", "s", "sdg", "x", "z", "hs")
 
 FAMILIES: dict[str, str] = {
@@ -68,6 +70,34 @@ FAMILIES: dict[str, str] = {
         "data qubits, each ancilla collects the parity of a data pair, is measured, feeds a "
         "conditional X back onto the pair's first qubit, and is reset; data measured at the end"
     ),
+    "ghz": "GHZ state: H on qubit 0, then a CX chain along the line; every qubit measured at the end",
+    "bv": (
+        "Bernstein-Vazirani: n-1 data qubits and one ancilla in |->, an oracle of one CX per set bit "
+        "of a seeded random secret, H on the data, and the data measured; every shot reads the secret"
+    ),
+    "qaoa": (
+        "QAOA MaxCut ansatz on a seeded random 3-regular graph: H on every qubit, then per layer RZZ "
+        "on every edge with one random angle and an RX mixer with another; the edges ignore the "
+        "line, so the circuit has no nearest-neighbour structure"
+    ),
+    "hea": (
+        "hardware-efficient ansatz from prism_q::circuits::hardware_efficient_ansatz: five layers, each "
+        "random Ry and Rz on every qubit followed by a CX chain along the line"
+    ),
+    "tfim": (
+        "Trotterized transverse-field Ising chain from |0...0>, J = h = 1: per step RZZ(2 J dt) on "
+        "even then odd bonds and RX(2 h dt) on every qubit; read out as the full probability vector "
+        "or as Z and adjacent ZZ expectation values"
+    ),
+    "wstate": (
+        "W state: the excitation on qubit 0 handed down the line by an Ry and CX ladder, leaving "
+        "amplitude 1/sqrt(n) on each one-hot basis state; every qubit measured at the end"
+    ),
+    "adder": (
+        "Cuccaro ripple-carry adder of two k-bit registers on 2k + 2 qubits, Toffolis expanded into "
+        "H, CX and Rz(pi/4); register a in uniform superposition, register b a seeded random integer "
+        "set with Ry(pi)"
+    ),
 }
 
 
@@ -79,6 +109,7 @@ class Workload:
     text: str
     params: dict[str, Any] = field(default_factory=dict)
     shots: int = 0
+    recipe: dict[str, Any] | None = field(default=None, compare=False)
 
     @property
     def sha256(self) -> str:
@@ -120,6 +151,27 @@ class Workload:
         }
 
 
+RECIPES: dict[str, Callable[..., Workload]] = {}
+
+
+def _recipe(fn: Callable[..., Workload]) -> Callable[..., Workload]:
+    """Register a generator that needs no runner, so a stored workload can be rebuilt from its arguments."""
+    signature = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    def build(*args, **kwargs) -> Workload:
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        return replace(fn(*args, **kwargs), recipe={"fn": fn.__name__, "kwargs": dict(bound.arguments)})
+
+    RECIPES[fn.__name__] = build
+    return build
+
+
+def from_recipe(recipe: dict[str, Any]) -> Workload:
+    return RECIPES[recipe["fn"]](**recipe["kwargs"])
+
+
 def _angle(rng: np.random.Generator) -> str:
     return repr(float(rng.uniform(0.0, 2.0 * math.pi)))
 
@@ -146,6 +198,7 @@ def _text(num_qubits: int, body: list[str], clbits: int = 0) -> str:
     return "\n".join(head + body) + "\n"
 
 
+@_recipe
 def rcs(n: int, depth: int, seed: int = CIRCUIT_SEED) -> Workload:
     rng = np.random.Generator(np.random.PCG64(seed))
     body: list[str] = []
@@ -153,6 +206,7 @@ def rcs(n: int, depth: int, seed: int = CIRCUIT_SEED) -> Workload:
     return Workload("rcs", n, "probs", _text(n, body), {"depth": depth, "seed": seed})
 
 
+@_recipe
 def expval(n: int, depth: int, observables: int | None = None, seed: int = CIRCUIT_SEED) -> Workload:
     """The rcs circuit read out as expectation values.
 
@@ -166,6 +220,7 @@ def expval(n: int, depth: int, observables: int | None = None, seed: int = CIRCU
     return Workload("rcs", n, "expval", base.text, params)
 
 
+@_recipe
 def sampling(n: int, shots: int, measured: str = "all", depth: int = 10, seed: int = CIRCUIT_SEED) -> Workload:
     rng = np.random.Generator(np.random.PCG64(seed))
     body: list[str] = []
@@ -182,6 +237,7 @@ def sampling(n: int, shots: int, measured: str = "all", depth: int = 10, seed: i
     )
 
 
+@_recipe
 def clifford(n: int, shots: int, depth: int = 8, seed: int = CIRCUIT_SEED, mode: str = "counts") -> Workload:
     rng = np.random.Generator(np.random.PCG64(seed))
     body: list[str] = []
@@ -200,6 +256,7 @@ def clifford(n: int, shots: int, depth: int = 8, seed: int = CIRCUIT_SEED, mode:
     return Workload("clifford", n, mode, _text(n, body, n), {"depth": depth, "seed": seed}, shots)
 
 
+@_recipe
 def lowent(n: int, depth: int, shots: int, seed: int = CIRCUIT_SEED) -> Workload:
     rng = np.random.Generator(np.random.PCG64(seed))
     body: list[str] = []
@@ -208,6 +265,7 @@ def lowent(n: int, depth: int, shots: int, seed: int = CIRCUIT_SEED) -> Workload
     return Workload("lowent", n, "counts", _text(n, body, n), {"depth": depth, "seed": seed}, shots)
 
 
+@_recipe
 def disjoint(
     n: int, shots: int, layout: str = "contiguous", block: int = 10, depth: int = 10, seed: int = CIRCUIT_SEED
 ) -> Workload:
@@ -233,6 +291,7 @@ def disjoint(
     )
 
 
+@_recipe
 def midcircuit(n: int, shots: int, rounds: int = 3, seed: int = CIRCUIT_SEED) -> Workload:
     if n % 3:
         raise ValueError("midcircuit needs n = 3k: 2k data qubits and k ancillas")
@@ -278,6 +337,121 @@ def qft(runner: str, n: int, seed: int = CIRCUIT_SEED) -> Workload:
     return Workload("qft", n, "probs", "\n".join([head, *layer, body]), {"input": "product", "seed": seed})
 
 
+@_recipe
+def ghz(n: int, shots: int, mode: str = "counts") -> Workload:
+    body = ["h 0"] + [f"cx {q} {q + 1}" for q in range(n - 1)]
+    _measure(body, list(range(n)))
+    return Workload("ghz", n, mode, _text(n, body, n), {}, shots)
+
+
+@_recipe
+def bv(n: int, shots: int, seed: int = CIRCUIT_SEED) -> Workload:
+    data = anc = n - 1
+    rng = np.random.Generator(np.random.PCG64(seed))
+    secret = rng.integers(0, 2, size=data)
+    body = [f"x {anc}", f"h {anc}"] + [f"h {q}" for q in range(data)]
+    body += [f"cx {q} {anc}" for q in range(data) if secret[q]]
+    body += [f"h {q}" for q in range(data)]
+    _measure(body, list(range(data)))
+    return Workload("bv", n, "counts", _text(n, body, data), {"seed": seed}, shots)
+
+
+def _regular_graph(n: int, degree: int, rng: np.random.Generator) -> list[tuple[int, int]]:
+    """A random simple `degree`-regular graph: configuration model pairings, rejected until simple."""
+    if n * degree % 2 or degree >= n:
+        raise ValueError(f"no simple {degree}-regular graph on {n} vertices")
+    stubs = np.repeat(np.arange(n), degree)
+    for _ in range(10_000):
+        rng.shuffle(stubs)
+        pairs = stubs.reshape(-1, 2)
+        edges = {(int(min(a, b)), int(max(a, b))) for a, b in pairs}
+        if len(edges) == len(pairs) and all(a != b for a, b in edges):
+            return sorted(edges)
+    raise RuntimeError("the configuration model found no simple graph")
+
+
+@_recipe
+def qaoa(n: int, layers: int = 1, seed: int = CIRCUIT_SEED, degree: int = 3) -> Workload:
+    rng = np.random.Generator(np.random.PCG64(seed))
+    edges = _regular_graph(n, degree, rng)
+    body = [f"h {q}" for q in range(n)]
+    for _ in range(layers):
+        gamma, beta = _angle(rng), _angle(rng)
+        body += [f"rzz {a} {b} {gamma}" for a, b in edges]
+        body += [f"rx {q} {beta}" for q in range(n)]
+    return Workload("qaoa", n, "probs", _text(n, body), {"degree": degree, "layers": layers, "seed": seed})
+
+
+def hea(runner: str, n: int, seed: int = CIRCUIT_SEED) -> Workload:
+    return exported(runner, "hea", n, seed)
+
+
+@_recipe
+def tfim(n: int, steps: int, mode: str = "probs", dt: float = 0.1, observables: int | None = None) -> Workload:
+    angle = repr(2.0 * dt)
+    body: list[str] = []
+    for _ in range(steps):
+        for parity in (0, 1):
+            body += [f"rzz {i} {i + 1} {angle}" for i in range(parity, n - 1, 2)]
+        body += [f"rx {q} {angle}" for q in range(n)]
+    params: dict[str, Any] = {"dt": dt, "steps": steps}
+    if observables is not None:
+        params["observables"] = observables
+    return Workload("tfim", n, mode, _text(n, body), params)
+
+
+@_recipe
+def wstate(n: int, shots: int, mode: str = "counts") -> Workload:
+    body = ["x 0"]
+    for i in range(n - 1):
+        half = math.acos(math.sqrt(1.0 / (n - i)))
+        body += [f"ry {i + 1} {half!r}", f"cx {i} {i + 1}", f"ry {i + 1} {-half!r}", f"cx {i} {i + 1}"]
+        body.append(f"cx {i + 1} {i}")
+    if mode == "probs":
+        return Workload("wstate", n, mode, _text(n, body), {})
+    _measure(body, list(range(n)))
+    return Workload("wstate", n, mode, _text(n, body, n), {}, shots)
+
+
+def _toffoli(body: list[str], c1: int, c2: int, t: int) -> None:
+    """CCX as H, CX and Rz(+-pi/4); each Rz differs from T or its inverse by a global phase only."""
+    tp, tm = repr(math.pi / 4), repr(-math.pi / 4)
+    body += [f"h {t}", f"cx {c2} {t}", f"rz {t} {tm}", f"cx {c1} {t}", f"rz {t} {tp}", f"cx {c2} {t}"]
+    body += [f"rz {t} {tm}", f"cx {c1} {t}", f"rz {c2} {tp}", f"rz {t} {tp}", f"h {t}", f"cx {c1} {c2}"]
+    body += [f"rz {c1} {tp}", f"rz {c2} {tm}", f"cx {c1} {c2}"]
+
+
+@_recipe
+def adder(bits: int, shots: int = 0, seed: int = CIRCUIT_SEED) -> Workload:
+    """Cuccaro adder: qubit 0 the carry in, b_i on 2i + 1, a_i on 2i + 2, the carry out last; b becomes a + b."""
+    n = 2 * bits + 2
+    rng = np.random.Generator(np.random.PCG64(seed))
+    b_value = int(rng.integers(0, 2**bits))
+    a_q = [2 * i + 2 for i in range(bits)]
+    b_q = [2 * i + 1 for i in range(bits)]
+    body = [f"h {q}" for q in a_q] + [f"ry {b_q[i]} {math.pi!r}" for i in range(bits) if b_value >> i & 1]
+
+    def maj(c: int, b: int, a: int) -> None:
+        body.extend([f"cx {a} {b}", f"cx {a} {c}"])
+        _toffoli(body, c, b, a)
+
+    def uma(c: int, b: int, a: int) -> None:
+        _toffoli(body, c, b, a)
+        body.extend([f"cx {a} {c}", f"cx {c} {b}"])
+
+    carries = [0] + a_q[:-1]
+    for i in range(bits):
+        maj(carries[i], b_q[i], a_q[i])
+    body.append(f"cx {a_q[-1]} {n - 1}")
+    for i in reversed(range(bits)):
+        uma(carries[i], b_q[i], a_q[i])
+    params = {"b": b_value, "bits": bits, "seed": seed}
+    if not shots:
+        return Workload("adder", n, "probs", _text(n, body), params)
+    _measure(body, list(range(n)))
+    return Workload("adder", n, "counts", _text(n, body, n), params, shots)
+
+
 def parse(text: str) -> tuple[int, int, list[tuple]]:
     """Parse a gate list into (qubits, clbits, instructions).
 
@@ -311,11 +485,11 @@ def _gate(parts: list[str]) -> tuple[str, list[int], float | None]:
     name = parts[0]
     if name in ("h", "x", "z", "s", "sdg"):
         return name, [int(parts[1])], None
-    if name in ("ry", "rz"):
+    if name in ("rx", "ry", "rz"):
         return name, [int(parts[1])], float(parts[2])
     if name in ("cx", "cz", "swap"):
         return name, [int(parts[1]), int(parts[2])], None
-    if name == "cp":
+    if name in ("cp", "rzz"):
         return name, [int(parts[1]), int(parts[2])], float(parts[3])
     raise ValueError(f"unsupported gate `{' '.join(parts)}`")
 

@@ -144,8 +144,20 @@ fn utc_date(unix_secs: i64) -> String {
 
 fn cpu_model() -> String {
     #[cfg(target_os = "windows")]
-    if let Ok(v) = std::env::var("PROCESSOR_IDENTIFIER") {
-        return v;
+    {
+        let key = r"HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0";
+        if let Ok(out) = std::process::Command::new("reg")
+            .args(["query", key, "/v", "ProcessorNameString"])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if let Some(name) = text.lines().find_map(|l| l.split("REG_SZ").nth(1)) {
+                return name.trim().to_string();
+            }
+        }
+        if let Ok(v) = std::env::var("PROCESSOR_IDENTIFIER") {
+            return v;
+        }
     }
     #[cfg(target_os = "linux")]
     if let Ok(info) = std::fs::read_to_string("/proc/cpuinfo") {

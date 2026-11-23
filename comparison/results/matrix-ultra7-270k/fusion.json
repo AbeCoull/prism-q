@@ -1,0 +1,136 @@
+{
+  "rcs/n20/depth=10/seed=deadbeef/probs": {
+    "num_qubits": 20,
+    "input_instructions": 695,
+    "fused_instructions": 5,
+    "kinds": {
+      "Multi2q": 5
+    }
+  },
+  "rcs/n20/depth=20/seed=deadbeef/probs": {
+    "num_qubits": 20,
+    "input_instructions": 1390,
+    "fused_instructions": 10,
+    "kinds": {
+      "Multi2q": 10
+    }
+  },
+  "qft/n20/input=product/seed=deadbeef/probs": {
+    "num_qubits": 20,
+    "input_instructions": 260,
+    "fused_instructions": 41,
+    "kinds": {
+      "BatchPhase": 18,
+      "Cu": 1,
+      "Fused": 19,
+      "Multi2q": 2,
+      "MultiFused": 1
+    }
+  },
+  "rcs/n24/depth=10/seed=deadbeef/probs": {
+    "num_qubits": 24,
+    "input_instructions": 835,
+    "fused_instructions": 7,
+    "kinds": {
+      "Multi2q": 7
+    }
+  },
+  "rcs/n24/depth=20/seed=deadbeef/probs": {
+    "num_qubits": 24,
+    "input_instructions": 1670,
+    "fused_instructions": 11,
+    "kinds": {
+      "Multi2q": 11
+    }
+  },
+  "qft/n24/input=product/seed=deadbeef/probs": {
+    "num_qubits": 24,
+    "input_instructions": 360,
+    "fused_instructions": 13,
+    "kinds": {
+      "BatchPhase": 2,
+      "DiagonalBatch": 4,
+      "Multi2q": 6,
+      "MultiFused": 1
+    }
+  },
+  "rcs/n26/depth=10/seed=deadbeef/probs": {
+    "num_qubits": 26,
+    "input_instructions": 905,
+    "fused_instructions": 7,
+    "kinds": {
+      "Multi2q": 7
+    }
+  },
+  "rcs/n26/depth=20/seed=deadbeef/probs": {
+    "num_qubits": 26,
+    "input_instructions": 1810,
+    "fused_instructions": 13,
+    "kinds": {
+      "Multi2q": 13
+    }
+  },
+  "qft/n26/input=product/seed=deadbeef/probs": {
+    "num_qubits": 26,
+    "input_instructions": 416,
+    "fused_instructions": 15,
+    "kinds": {
+      "BatchPhase": 4,
+      "DiagonalBatch": 4,
+      "Multi2q": 6,
+      "MultiFused": 1
+    }
+  },
+  "rcs/n28/depth=10/seed=deadbeef/probs": {
+    "num_qubits": 28,
+    "input_instructions": 975,
+    "fused_instructions": 8,
+    "kinds": {
+      "Multi2q": 8
+    }
+  },
+  "rcs/n28/depth=20/seed=deadbeef/probs": {
+    "num_qubits": 28,
+    "input_instructions": 1950,
+    "fused_instructions": 15,
+    "kinds": {
+      "Fused2q": 1,
+      "Multi2q": 14
+    }
+  },
+  "qft/n28/input=product/seed=deadbeef/probs": {
+    "num_qubits": 28,
+    "input_instructions": 476,
+    "fused_instructions": 17,
+    "kinds": {
+      "DiagonalBatch": 9,
+      "Multi2q": 7,
+      "MultiFused": 1
+    }
+  },
+  "qv/n16/seed=deadbeef/probs": {
+    "num_qubits": 16,
+    "input_instructions": 1024,
+    "fused_instructions": 9,
+    "kinds": {
+      "Fused2q": 1,
+      "Multi2q": 8
+    }
+  },
+  "qv/n20/seed=deadbeef/probs": {
+    "num_qubits": 20,
+    "input_instructions": 1600,
+    "fused_instructions": 17,
+    "kinds": {
+      "Multi2q": 17
+    }
+  },
+  "qv/n24/seed=deadbeef/probs": {
+    "num_qubits": 24,
+    "input_instructions": 2304,
+    "fused_instructions": 23,
+    "kinds": {
+      "Multi2q": 23
+    }
+  }
+}

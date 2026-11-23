@@ -26,9 +26,10 @@ NUMBER = re.compile(r"\d[\d.,]*(?:e[-+]\d+| (?:us|ms|s|MB|GB)\b)")
 OUTCOME = {"oom": "out of memory", "timeout": "timeout", "crash": "crash", "error": "refused"}
 NOT_RUN = "not run"
 CANNOT_RUN = "cannot run"
-UNCHECKED, WEAK, UNCROSSED = "*", "†", "‡"
+UNCHECKED, WEAK, UNCROSSED, PAIRED = "*", "†", "‡", "§"
 MARK_WORDS = {
     UNCHECKED: "output not checked",
+    PAIRED: "no fp64 reference reached the row; checked only against the other PRISM-Q statevector",
     WEAK: f"weakly tested: the check detects only shifts above {validate.WEAK_DETECTABLE:g} in a marginal",
     UNCROSSED: "reference output with no cross-check by a second simulator",
 }
@@ -48,14 +49,50 @@ COLUMN = {
     "prismq:tensor-network": "PRISM-Q TN",
     "prismq:mps-256": "PRISM-Q MPS cap 256",
     "prismq:no-qft-block": "PRISM-Q, QFT recognition off",
+    "prismq:statevector": "PRISM-Q statevector",
+    "prismq:gpu": "PRISM-Q GPU",
+    "prismq:mps-64": "PRISM-Q MPS cap 64",
+    "prismq:factored": "PRISM-Q factored",
+    "aer-stabilizer": "Aer stabilizer",
+    "quimb-mps:64": "quimb MPS cap 64",
 }
 FAMILY = {"lowent": "shallow", "disjoint": "disconnected", "rcs": "rcs", "qft": "qft", "qv": "qv"}
 DENSE = ("rcs", "qft", "qv")
 SWEEP = [("prismq:mps-", "PRISM-Q MPS"), ("aer-mps:", "Aer MPS"), ("quimb-mps:", "quimb MPS")]
+ISSUE_URL = "https://github.com/AbeCoull/prism-q/issues/new?template=BENCHMARK.yml"
 DISCLAIMER = (
-    "These numbers come from one host and the harness in `comparison/`. If the method looks wrong or a "
-    "simulator should be added, [open an issue](https://github.com/AbeCoull/prism-q/issues)."
+    "These numbers come from one host and the harness in `comparison/`. If the method looks wrong, a "
+    f"number does not reproduce, or a simulator should be added, [open a benchmark issue]({ISSUE_URL})."
 )
+ISSUE_BUTTON = (
+    f'<div class="pq-actions"><a class="pq-issue" href="{ISSUE_URL}">Report a benchmark result</a>'
+    '<span class="pq-actions-s">Numbers that differ on your machine, a method question, or a missing '
+    "simulator: the form asks for the host, the command and the rows.</span></div>"
+)
+# Scaling ladders: page label and the tab each sits under, by the ladder key's prefix and family.
+LADDER_GROUPS = [
+    ("dense", "Statevector"),
+    ("stabilizer", "Stabilizer"),
+    ("mps", "MPS"),
+    ("tn", "Tensor network"),
+    ("factored", "Factored"),
+]
+LADDER_FAMILY = {
+    "rcs": "Random brickwork",
+    "qft": "QFT",
+    "hea": "Hardware-efficient ansatz",
+    "qaoa": "QAOA, 3-regular",
+    "ghz": "GHZ",
+    "bv": "Bernstein-Vazirani",
+    "clifford": "Clifford brickwork",
+    "lowent": "Shallow brickwork",
+    "wstate": "W state",
+    "tfim": "Ising chain",
+    "disjoint": "Disjoint 10-qubit blocks",
+}
+TITLE_WORDS = {"dense": "statevector", "stabilizer": "stabilizer", "mps": "MPS", "tn": "tensor network"}
+NO_GPU_PEER = "No peer GPU path was measured: the Aer and qsim GPU builds need Linux, and QuEST was built without CUDA."
+CEILING_WORDS = {"timeout": "timeout", "memory": "memory", "budget": "one call over the rung budget"}
 
 # Section id, heading, kicker, observation group, families, simulators, named peer, bullets.
 # A kicker's `{shots}`, `{block}`, `{depth}` and `{observables}` are filled from the section's
@@ -143,12 +180,12 @@ SECTIONS = [
         "Tensor network expectation values",
         "Expectation values · {observables} · brickwork depth {depth}",
         "tn",
-        ("rcs",),
+        ("rcs", "tfim"),
         ["prismq", "prismq:tensor-network", "prismq:mps-256", "quimb-tn", "aer-mps"],
         "quimb-tn",
         [
-            "The circuit is the rcs brickwork without measurements; every value is checked against the exact "
-            "cone reference.",
+            "The circuits are the rcs brickwork and a 4-step Trotterized Ising chain, without measurements; "
+            "every value is checked against the exact cone reference.",
         ],
     ),
     (
@@ -171,6 +208,44 @@ SECTIONS = [
         "aer-mps",
         [],
     ),
+    (
+        "zoodense",
+        "Circuit zoo, statevector",
+        "Statevector · full probability vector",
+        "zoo",
+        ("hea", "qaoa", "tfim", "adder"),
+        ["prismq", "aer-statevector", "quest", "spinoza", "qip", "aer-statevector-f32", "qsim"],
+        "aer-statevector",
+        [
+            "Hardware-efficient ansatz, QAOA on a random 3-regular graph, a 10-step Trotterized Ising chain, "
+            "and a ripple-carry adder over a superposed register.",
+            "QAOA and Ising rows use RX and RZZ. QuEST applies them natively and qip as one matrix each; "
+            "Spinoza has no ZZ rotation, so its adapter applies RZZ as two phase gates and a controlled phase.",
+            "Aer fp32 exits with an access violation on CP when fusion is on and on RZZ, so it has no QFT, QAOA "
+            "or Ising timings.",
+            "qsim and Aer fp32 store single-precision amplitudes and are checked at 1e-5.",
+        ],
+    ),
+    (
+        "zooclifford",
+        "Circuit zoo, stabilizer",
+        "Stabilizer tableau · {shots}",
+        "zoo",
+        ("ghz", "bv"),
+        ["prismq", "prismq@1", "stim", "aer-stabilizer"],
+        "stim",
+        ["GHZ preparation along a line and Bernstein-Vazirani with a seeded secret."],
+    ),
+    (
+        "zoosampled",
+        "Circuit zoo, W state",
+        "Sampled · {shots}",
+        "zoo",
+        ("wstate",),
+        ["prismq", "aer-mps", "aer-automatic"],
+        "aer-mps",
+        ["The W state holds n nonzero amplitudes and needs bond 2 across every cut."],
+    ),
 ]
 # Explicit heading id per section; the tiles link to these.
 ANCHORS = {
@@ -183,6 +258,9 @@ ANCHORS = {
     "tn": "tensor-network-expectation-values",
     "sampling": "shot-sampling",
     "disjoint": "disjoint-components",
+    "zoodense": "circuit-zoo-statevector",
+    "zooclifford": "circuit-zoo-stabilizer",
+    "zoosampled": "circuit-zoo-w-state",
 }
 # Label for one run condition line; the theme hangs it in a column beside the text.
 SPEC = '<span class="pq-spec-l">{}</span>'
@@ -327,11 +405,13 @@ def _mark(record: dict) -> str:
         return "" if v.get("cross_check") else UNCROSSED
     if v.get("role") == "weakly-tested":
         return WEAK
+    if v.get("role") == "untested" and v.get("cross_check"):
+        return PAIRED
     return "" if aggregate.validated(record) else UNCHECKED
 
 
 def _legend(marks: set[str]) -> str | None:
-    used = [m for m in (UNCHECKED, WEAK, UNCROSSED) if m in marks]
+    used = [m for m in (UNCHECKED, PAIRED, WEAK, UNCROSSED) if m in marks]
     return "; ".join(f"{m} {MARK_WORDS[m]}" for m in used) + "." if used else None
 
 
@@ -452,7 +532,7 @@ def _notes(sid: str, rows: dict[str, list[dict]], sims: list[str]) -> list[str]:
     """Section bullets the records determine."""
     recs = [r for group in rows.values() for r in group]
     notes = []
-    if sid in ("stabilizer", "highshot"):
+    if sid in ("stabilizer", "highshot", "zooclifford"):
         threads = sorted({r["threads"] for r in recs if r["simulator"] == "prismq"})
         if threads:
             pairing = (
@@ -695,7 +775,9 @@ def _summary(records: list[dict], ratio: dict, derived: dict) -> list[str]:
     return _figure("summary", "All sections · peer time over PRISM-Q time", title, _html_table(header, table), note)
 
 
-def _tiles(built: list[tuple[tuple, dict, list[float], str, set[str]]], records: list[dict], derived: dict) -> list[str]:
+def _tiles(
+    built: list[tuple[tuple, dict, list[float], str, set[str]]], records: list[dict], derived: dict
+) -> list[str]:
     """One link per section to its heading, with the range over every validated peer; `perf.js` draws the track."""
     tops = _top_ratios(derived)
     precision = {r["simulator"]: r.get("precision") for r in records}
@@ -965,6 +1047,8 @@ def _failures(records: list[dict]) -> list[str]:
         status = _status(r)
         if status in (None, NOT_RUN, CANNOT_RUN) or r["group"] in ("dispatch", "accuracy", "bondsweep"):
             continue
+        if r.get("ceiling") in ("timeout", "memory"):
+            continue
         if status == "invalid" and r["validation"].get("tvd") is not None:
             detail = f"distance {r['validation']['tvd']:.2g} from the reference"
         elif status == "invalid":
@@ -1009,8 +1093,8 @@ def _suite(suite: dict | None) -> list[str]:
     table = [[r["family"].upper(), f"{r['qubits']:,}", _ms(r["ms"])] for r in suite["rows"]]
     lines = ["## PRISM-Q alone", ""]
     lines += [
-        f"- `bench_suite` on the same host, measured {suite['date']} with PRISM-Q {suite['version']}, automatic "
-        "dispatch, every logical core.",
+        f"- `bench_suite` measured {suite['date']} with PRISM-Q {suite['version']} on {_cpu_name(suite.get('cpu'))}, "
+        f"automatic dispatch, {suite.get('rayon_threads')} threads.",
     ]
     backends: dict[str, set[str]] = defaultdict(set)
     for r in suite["rows"]:
@@ -1133,10 +1217,280 @@ def _setup(manifest: dict, records: list[dict]) -> list[str]:
     return _older_runs(manifest, records) + _table(["Item", "Value"], rows)
 
 
+def _cpu_name(model: str | None) -> str:
+    """A processor brand string without trademark marks or the clock suffix."""
+    return " ".join(re.sub(r"\((R|TM)\)|CPU @.*", "", model or "unknown CPU").split())
+
+
 def _host_line(host: dict) -> str:
-    cpu = re.sub(r"\((R|TM)\)|CPU @.*", "", host.get("cpu_model") or "").replace("Intel Core", "Intel Core ")
-    cpu = " ".join(cpu.split())
+    cpu = _cpu_name(host.get("cpu_model"))
     return f"{cpu}, {host.get('physical_cores')} cores, {host.get('logical_cores')} threads, {host.get('os')}"
+
+
+def _gpu_line(host: dict) -> str | None:
+    """The first GPU `nvidia-smi` reported, as `name (N GB)`."""
+    gpus = host.get("gpu") or []
+    if not gpus:
+        return None
+    parts = [p.strip() for p in gpus[0].split(",")]
+    memory = re.match(r"(\d+)\s*MiB", parts[1]) if len(parts) > 1 else None
+    return f"{parts[0]} ({round(int(memory.group(1)) / 1024)} GB)" if memory else parts[0]
+
+
+def _ran(records: list[dict], name: str) -> bool:
+    return any(r["simulator"] == name and r["status"] == "ok" for r in records)
+
+
+def _measured_hours(manifest: dict) -> float | None:
+    """Measurement time of the base run and every supplementary run, in hours."""
+    minutes = [manifest.get("wall_minutes")] + [r.get("wall_minutes") for r in manifest.get("supplementary_runs", [])]
+    total = sum(m for m in minutes if m)
+    return total / 60 if total else None
+
+
+def _run_line(manifest: dict) -> str:
+    current = _current(manifest)
+    started = (manifest.get("started_utc") or "")[:10]
+    hours = _measured_hours(manifest)
+    parts = [f"`{manifest['run_id']}`", f"profile `{manifest.get('profile')}`"]
+    if started:
+        parts.append(f"started {started}")
+    parts.append(f"commit {_commit(current['provenance']['toolchain'])}")
+    if hours:
+        parts.append(f"{hours:.1f} h of measurement")
+    supplements = len(manifest.get("supplementary_runs", []))
+    if supplements:
+        parts.append(f"{supplements} supplementary run" + ("s" if supplements != 1 else ""))
+    return ", ".join(parts)
+
+
+def _ladders(records: list[dict]) -> dict[str, dict[str, list[dict]]]:
+    """Rung records per ladder and series, narrowest first; ladders in tab order, then run order.
+
+    A series is a simulator at its top thread count on the ladder, or `name@T` at another count.
+    """
+    top: dict[tuple[str, str], int] = {}
+    for r in records:
+        if r["group"] == "scaling" and r.get("ladder"):
+            key = (r["ladder"], r["simulator"])
+            top[key] = max(top.get(key, 0), r["threads"])
+    found: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
+    for r in records:
+        if r["group"] == "scaling" and r.get("ladder"):
+            name = r["simulator"]
+            series = name if r["threads"] == top[(r["ladder"], name)] else f"{name}@{r['threads']}"
+            found[r["ladder"]][series].append(r)
+    for sims in found.values():
+        for recs in sims.values():
+            recs.sort(key=lambda r: r["workload"]["num_qubits"])
+    rank = {prefix: i for i, (prefix, _) in enumerate(LADDER_GROUPS)}
+    return {k: found[k] for k in sorted(found, key=lambda k: rank.get(k.partition("/")[0], len(rank)))}
+
+
+def _ladder_label(key: str) -> str:
+    family = key.partition("/")[2]
+    return LADDER_FAMILY.get(family, family)
+
+
+def _reach(recs: list[dict]) -> dict:
+    """The widest rung a series ran without a failed check, its record, and what stopped the climb.
+
+    An output nothing could check counts as reached and carries the unchecked mark.
+    """
+    ran = [r for r in recs if aggregate.valid_or_unvalidated(r)]
+    top = ran[-1] if ran else None
+    width = top["workload"]["num_qubits"] if top else None
+    out = {"n": width, "record": top}
+    ceiling = next((r for r in recs if r.get("ceiling")), None)
+    past = [r for r in recs if width is None or r["workload"]["num_qubits"] > width]
+    tried = next((r for r in past if r["status"] not in ("skipped", "not-applicable")), None)
+    if ceiling:
+        out["stop"] = f"{CEILING_WORDS[ceiling['ceiling']]} at {ceiling['workload']['num_qubits']:,} qubits"
+    elif tried:
+        out["stop"] = f"{_status(tried) or 'stopped'} at {tried['workload']['num_qubits']:,} qubits"
+    elif not past:
+        out["stop"] = "top of the ladder"
+    elif all(r["status"] == "not-applicable" for r in past):
+        out["stop"] = f"{CANNOT_RUN} at {past[0]['workload']['num_qubits']:,} qubits"
+    else:
+        out["stop"] = "wider rungs not run"
+    return out
+
+
+def _kind(series: str, recs: list[dict]) -> str:
+    """`gpu`, `prismq`, `fp32` or `fp64`: the class a series is compared within."""
+    name = series.partition("@")[0]
+    if name == "prismq:gpu":
+        return "gpu"
+    if name.startswith("prismq"):
+        return "prismq"
+    return "fp32" if _only(r.get("precision") for r in recs) == "single" else "fp64"
+
+
+def _one_thread(series: str) -> bool:
+    name, _, threads = series.partition("@")
+    return threads == "1" or (not threads and runners.resolve(name).single_threaded)
+
+
+def _widest(reach: dict[str, dict], names: list[str]) -> tuple[int, str] | None:
+    """The widest series among `names`, automatic dispatch winning a tie."""
+    found = [(reach[n]["n"], n) for n in names if reach[n]["n"]]
+    return max(found, key=lambda x: (x[0], x[1] == "prismq", x[1])) if found else None
+
+
+def _backend_name(debug: str) -> str:
+    """A resolved backend's Debug name as words: `CompiledStabilizer` reads `Compiled stabilizer`."""
+    words = re.findall(r"[A-Z][a-z]*", debug) or [debug]
+    words = ["MPS" if w == "Mps" else w for w in words]
+    return " ".join([words[0]] + [w if w.isupper() else w.lower() for w in words[1:]])
+
+
+def _reach_tile(key: str, sims: dict[str, list[dict]], reach: dict[str, dict]) -> tuple[str, int] | None:
+    """One tile: PRISM-Q on the CPU beside fp64 peers, then 1-thread, fp32 and GPU results on their own lines."""
+    kinds = {s: _kind(s, recs) for s, recs in sims.items()}
+    cpu = [s for s, k in kinds.items() if k == "prismq" and "@" not in s]
+    main = _widest(reach, cpu)
+    if not main:
+        return None
+    n, name = main
+    record = reach[name]["record"]
+    lines = [f"{_column(name)}{_mark(record)} · {_ms(record['stats']['median_ms'])} · {reach[name]['stop']}"]
+    peer = _widest(reach, [s for s, k in kinds.items() if k == "fp64" and not _one_thread(s)])
+    if peer:
+        exact = _only(r.get("precision") for r in sims[peer[1]]) == "exact (tableau)"
+        lines.append(f"widest {'exact' if exact else 'fp64'} peer: {_column(peer[1])} at {peer[0]:,}")
+    else:
+        lines.append("no fp64 peer ran")
+    single = sorted(
+        (s for s in sims if _one_thread(s) and kinds[s] in ("prismq", "fp64")), key=lambda s: kinds[s] != "prismq"
+    )
+    if any(kinds[s] == "fp64" for s in single):
+        shown = [f"{_column(s.partition('@')[0])} {reach[s]['n']:,}" for s in single if reach[s]["n"]]
+        lines.append("1 thread: " + ", ".join(shown))
+    fp32 = _widest(reach, [s for s, k in kinds.items() if k == "fp32"])
+    if fp32:
+        lines.append(f"fp32 peer: {_column(fp32[1])} at {fp32[0]:,}")
+    gpu = _widest(reach, [s for s, k in kinds.items() if k == "gpu"])
+    if gpu:
+        lines.append(f"GPU: {_column(gpu[1])} at {gpu[0]:,}, no GPU peer")
+    group = key.partition("/")[0]
+    resolved = record.get("resolved_backend")
+    method = _backend_name(resolved) if resolved else dict(LADDER_GROUPS).get(group, group)
+    tile = (
+        f'<li class="pq-reach-t" data-tab="{html.escape(group)}"><span class="pq-reach-l">'
+        f"{html.escape(_ladder_label(key))}<em>{html.escape(method)}</em></span>"
+        f'<span class="pq-reach-v">{n:,}<i>qubits</i></span>'
+        + "".join(f'<span class="pq-reach-s">{html.escape(line)}</span>' for line in lines)
+        + "</li>"
+    )
+    return tile, n
+
+
+def _timeouts(ladders: dict[str, dict[str, list[dict]]]) -> str:
+    """The timeout clause: one value, or each value with the ladder tabs it applies to."""
+    by_value: dict[float, list[str]] = defaultdict(list)
+    for key, sims in ladders.items():
+        value = _only((r.get("policy") or {}).get("timeout_s") for recs in sims.values() for r in recs)
+        tab = dict(LADDER_GROUPS).get(key.partition("/")[0], key)
+        if value and tab not in by_value[value]:
+            by_value[value].append(tab)
+    if len(by_value) == 1:
+        return f"times out after {next(iter(by_value)):g} s"
+    return "times out (" + "; ".join(f"{v:g} s on the {_and(t)} ladders" for v, t in sorted(by_value.items())) + ")"
+
+
+def _scaling_section(records: list[dict], host: dict) -> list[str]:
+    """Largest register per ladder and series, a tile per ladder comparing like with like, and the chart."""
+    ladders = _ladders(records)
+    if not ladders:
+        return []
+    tiles, table, marks = [], [], set()
+    widest: dict[str, int] = {}
+    for key, sims in ladders.items():
+        reach = {name: _reach(recs) for name, recs in sims.items()}
+        for name, x in reach.items():
+            record = x["record"]
+            mark = _mark(record) if record else ""
+            marks.add(mark)
+            n = f"{x['n']:,}{mark}" if x["n"] else "none"
+            median = _ms(record["stats"].get("median_ms")) if record else "n/a"
+            precision = _only(r.get("precision") for r in sims[name]) or "n/a"
+            table.append([_ladder_label(key), _column(name), precision, n, median, x["stop"]])
+        tile = _reach_tile(key, sims, reach)
+        if tile:
+            tiles.append(tile[0])
+            group = key.partition("/")[0]
+            widest[group] = max(widest.get(group, 0), tile[1])
+    policy = [r.get("policy") or {} for recs in ladders.values() for rs in recs.values() for r in rs]
+    ceiling = _only(p.get("ceiling_s") for p in policy)
+    limits = [_timeouts(ladders), "is refused for memory"]
+    if ceiling:
+        limits.append(f"takes longer than {ceiling:g} s for its cold call")
+    bullets = [
+        "Each simulator climbs each ladder until a rung " + ", ".join(limits[:-1]) + f" or {limits[-1]}; it "
+        "skips the wider rungs after that. A timeout or memory refusal is its ceiling on this host, shown as a "
+        "marker on the chart rather than as a failure; an output that fails its check is still listed as one.",
+        "The cold call is timed inside each simulator's process: QuEST, Spinoza and qip report it from their "
+        "runners, without process start or writing the probability vector.",
+        "Dense ladders force PRISM-Q's statevector so every rung is exact; past its memory cap, automatic "
+        "dispatch would pick another representation.",
+    ]
+    caps = sorted(
+        {
+            r["env"]["PRISM_MAX_SV_QUBITS"]
+            for recs in ladders.values()
+            for rs in recs.values()
+            for r in rs
+            if (r.get("env") or {}).get("PRISM_MAX_SV_QUBITS")
+        }
+    )
+    if caps:
+        bullets.append(
+            f"PRISM-Q's statevector runs with `PRISM_MAX_SV_QUBITS={_and(caps)}`, the widest state the harness "
+            f"admits for any dense peer ({round(runners.DENSE_MEMORY_FRACTION * 100)}% of RAM), in place of its "
+            "default cap of half of physical memory."
+        )
+    if any(_one_thread(s) for sims in ladders.values() for s in sims):
+        bullets.append("Stim runs single-threaded, so the stabilizer ladders also run PRISM-Q at 1 thread.")
+    gpu = _gpu_line(host)
+    if gpu and _ran(records, "prismq:gpu"):
+        bullets.append(
+            f"PRISM-Q GPU runs the statevector on the {gpu}; the timed call includes copying the probability "
+            f"vector back to the host. {NO_GPU_PEER}"
+        )
+    lines = ["## Scaling to the ceiling {#scaling}", ""] + [f"- {b}" for b in bullets] + [""]
+    if tiles:
+        lines += ['<ul class="pq-reach">\n' + "\n".join(tiles) + "\n</ul>", ""]
+    title_parts = [f"{widest[g]:,} {TITLE_WORDS.get(g, g)}" for g, _ in LADDER_GROUPS if g in widest]
+    title = (
+        "Widest PRISM-Q run on the CPU per method: " + _and(title_parts)
+        if title_parts
+        else "Median time against register width"
+    )
+    legend = _legend(marks - {""})
+    note = (
+        "Whiskers span the 25th to 75th percentile of the warm calls. A marker above a cell names the rung "
+        "where a simulator stopped; a hollow point failed its check."
+    )
+    lines += _figure(
+        "scaling",
+        "Time against register width · every simulator until its ceiling",
+        title,
+        _html_table(["Ladder", "Simulator", "Precision", "Largest register", "Median there", "Stopped by"], table),
+        f"{note} {legend}" if legend else note,
+    )
+    return lines
+
+
+def _toc(lines: list[str]) -> str:
+    """Jump links to every second-level heading in `lines`, in page order."""
+    links = []
+    for line in lines:
+        m = re.match(r"## (.+?)(?: \{#([\w-]+)\})?$", line)
+        if m:
+            anchor = m.group(2) or re.sub(r"[^\w]+", "-", m.group(1).lower()).strip("-")
+            links.append(f'<a href="#{anchor}">{html.escape(m.group(1))}</a>')
+    return '<nav class="pq-toc" aria-label="On this page">' + "".join(links) + "</nav>"
 
 
 def page(results_dir: str, manifest: dict, records: list[dict], derived: dict, suite: dict | None) -> str:
@@ -1144,12 +1498,20 @@ def page(results_dir: str, manifest: dict, records: list[dict], derived: dict, s
     ratio = _ratios(derived)
     warm = _only((r.get("policy") or {}).get("iterations") for r in records if r["status"] == "ok")
     warm_text = f"up to {NUMBER_WORDS.get(warm, warm)} warm calls" if warm else "a set of warm calls"
-    lines = [
+    gpu = _gpu_line(host)
+    device = (
+        f", {gpu} for the PRISM-Q GPU rows (no peer GPU path measured)"
+        if gpu and _ran(records, "prismq:gpu")
+        else ", CPU only"
+    )
+    head = [
         "# Performance",
         "",
         GENERATED,
         "",
         '<link rel="stylesheet" href="perf.css">',
+        "",
+        ISSUE_BUTTON,
         "",
         "Median wall time per call for PRISM-Q and other simulators on the same gate lists. Each simulator's "
         "output at its top thread count on a row is checked against a reference: dense vectors by total "
@@ -1159,15 +1521,20 @@ def page(results_dir: str, manifest: dict, records: list[dict], derived: dict, s
         "",
         DISCLAIMER,
         "",
-        f"- {SPEC.format('Host')} {_host_line(host)}, {host.get('ram_gb')} GB RAM, CPU only.",
+        f"- {SPEC.format('Host')} {_host_line(host)}, {host.get('ram_gb')} GB RAM{device}. Every number on "
+        "this page comes from this host.",
+        f"- {SPEC.format('Run')} {_run_line(manifest)}.",
         f"- {SPEC.format('Protocol')} One process per measurement: a cold call, then {warm_text}; the median warm "
         "call is reported.",
-        f"- {SPEC.format('Ratio')} Peer median time / PRISM-Q median time. Cross-process timing varies by about 10% "
-        "on the reference host, where ratios within 0.9x to 1.1x are not distinguishable.",
+        f"- {SPEC.format('Ratio')} Peer median time / PRISM-Q median time. Warm samples within one process agree "
+        "closely, but between runs of identical code on this host most rows moved by up to about 10% and some, "
+        "mostly MPS and tensor network calls, by up to about 2x. Ratios within 0.9x to 1.1x are not "
+        "distinguishable, and on those rows a gap under 2x is indicative only.",
         f"- {SPEC.format('Raw data')} `comparison/results/{os.path.basename(results_dir)}/`; how it was taken: "
         "[Benchmark Methodology](../guides/benchmarking.md).",
         "",
     ]
+    lines: list[str] = []
     built = []
     for section in SECTIONS:
         _, _, _, group, families, _, _, _ = section
@@ -1177,6 +1544,7 @@ def page(results_dir: str, manifest: dict, records: list[dict], derived: dict, s
             built.append((section, rows, values, table, marks))
     lines += _tiles(built, records, derived)
     lines += _summary(records, ratio, derived)
+    lines += _scaling_section(records, host)
     for section, rows, values, table, marks in built:
         sid, heading, kicker, group, families, sims, ref, bullets = section
         span = _qubit_span(records, group, families)
@@ -1184,7 +1552,8 @@ def page(results_dir: str, manifest: dict, records: list[dict], derived: dict, s
         if "prismq@1" in sims and _pick([r for recs in rows.values() for r in recs], "prismq@1"):
             base = "1-thread PRISM-Q"
         title = f"{_column(ref)} takes {_span(values)} the {base} time, {span}" if values else f"Median time, {span}"
-        lines += [f"## {heading} {{#{ANCHORS[sid]}}}", ""] + [f"- {b}" for b in _notes(sid, rows, sims) + bullets] + [""]
+        notes = [f"- {b}" for b in _notes(sid, rows, sims) + bullets]
+        lines += [f"## {heading} {{#{ANCHORS[sid]}}}", ""] + notes + [""]
         lines += _figure(sid, _kicker(kicker, rows), title, table, _legend(marks))
         if sid == "sv64":
             lines += _qft_control(records)
@@ -1200,11 +1569,14 @@ def page(results_dir: str, manifest: dict, records: list[dict], derived: dict, s
     lines += _correctness(records)
     lines += _suite(suite)
     lines += ["## Setup and versions", ""] + _setup(manifest, records)
+    hours = _measured_hours(manifest)
+    took = f"these results took {hours:.1f} h of measurement" if hours else "several hours"
     lines += [
-        "Rerun the matrix and regenerate this page (about three hours; `--profile smoke` takes about 5 minutes):",
+        f"Rerun the matrix and regenerate this page ({took}; `--profile smoke` takes a few minutes):",
         "",
         "```bash",
-        "comparison/.venv/Scripts/python comparison/matrix.py run --profile reference --out comparison/results/my-run",
+        f"comparison/.venv/Scripts/python comparison/matrix.py run --profile {manifest.get('profile')} "
+        "--out comparison/results/my-run",
         "comparison/.venv/Scripts/python comparison/matrix.py report comparison/results/my-run --docs docs/performance",
         "```",
         "",
@@ -1217,7 +1589,7 @@ def page(results_dir: str, manifest: dict, records: list[dict], derived: dict, s
         '<script src="data.js"></script>',
         '<script src="perf.js"></script>',
     ]
-    return "\n".join(_wrap(lines)).rstrip() + "\n"
+    return "\n".join(_wrap(head + [_toc(lines), ""] + lines)).rstrip() + "\n"
 
 
 def _round(value: float | None) -> float | None:
@@ -1245,6 +1617,7 @@ def _method(name: str) -> str:
         "qsim": "statevector-fp32",
         "stim": "stabilizer",
         "aer-automatic": "automatic",
+        "aer-stabilizer": "stabilizer",
         "quimb-tn": "tensor-network",
     }.get(name, "other")
 
@@ -1292,7 +1665,7 @@ def data(manifest: dict, records: list[dict], suite: dict | None, derived: dict 
             "valid": aggregate.valid(r),
             "validated": aggregate.validated(r),
             "role": v.get("role"),
-            "cross_checked": bool(v.get("cross_check")) if v.get("role") == "reference" else None,
+            "cross_checked": bool(v.get("cross_check")) if v.get("role") in ("reference", "untested") else None,
             "min_detectable": _round(v.get("min_detectable")),
             "first_ms": _round((r.get("phases") or {}).get("first_ms")),
             "min_ms": _round(st.get("min_ms")),
@@ -1305,6 +1678,10 @@ def data(manifest: dict, records: list[dict], suite: dict | None, derived: dict 
             "n": st.get("n"),
             "peak_rss_mb": _round(r.get("peak_rss_mb")),
             "resolved_backend": r.get("resolved_backend"),
+            "placement": r.get("placement"),
+            "ladder": r.get("ladder"),
+            "ceiling": r.get("ceiling"),
+            "beyond_ceiling": r.get("beyond_ceiling"),
             "bond_cap": _cap(s),
             "tvd": _round(v.get("tvd")),
             "max_abs_error": _round(v.get("max_abs_error")),
@@ -1315,7 +1692,10 @@ def data(manifest: dict, records: list[dict], suite: dict | None, derived: dict 
     current = _current(manifest)
     host = current["provenance"]["host"]
     return {
-        "host": {"cpu": _host_line(host), "ram_gb": host.get("ram_gb")},
+        "host": {"cpu": _host_line(host), "ram_gb": host.get("ram_gb"), "gpu": _gpu_line(host)},
+        "run": {"id": manifest["run_id"], "profile": manifest.get("profile"), "date": manifest.get("started_utc")},
+        "ladders": {key: _ladder_label(key) for key in _ladders(records)},
+        "ladder_tabs": [list(t) for t in LADDER_GROUPS],
         "versions": {aggregate.label(k): v.get("version") for k, v in current["simulators"].items()},
         "observations": rows,
         "suite": suite,

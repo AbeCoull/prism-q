@@ -30,7 +30,7 @@
 namespace {
 
 struct Op {
-    char kind;  // h, x (cx), s (swap), y (ry), z (rz), p (cp)
+    char kind;  // h, x (cx), s (swap), r (rx), y (ry), z (rz), p (cp), g (rzz)
     int a;
     int b;
     double angle;
@@ -69,6 +69,9 @@ Program parseGateList(std::istream& in) {
         } else if (name == "swap") {
             op.kind = 's';
             fields >> op.a >> op.b;
+        } else if (name == "rx") {
+            op.kind = 'r';
+            fields >> op.a >> op.angle;
         } else if (name == "ry") {
             op.kind = 'y';
             fields >> op.a >> op.angle;
@@ -77,6 +80,9 @@ Program parseGateList(std::istream& in) {
             fields >> op.a >> op.angle;
         } else if (name == "cp") {
             op.kind = 'p';
+            fields >> op.a >> op.b >> op.angle;
+        } else if (name == "rzz") {
+            op.kind = 'g';
             fields >> op.a >> op.b >> op.angle;
         } else {
             fail(3, "unsupported gate line `" + line + "`");
@@ -100,9 +106,15 @@ Probs run(const Program& program) {
             case 'h': applyHadamard(qureg, op.a); break;
             case 'x': applyControlledPauliX(qureg, op.a, op.b); break;
             case 's': applySwap(qureg, op.a, op.b); break;
+            case 'r': applyRotateX(qureg, op.a, op.angle); break;
             case 'y': applyRotateY(qureg, op.a, op.angle); break;
             case 'z': applyRotateZ(qureg, op.a, op.angle); break;
             case 'p': applyTwoQubitPhaseShift(qureg, op.a, op.b, op.angle); break;
+            case 'g': {
+                int targets[2] = {op.a, op.b};
+                applyPhaseGadget(qureg, targets, 2, op.angle);
+                break;
+            }
             default: fail(3, "unknown op");
         }
     }
@@ -175,7 +187,9 @@ int main(int argc, char** argv) {
         (void)sink;
         printTimes(program, times);
     } else if (command == "probabilities") {
+        const auto start = std::chrono::steady_clock::now();
         Probs probs = run(program);
+        const double first_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         std::ofstream out(argv[2], std::ios::binary);
         out.write(reinterpret_cast<const char*>(probs.data.get()),
                   static_cast<std::streamsize>(probs.size * sizeof(double)));
@@ -187,8 +201,8 @@ int main(int argc, char** argv) {
         }
         std::printf(
             "{\"schema\":\"prismq-compare-runner/2\",\"simulator\":\"quest\",\"num_qubits\":%d,"
-            "\"num_operations\":%zu,\"length\":%zu,\"dtype\":\"<f8\",\"path\":\"%s\"}\n",
-            program.numQubits, program.ops.size(), probs.size, path.c_str());
+            "\"num_operations\":%zu,\"length\":%zu,\"dtype\":\"<f8\",\"path\":\"%s\",\"first_ms\":%.4f}\n",
+            program.numQubits, program.ops.size(), probs.size, path.c_str(), first_ms);
     } else {
         usage();
     }

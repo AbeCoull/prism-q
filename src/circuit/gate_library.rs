@@ -317,7 +317,7 @@ pub(crate) fn iswap_expansion(q0: usize, q1: usize) -> [Instruction; 6] {
     ]
 }
 
-fn check_arity(name: &str, qubits: &[usize], expected: usize) -> Result<()> {
+pub(crate) fn check_arity(name: &str, qubits: &[usize], expected: usize) -> Result<()> {
     if qubits.len() != expected {
         return Err(PrismError::GateArity {
             gate: name.to_string(),

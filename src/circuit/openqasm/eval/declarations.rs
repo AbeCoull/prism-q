@@ -175,8 +175,7 @@ impl<'a> Parser<'a> {
         self.inputs.insert(name, slot);
         self.input_names.push(name.to_string());
         let tag = self.tag(Linear {
-            slot: Some(slot),
-            scale: 1.0,
+            terms: SmallVec::from_slice(&[(slot, 1.0)]),
             offset: 0.0,
         });
         self.param_vars

@@ -70,14 +70,6 @@ impl<'a> Parser<'a> {
 
         let values = self.fold_params(params, line)?;
         let has_input = values.iter().any(|value| tag_id(*value).is_some());
-        if has_input && (name == "gphase" || !modifiers.is_empty()) {
-            let what = if name == "gphase" {
-                "`gphase`".to_string()
-            } else {
-                format!("modifier on `{name}`")
-            };
-            return Err(unsupported(line, format!("{what} reading an `input`")));
-        }
         if name == "gphase" {
             let qubits = operands
                 .iter()
@@ -259,11 +251,8 @@ impl<'a> Parser<'a> {
         self.write_constant_bits(&bits, &values, line)
     }
 
-    /// Evaluate a call's angle arguments. Two reading an `input` are rejected: a
-    /// slot is written onto the single angle a bindable gate carries.
     fn fold_params(&self, params: &[Argument], line: usize) -> Result<Vec<f64>> {
         let mut values = Vec::with_capacity(params.len());
-        let mut tagged = false;
         for param in params {
             let element = self.element_argument(param);
             let expr = match (param, &element) {
@@ -276,14 +265,7 @@ impl<'a> Parser<'a> {
                     ));
                 }
             };
-            let value = self.fold_angle(expr, line)?;
-            if tag_id(value).is_some() {
-                if tagged {
-                    return Err(unsupported(line, "two `input` parameters on one gate"));
-                }
-                tagged = true;
-            }
-            values.push(value);
+            values.push(self.fold_angle(expr, line)?);
         }
         Ok(values)
     }
@@ -321,61 +303,76 @@ impl<'a> Parser<'a> {
         if self.symbol_in(expr).is_none() {
             return self.value_of(expr, line);
         }
-        let form = self.affine_of(expr, line)?;
-        Ok(match form.slot {
-            Some(_) if form.scale != 0.0 => self.tag(form),
-            _ => form.offset,
-        })
+        Ok(self.angle_of_form(self.affine_of(expr, line)?))
     }
 
-    /// `expr` as an affine form over the one slot its tagged names read.
+    fn angle_of_form(&self, form: Linear) -> f64 {
+        if form.terms.is_empty() {
+            form.offset
+        } else {
+            self.tag(form)
+        }
+    }
+
+    /// `sum(coefficient * angle) + offset` over angles that may be tags.
+    pub(in crate::circuit::openqasm) fn mix(&self, parts: &[(f64, f64)], offset: f64) -> f64 {
+        let mut form = Linear::constant(offset);
+        for &(coefficient, angle) in parts {
+            let part = match tag_id(angle) {
+                Some(id) => self.tags.borrow()[id].clone(),
+                None => Linear::constant(angle),
+            };
+            form = form.plus(&part, coefficient);
+        }
+        self.angle_of_form(form)
+    }
+
+    /// The tags that add up to `angle`, one per slot it reads, with the offset
+    /// on the first. A bindable gate is additive in its angle, so a gate over
+    /// several slots is the product of one gate per tag.
+    pub(in crate::circuit::openqasm) fn slot_angles(&self, angle: f64) -> SmallVec<[f64; 2]> {
+        let Some(form) = tag_id(angle).map(|id| self.tags.borrow()[id].clone()) else {
+            return SmallVec::from_slice(&[angle]);
+        };
+        if form.terms.len() == 1 {
+            return SmallVec::from_slice(&[angle]);
+        }
+        form.terms
+            .iter()
+            .enumerate()
+            .map(|(at, &term)| {
+                self.tag(Linear {
+                    terms: SmallVec::from_slice(&[term]),
+                    offset: if at == 0 { form.offset } else { 0.0 },
+                })
+            })
+            .collect()
+    }
+
+    /// `expr` as an affine form over the slots its tagged names read.
     fn affine_of(&self, expr: &Expr, line: usize) -> Result<Linear> {
         if self.symbol_in(expr).is_none() {
-            return Ok(Linear {
-                slot: None,
-                scale: 0.0,
-                offset: self.value_of(expr, line)?,
-            });
+            return Ok(Linear::constant(self.value_of(expr, line)?));
         }
-        let scaled = |form: Linear, by: f64| Linear {
-            scale: form.scale * by,
-            offset: form.offset * by,
-            ..form
-        };
         with_stack(|| match expr {
             Expr::Ident(name) => Ok(self.symbol(name).expect("symbol_in found it")),
-            Expr::Negate(inner) => Ok(scaled(self.affine_of(inner, line)?, -1.0)),
+            Expr::Negate(inner) => Ok(self.affine_of(inner, line)?.scaled(-1.0)),
             Expr::Binary { op, left, right } => {
                 let (left, right) = (self.affine_of(left, line)?, self.affine_of(right, line)?);
-                let sign = match op {
-                    BinaryOp::Add => 1.0,
-                    BinaryOp::Sub => -1.0,
-                    BinaryOp::Mul if left.slot.is_none() => {
-                        return Ok(scaled(right, left.offset));
+                match op {
+                    BinaryOp::Add => Ok(left.plus(&right, 1.0)),
+                    BinaryOp::Sub => Ok(left.plus(&right, -1.0)),
+                    BinaryOp::Mul if left.terms.is_empty() => Ok(right.scaled(left.offset)),
+                    BinaryOp::Mul if right.terms.is_empty() => Ok(left.scaled(right.offset)),
+                    BinaryOp::Div if right.terms.is_empty() && right.offset != 0.0 => {
+                        let by = right.offset;
+                        Ok(Linear {
+                            terms: left.terms.iter().map(|&(s, k)| (s, k / by)).collect(),
+                            offset: left.offset / by,
+                        })
                     }
-                    BinaryOp::Mul if right.slot.is_none() => {
-                        return Ok(scaled(left, right.offset));
-                    }
-                    BinaryOp::Div if right.slot.is_none() && right.offset != 0.0 => {
-                        return Ok(Linear {
-                            scale: left.scale / right.offset,
-                            offset: left.offset / right.offset,
-                            ..left
-                        });
-                    }
-                    _ => return Err(non_affine(expr, line)),
-                };
-                if left.slot.is_some() && right.slot.is_some() && left.slot != right.slot {
-                    return Err(unsupported(
-                        line,
-                        format!("the angle `{expr}`, which reads two `input`s"),
-                    ));
+                    _ => Err(non_affine(expr, line)),
                 }
-                Ok(Linear {
-                    slot: left.slot.or(right.slot),
-                    scale: left.scale + sign * right.scale,
-                    offset: left.offset + sign * right.offset,
-                })
             }
             _ => Err(non_affine(expr, line)),
         })

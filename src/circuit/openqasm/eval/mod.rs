@@ -625,13 +625,15 @@ impl<'a> Parser<'a> {
             let Some(id) = gate_angle(instr).and_then(tag_id) else {
                 continue;
             };
-            let form = tags[id];
-            let slot = form.slot.expect("a tag reads a slot");
+            let form = &tags[id];
+            let [(slot, scale)] = form.terms[..] else {
+                unreachable!("a tag on a gate reads one slot");
+            };
             *angle_mut(instr) = form.offset;
             links.push(ParamLink {
                 instruction: at,
                 slot,
-                scale: form.scale,
+                scale,
                 offset: form.offset,
             });
         }
@@ -810,7 +812,7 @@ impl<'a> Parser<'a> {
     /// The affine form `name` holds when its value is a tag.
     fn symbol(&self, name: &str) -> Option<Linear> {
         match self.param_vars.as_ref()?.get(name)? {
-            ClassicalValue::Float(value) => tag_id(*value).map(|id| self.tags.borrow()[id]),
+            ClassicalValue::Float(value) => tag_id(*value).map(|id| self.tags.borrow()[id].clone()),
             _ => None,
         }
     }

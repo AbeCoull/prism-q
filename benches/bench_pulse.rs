@@ -22,7 +22,7 @@ fn bench_pulse_compile(c: &mut Criterion) {
     common::configure_group(&mut group);
 
     // Cross resonance: the control driven at the target's frequency, dimension 9,
-    // 300 samples of 4 segments.
+    // 300 samples of 2 segments, two exponentials each.
     let pair = Device::new([transmon(5.0e9), transmon(4.9e9)]).couple(0, 1, 3e6);
     let mut cr = Schedule::new(NS);
     cr.set_frequency(0, 0.0, 4.9e9).play(
@@ -36,10 +36,11 @@ fn bench_pulse_compile(c: &mut Criterion) {
         },
     );
     group.bench_function(BenchmarkId::new("cr_two_transmon_d3", "300ns"), |b| {
-        b.iter(|| black_box(compile(&pair, &cr, 4).unwrap()))
+        b.iter(|| black_box(compile(&pair, &cr, 2).unwrap()))
     });
 
-    // A DRAG pi pulse on one site, dimension 3, 20 samples of 16 segments.
+    // A DRAG pi pulse on one site, dimension 3, 20 samples of 8 segments of two
+    // exponentials.
     let single = Device::new([transmon(5.0e9)]);
     let mut x = Schedule::new(NS);
     x.play(
@@ -53,7 +54,7 @@ fn bench_pulse_compile(c: &mut Criterion) {
         },
     );
     group.bench_function(BenchmarkId::new("x_transmon_d3", "20ns"), |b| {
-        b.iter(|| black_box(compile(&single, &x, 16).unwrap()))
+        b.iter(|| black_box(compile(&single, &x, 8).unwrap()))
     });
 
     group.finish();

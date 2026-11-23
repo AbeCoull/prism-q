@@ -62,6 +62,29 @@ fn drag_beta() -> f64 {
     -1.0 / (TAU * ALPHA)
 }
 
+fn drag_pi() -> Envelope {
+    Envelope::Drag {
+        amp: pi_pulse_amp(),
+        sigma: 5.0 * NS,
+        beta: drag_beta(),
+    }
+}
+
+fn from_pairs(entries: &[[f64; 2]]) -> Vec<Complex64> {
+    entries
+        .iter()
+        .map(|&[re, im]| Complex64::new(re, im))
+        .collect()
+}
+
+fn max_entry_error(actual: &[Complex64], expected: &[Complex64]) -> f64 {
+    actual
+        .iter()
+        .zip(expected)
+        .map(|(a, b)| (a - b).norm())
+        .fold(0.0f64, f64::max)
+}
+
 #[test]
 fn rabi_resonant_matches_sin_squared() {
     let device = Device::new([transmon(5e9, 2)]);
@@ -83,18 +106,21 @@ fn rabi_resonant_matches_sin_squared() {
 
 #[test]
 fn drag_suppresses_leakage() {
-    // References from an independent numpy integrator of the same model (eigh per
-    // segment, same midpoint grid, rad/ns units).
-    const PLAIN: f64 = 1.342_397_295_046_906_7e-5;
-    const DRAG: f64 = 1.821_341_311_093_034_2e-10;
+    // Converged references from an independent numpy integrator of the same model:
+    // classical RK4 in the drive frame at 1024 and 2048 steps per ns, Richardson
+    // extrapolated. The bounds cover the error at 16 substeps, measured at 1.1e-7
+    // relative on the plain pulse and 6.2e-5 on DRAG, whose leaked amplitude cancels to
+    // first order and leaves the step error a larger share.
+    const PLAIN: f64 = 1.345_473_394_671_226_8e-5;
+    const DRAG: f64 = 8.324_755_572_059_022e-11;
     let device = Device::new([transmon(5e9, 3)]);
     let plain = pi_pulse(&device, 0.0).leakage()[0][1];
     let drag = pi_pulse(&device, drag_beta()).leakage()[0][1];
     assert!(
-        (plain - PLAIN).abs() < 1e-8 * PLAIN,
+        (plain - PLAIN).abs() < 1e-6 * PLAIN,
         "plain leakage {plain:e}"
     );
-    assert!((drag - DRAG).abs() < 1e-8 * DRAG, "drag leakage {drag:e}");
+    assert!((drag - DRAG).abs() < 2e-4 * DRAG, "drag leakage {drag:e}");
     assert!(plain / drag > 1e3);
 }
 
@@ -259,42 +285,79 @@ fn mixed_levels_factor_into_single_sites() {
 #[test]
 fn carrier_off_the_integration_frame_converges() {
     // A zero-amplitude play on site 1 comes first, so the integration frame sits on its
-    // carrier and site 0's drive rotates at 300 MHz in it. Holding that drive at each
-    // segment midpoint costs accuracy that falls as the square of the segment length.
-    let drag = || Envelope::Drag {
-        amp: pi_pulse_amp(),
-        sigma: 5.0 * NS,
-        beta: drag_beta(),
-    };
+    // carrier and site 0's drive rotates at 300 MHz in it. The reference is the pulse
+    // alone, converged in site 0's own frame by an independent numpy integrator (RK4 at
+    // 1024 and 2048 steps per ns, Richardson extrapolated). The step is fourth order, so
+    // halving the segment should cut the error 16 times; measured 1.8e-6 at 8 substeps
+    // and 1.1e-7 at 16.
+    const ALONE: [[f64; 2]; 4] = [
+        [-0.0028462976260905594, -0.06762587824090933],
+        [-0.09016760004383467, -0.9936238941794349],
+        [-0.09016760004383499, -0.9936238941794348],
+        [0.009373535346375268, 0.06703355617256807],
+    ];
+    let one = from_pairs(&ALONE);
+    let mut expected = vec![Complex64::new(0.0, 0.0); 16];
+    for row in 0..4 {
+        for column in (row % 2..4).step_by(2) {
+            expected[row * 4 + column] = one[(row / 2) * 2 + column / 2];
+        }
+    }
     let error = |substeps: usize| {
-        let mut alone = Schedule::new(NS);
-        alone.play(0, NS, 20.0 * NS, drag());
-        let one = compile(&Device::new([transmon(5e9, 3)]), &alone, substeps)
-            .unwrap()
-            .unitary();
-
         let mut both = Schedule::new(NS);
         both.play(1, 0.0, NS, Envelope::Constant { amp: 0.0 })
-            .play(0, NS, 20.0 * NS, drag());
+            .play(0, NS, 20.0 * NS, drag_pi());
         let pair = Device::new([transmon(5e9, 3), transmon(5.3e9, 2)]);
-        let two = compile(&pair, &both, substeps).unwrap().unitary();
-
-        let mut worst = 0.0f64;
-        for row in 0..4 {
-            for column in 0..4 {
-                let expected = if row % 2 == column % 2 {
-                    one[(row / 2) * 2 + column / 2]
-                } else {
-                    Complex64::new(0.0, 0.0)
-                };
-                worst = worst.max((two[row * 4 + column] - expected).norm());
-            }
-        }
-        worst
+        max_entry_error(
+            &compile(&pair, &both, substeps).unwrap().unitary(),
+            &expected,
+        )
     };
-    let (coarse, fine) = (error(16), error(64));
-    assert!(fine < coarse / 10.0, "coarse {coarse:e}, fine {fine:e}");
-    assert!(fine < 1e-4, "fine {fine:e}");
+    let (coarse, fine) = (error(8), error(16));
+    assert!(coarse / fine > 12.0, "coarse {coarse:e}, fine {fine:e}");
+    assert!(fine < 2e-7, "fine {fine:e}");
+}
+
+#[test]
+fn coupled_pair_on_two_carriers_converges() {
+    // DRAG pi pulses on both sites of the cross resonance pair, each on its own carrier.
+    // Site 1 plays first, so site 0's drive rotates at 100 MHz in the integration frame.
+    // The reference integrates each line in its own frame, where the coupling rotates
+    // instead (numpy RK4 at 1024 and 2048 steps per ns, Richardson extrapolated).
+    // Measured 3.0e-8 at 8 substeps and 1.9e-9 at 16.
+    const REFERENCE: [[f64; 2]; 16] = [
+        [-0.0025525005963642636, 0.015714560274481666],
+        [-0.06845914541323316, 0.006271981363857183],
+        [-0.07378442948473556, 0.013405637933585277],
+        [-0.9734498858972074, 0.20443094550254715],
+        [-0.055686701084259084, 0.005164863691115011],
+        [-0.03613312779051947, 0.007347812171527822],
+        [-0.9808261403296492, 0.16566809668637578],
+        [0.07639925376822221, -0.014492772260249],
+        [-0.06412648338837455, 0.0026712809904773345],
+        [-0.9813766387556742, 0.16253517494043024],
+        [0.045101842080209176, -0.006495356262647314],
+        [0.06310044979727092, -0.017459542410535833],
+        [-0.9754916705713034, 0.20227583116528688],
+        [0.06314481258496099, -0.02023256896039015],
+        [0.05149834866906299, -0.01348574417363034],
+        [0.0006108568182671796, 0.016417862579018963],
+    ];
+    let reference = from_pairs(&REFERENCE);
+    let device = Device::new([transmon(CR_CONTROL, 3), transmon(CR_TARGET, 3)]).couple(0, 1, CR_G);
+    let error = |substeps: usize| {
+        let mut schedule = Schedule::new(NS);
+        schedule
+            .play(1, 0.0, 20.0 * NS, drag_pi())
+            .play(0, NS, 20.0 * NS, drag_pi());
+        max_entry_error(
+            &compile(&device, &schedule, substeps).unwrap().unitary(),
+            &reference,
+        )
+    };
+    let (coarse, fine) = (error(8), error(16));
+    assert!(coarse / fine > 12.0, "coarse {coarse:e}, fine {fine:e}");
+    assert!(fine < 4e-9, "fine {fine:e}");
 }
 
 const CR_CONTROL: f64 = 5.0e9;
@@ -325,50 +388,59 @@ fn cross_resonance() -> CompiledGate {
 
 #[test]
 fn cross_resonance_matches_reference() {
-    // Nearest unitary from an independent numpy integrator of the same model: eigh per
-    // segment on the same midpoint grid, both sites in the drive frame with the control
-    // as the high Kronecker factor, then rotated into each site's frame.
+    // Converged nearest unitary from an independent numpy integrator of the same model:
+    // classical RK4 in the drive frame at 256 and 512 steps per ns, Richardson
+    // extrapolated, which agrees with 512 and 1024 to 2e-14. The bounds cover the error
+    // at 4 substeps, measured at 3.6e-9 on the unitary, 1.5e-6 relative on the leakage
+    // and 2e-10 on the fidelity.
     const REFERENCE: [[f64; 2]; 16] = [
-        [-0.09241029409049249, 0.8727473152577921],
-        [-0.4704840269689533, -0.09075664762698551],
-        [0.011027683867266895, 0.0029070354995390547],
-        [-0.006143758651703485, -0.0035589461601993368],
-        [-0.470484026968949, -0.09075664762700988],
-        [-0.23941468336236496, 0.8437113534206634],
-        [-0.013077919409268342, -0.022657002956778412],
-        [0.00803912051878062, 0.02215340967855366],
-        [0.011071410120059542, -0.00273578961643592],
-        [-0.022339299865101175, -0.013613502142941016],
-        [-0.3132800605948771, 0.4090370642061431],
-        [0.7122038408261746, 0.4759154761360512],
-        [-0.007097905136914997, -0.0001777942882452745],
-        [0.017675902347288577, 0.015587286335679098],
-        [0.7122038408262112, 0.4759154761359961],
-        [-0.2574637116822463, 0.4465162628238746],
+        [-0.09241354409501537, 0.8727471050250205],
+        [-0.4704834829878449, -0.09075847941779797],
+        [0.011019034492715437, 0.0029045027726422655],
+        [-0.006153633569781442, -0.0035631059515619746],
+        [-0.4704834829878451, -0.090758479417797],
+        [-0.23941836626047852, 0.8437103529528273],
+        [-0.01308763543761673, -0.022661058320949005],
+        [0.0080296526735693, 0.022149306516092253],
+        [0.011062605325827772, -0.0027338655623372395],
+        [-0.02234977072729477, -0.013612402947709618],
+        [-0.31327665893330126, 0.4090395454035984],
+        [0.7122076066366814, 0.47590970287374296],
+        [-0.007108565503035023, -0.00017671056069147234],
+        [0.01766562637054872, 0.015588224598653555],
+        [0.7122076066366833, 0.47590970287374074],
+        [-0.25746033891506004, 0.44651855909232147],
     ];
-    const LEAK_FROM_ONE: f64 = 2.828_813_057_949_483e-4;
-    const FIDELITY: f64 = 0.999_828_785_088_539_3;
+    const LEAK_FROM_ONE: f64 = 2.824_659_026_518_732e-4;
+    // Total leakage from |10>, |01> and |11>, levels given as (control, target).
+    const LEAK_FROM: [([usize; 2], f64); 3] = [
+        ([1, 0], 3.649_351_957_900_827e-4),
+        ([0, 1], 1.006_936_401_850_813_1e-6),
+        ([1, 1], 3.183_691_757_525_039_5e-4),
+    ];
+    const FIDELITY: f64 = 0.999_828_892_521_845_1;
     let compiled = cross_resonance();
-    let reference: Vec<Complex64> = REFERENCE
-        .iter()
-        .map(|&[re, im]| Complex64::new(re, im))
-        .collect();
-    let unitary = compiled.unitary();
-    let error = (0..16)
-        .map(|k| (unitary[k] - reference[k]).norm())
-        .fold(0.0f64, f64::max);
-    assert!(error < 1e-10, "max entry error {error:e}");
+    let reference = from_pairs(&REFERENCE);
+    let error = max_entry_error(&compiled.unitary(), &reference);
+    assert!(error < 1e-8, "max entry error {error:e}");
 
     let leakage = compiled.leakage();
     assert!(
-        (leakage[0][1] - LEAK_FROM_ONE).abs() < 1e-8 * LEAK_FROM_ONE,
+        (leakage[0][1] - LEAK_FROM_ONE).abs() < 1e-5 * LEAK_FROM_ONE,
         "control leakage from |1> {:e}",
         leakage[0][1]
     );
     assert!(leakage[0][0] < 1e-7 && leakage[1].iter().all(|&p| p < 1e-7));
+    for (levels, expected) in LEAK_FROM {
+        let leaked = compiled.leakage_from(&levels);
+        assert!(
+            (leaked - expected).abs() < 1e-5 * expected,
+            "leakage from {levels:?} {leaked:e}"
+        );
+    }
 
     let fidelity = compiled.average_fidelity(&Gate::unitary(reference, 2).unwrap());
-    assert!((fidelity - FIDELITY).abs() < 1e-10, "fidelity {fidelity}");
+    assert!((fidelity - FIDELITY).abs() < 1e-9, "fidelity {fidelity}");
 }
 
 #[test]

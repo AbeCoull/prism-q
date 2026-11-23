@@ -69,10 +69,13 @@ pub enum PulseError {
 /// [`Schedule::shift_phase`] shows up in the result as a Z rotation, the virtual Z
 /// convention.
 ///
-/// Integration runs in the frame of the earliest play's carrier. A drive on any other
-/// carrier is held at each segment's midpoint, which costs about `(2 pi d s)^2 / 24` of
-/// its amplitude for a carrier `d` Hz away and segments of `s` seconds: 6e-4 at 300 MHz
-/// and 16 substeps per ns. Raise `substeps` for schedules that mix carriers.
+/// Integration runs in the frame of the earliest play's carrier, with a fourth-order
+/// commutator-free Magnus step: two exponentials per segment, the drive sampled at the
+/// segment's two Gauss-Legendre nodes. The error falls as the fourth power of the segment
+/// length, and a drive on another carrier rotates within each segment: a DRAG pi pulse
+/// 300 MHz off the integration frame lands within 1.1e-7 of its converged unitary at 16
+/// substeps per ns, and within 1.8e-6 at 8. Raise `substeps` for schedules that mix
+/// carriers far apart.
 pub fn compile(
     device: &Device,
     schedule: &Schedule,

@@ -1,4 +1,5 @@
-//! Piecewise-constant propagation of a schedule through the rotating-frame Hamiltonian.
+//! Propagation of a schedule through the rotating-frame Hamiltonian by a fourth-order
+//! commutator-free Magnus method.
 
 use std::f64::consts::{PI, TAU};
 
@@ -11,11 +12,22 @@ use crate::gates::spectral::{hermitian_eigen, spectral_map};
 const ZERO: Complex64 = Complex64::new(0.0, 0.0);
 const ONE: Complex64 = Complex64::new(1.0, 0.0);
 
+const SQRT3_OVER_6: f64 = 0.288_675_134_594_812_9;
+
+/// Gauss-Legendre nodes of a segment, as fractions of its length.
+const NODES: [f64; 2] = [0.5 - SQRT3_OVER_6, 0.5 + SQRT3_OVER_6];
+
+/// Weights of the drive at the two nodes in a segment's first exponential; the second
+/// exponential swaps them. The two-exponential fourth-order method of Blanes and Moan,
+/// Appl. Numer. Math. 56 (2006) 1519.
+const WEIGHTS: [f64; 2] = [0.25 + SQRT3_OVER_6, 0.25 - SQRT3_OVER_6];
+
 /// A device and schedule checked against each other, ready to step.
 ///
-/// Matrices here are column major, the layout `hermitian_eigen` takes, and every
-/// Hamiltonian is stored already multiplied by the segment length, so its entries are
-/// dimensionless phases.
+/// Matrices here are column major, the layout `hermitian_eigen` takes, and every exponent
+/// is stored already multiplied by the segment length, so its entries are dimensionless
+/// phases. `static_phase` holds half the static Hamiltonian, the share each of a
+/// segment's two exponentials carries.
 pub(super) struct Plan<'a> {
     levels: Vec<usize>,
     strides: Vec<usize>,
@@ -91,7 +103,7 @@ impl<'a> Plan<'a> {
                 energy += (transmon.frequency - frame_hz) * n
                     + 0.5 * transmon.anharmonicity * n * (n - 1.0);
             }
-            static_phase[index * dim + index] = Complex64::new(TAU * energy * segment, 0.0);
+            static_phase[index * dim + index] = Complex64::new(PI * energy * segment, 0.0);
         }
         for &(a, b, g) in device.couplings() {
             for index in 0..dim {
@@ -101,7 +113,7 @@ impl<'a> Plan<'a> {
                     continue;
                 }
                 let target = index + strides[a] - strides[b];
-                let entry = TAU * g * (((na + 1) * nb) as f64).sqrt() * segment;
+                let entry = PI * g * (((na + 1) * nb) as f64).sqrt() * segment;
                 static_phase[index * dim + target] += entry;
                 static_phase[target * dim + index] += entry;
             }
@@ -169,14 +181,15 @@ impl<'a> Plan<'a> {
         rows
     }
 
-    /// Hand every segment propagator to `step` in time order, flagging the last segment
-    /// of each sample, and return each line's frame phase lag at the end, relative to
-    /// the integration frame.
+    /// Hand every exponential to `step` in time order, two per segment, flagging the last
+    /// of each sample, and return each line's frame phase lag at the end, relative to the
+    /// integration frame.
     ///
     /// The integration frame rotates every site at one reference frequency, so the
-    /// static part of the Hamiltonian is time independent and exact; only the drive
-    /// terms are sampled. A line's frame lags it by its accumulated carrier offset minus
-    /// its phase shifts, which is the angle the output is rotated by per excitation.
+    /// static part of the Hamiltonian is time independent; only the drive terms are
+    /// sampled, at the two nodes of each segment. A line's frame lags it by its
+    /// accumulated carrier offset minus its phase shifts, which is the angle the output is
+    /// rotated by per excitation.
     fn walk(&self, mut step: impl FnMut(&[Complex64], bool)) -> Vec<f64> {
         let dim = self.dim;
         let sites = self.levels.len();
@@ -220,8 +233,7 @@ impl<'a> Plan<'a> {
                 }
             }
             for sub in 0..self.substeps {
-                let offset = (sub as f64 + 0.5) * self.segment;
-                hamiltonian.copy_from_slice(&self.static_phase);
+                let mut drives: [Option<[Complex64; 2]>; 3] = [None; 3];
                 for (site, line) in self.timeline.lines.iter().enumerate() {
                     let Some(play) = line
                         .plays
@@ -230,18 +242,31 @@ impl<'a> Plan<'a> {
                     else {
                         continue;
                     };
-                    let t = (sample - play.start) as f64 * self.period + offset;
-                    let omega = play.envelope.value(t, play.duration, self.period);
-                    let angle =
-                        phase[site] - lag[site] - TAU * (carrier[site] - self.frame_hz) * offset;
-                    let coefficient = omega * Complex64::from_polar(PI * self.segment, angle);
-                    self.add_drive(&mut hamiltonian, site, coefficient);
+                    drives[site] = Some(NODES.map(|node| {
+                        let offset = (sub as f64 + node) * self.segment;
+                        let t = (sample - play.start) as f64 * self.period + offset;
+                        let omega = play.envelope.value(t, play.duration, self.period);
+                        let angle = phase[site]
+                            - lag[site]
+                            - TAU * (carrier[site] - self.frame_hz) * offset;
+                        omega * Complex64::from_polar(PI * self.segment, angle)
+                    }));
                 }
-                #[cfg(test)]
-                if !self.reuse {
-                    cache.filled = false;
+                for (half, weights) in [WEIGHTS, [WEIGHTS[1], WEIGHTS[0]]].iter().enumerate() {
+                    hamiltonian.copy_from_slice(&self.static_phase);
+                    for (site, drive) in drives.iter().enumerate() {
+                        if let Some([early, late]) = *drive {
+                            let coefficient = early * weights[0] + late * weights[1];
+                            self.add_drive(&mut hamiltonian, site, coefficient);
+                        }
+                    }
+                    #[cfg(test)]
+                    if !self.reuse {
+                        cache.filled = false;
+                    }
+                    let sample_end = half == 1 && sub + 1 == self.substeps;
+                    step(cache.step(&hamiltonian, dim), sample_end);
                 }
-                step(cache.step(&hamiltonian, dim), sub + 1 == self.substeps);
             }
             for (lag, carrier) in lag.iter_mut().zip(&carrier) {
                 *lag += TAU * (carrier - self.frame_hz) * self.period;

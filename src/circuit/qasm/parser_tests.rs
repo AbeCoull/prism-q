@@ -208,13 +208,15 @@ fn a_statement_may_span_lines_anywhere() {
 
 #[test]
 fn loops_and_switches_keep_their_parts() {
-    match one("for int k in [0:2:6] { h q[k]; }") {
+    match one("for uint[4] k in [0:2:6] { h q[k]; }") {
         StmtKind::For {
+            ty,
+            width: Some(_),
             variable,
             range: ForRange::Range { step: Some(_), .. },
             body,
         } => {
-            assert_eq!(variable, "k");
+            assert_eq!((ty, variable), ("uint", "k"));
             assert_eq!(body.len(), 1);
         }
         other => panic!("{other:?}"),
@@ -222,6 +224,8 @@ fn loops_and_switches_keep_their_parts() {
     assert!(matches!(
         one("for k in {1, 3} { h q[k]; }"),
         StmtKind::For {
+            ty: "int",
+            width: None,
             range: ForRange::Set(_),
             ..
         }

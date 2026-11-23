@@ -45,7 +45,15 @@ pub(crate) fn resolve_gate(
         }
         "sx" | "v" => Ok(Gate::SX),
         "sxdg" | "vi" => Ok(Gate::SXdg),
+        "u0" => {
+            expect_param_count(name, params, 1, line_num)?;
+            Ok(Gate::Id)
+        }
         "cp" | "cphase" | "cphaseshift" => {
+            expect_param_count(name, params, 1, line_num)?;
+            Ok(Gate::cphase(params[0]))
+        }
+        "cu1" => {
             expect_param_count(name, params, 1, line_num)?;
             Ok(Gate::cphase(params[0]))
         }
@@ -59,6 +67,10 @@ pub(crate) fn resolve_gate(
             Ok(Gate::cu(cu_target_matrix(
                 params[0], params[1], params[2], params[3],
             )))
+        }
+        "cu3" => {
+            expect_param_count(name, params, 3, line_num)?;
+            Ok(Gate::cu(u_matrix(params[0], params[1], params[2])))
         }
         "crx" => {
             expect_param_count(name, params, 1, line_num)?;
@@ -78,6 +90,7 @@ pub(crate) fn resolve_gate(
         "ccx" | "toffoli" | "ccnot" => Ok(Gate::mcu(Gate::X.matrix_2x2(), 2)),
         "ccz" => Ok(Gate::mcu(Gate::Z.matrix_2x2(), 2)),
         "c3x" => Ok(Gate::mcu(Gate::X.matrix_2x2(), 3)),
+        "c3sqrtx" => Ok(Gate::mcu(Gate::SX.matrix_2x2(), 3)),
         "c4x" => Ok(Gate::mcu(Gate::X.matrix_2x2(), 4)),
         "xx_plus_yy" => {
             expect_param_count(name, params, 2, line_num)?;
@@ -304,7 +317,7 @@ pub(crate) fn iswap_expansion(q0: usize, q1: usize) -> [Instruction; 6] {
     ]
 }
 
-fn check_arity(name: &str, qubits: &[usize], expected: usize) -> Result<()> {
+pub(crate) fn check_arity(name: &str, qubits: &[usize], expected: usize) -> Result<()> {
     if qubits.len() != expected {
         return Err(PrismError::GateArity {
             gate: name.to_string(),

@@ -214,17 +214,31 @@ fn input_angles_the_binding_surface_cannot_carry_reject_by_name() {
     for (label, body, needle) in [
         ("function of an input", "rx(sin(t)) q[0];", "not affine"),
         ("product of inputs", "rx(t * t) q[0];", "not affine"),
-        ("two inputs in one angle", "rx(t + u) q[0];", "two `input`s"),
         (
-            "two inputs on one gate",
-            "r(t, u) q[0];",
+            "two inputs on a gate built as one matrix",
+            "xx_plus_yy(t, u) q[0], q[1];",
             "two `input` parameters",
         ),
-        ("modified gate", "ctrl @ rx(t) q[0], q[1];", "modifier"),
-        ("global phase", "gphase(t);", "gphase"),
+        ("inverted gate", "inv @ rx(t) q[0];", "modifier"),
+        ("powered gate", "pow(2) @ U(t, u, 0) q[0];", "modifier"),
+        (
+            "two controls",
+            "ctrl(2) @ rx(t) q[0], q[1], q[2];",
+            "modifier",
+        ),
+        (
+            "control on a gate with no controlled form",
+            "ctrl @ rzz(t) q[0], q[1], q[2];",
+            "modifier",
+        ),
+        (
+            "global phase under two controls",
+            "ctrl(2) @ gphase(t) q[0], q[1];",
+            "more than one control",
+        ),
         (
             "gate carrying no angle",
-            "cu(t, 0, 0, 0) q[0], q[1];",
+            "ms(t, 0, 0) q[0], q[1];",
             "`input` on",
         ),
         (
@@ -264,6 +278,197 @@ fn input_angles_the_binding_surface_cannot_carry_reject_by_name() {
             .err()
             .unwrap_or_else(|| panic!("{label}: expected a rejection"));
         unsupported(err, needle, label);
+    }
+}
+
+/// Parse `body` with each `{name}` an input, and again with each a literal.
+fn parametric_and_literal(body: &str, values: &[f64; 3]) -> ((Circuit, Parameters), Circuit) {
+    const NAMES: [&str; 3] = ["t", "u", "v"];
+    let mut parametric = body.to_string();
+    let mut literal = body.to_string();
+    for (name, value) in NAMES.iter().zip(values) {
+        parametric = parametric.replace(&format!("{{{name}}}"), name);
+        literal = literal.replace(&format!("{{{name}}}"), &format!("({value:?})"));
+    }
+    let inputs = "input float[64] t;\ninput float[64] u;\ninput angle v;\n";
+    let wrap = |inputs: &str, body: &str| format!("OPENQASM 3.0;\n{inputs}qubit[3] q;\n{body}\n");
+    (
+        openqasm::parse_parametric(&wrap(inputs, &parametric)).expect("parametric"),
+        openqasm::parse(&wrap("", &literal)).expect("literal"),
+    )
+}
+
+#[test]
+fn inputs_bind_through_gates_that_lower_to_rotations() {
+    for (label, body) in [
+        ("U", "U({t}, {u}, {v}) q[0];"),
+        (
+            "u3, u2 and u1",
+            "u3({t}, {u}, {v}) q[1]; u2({u}, {v}) q[0]; u1({t}) q[2];",
+        ),
+        ("U with a constant argument", "h q; U({t}, 0, 0.5) q[1];"),
+        ("broadcast U", "U({t}, {u}, {v}) q;"),
+        (
+            "controlled phase",
+            "h q; cp({t}) q[0], q[1]; cphase(-{u} / 2 + 0.3) q[2], q[0];",
+        ),
+        (
+            "controlled rotations",
+            "h q; crz({t}) q[0], q[1]; crx({u}) q[1], q[2]; cry({v}) q[2], q[0];",
+        ),
+        ("cu", "h q; cu({t}, {u}, {v}, 0.7) q[0], q[1];"),
+        (
+            "cu with a bound phase",
+            "h q; cu(0.4, {u}, 0, {t}) q[2], q[0];",
+        ),
+        ("r", "r({t}, {u}) q[0]; prx(0.3, {v}) q[1];"),
+        (
+            "one control on a rotation",
+            "h q; ctrl @ rx({t}) q[0], q[1]; negctrl @ rz({u}) q[1], q[2]; \
+             ctrl @ ry({v}) q[2], q[1]; ctrl @ p({v}) q[0], q[2]; ctrl @ U({t}, {u}, {v}) q[2], q[0];",
+        ),
+        (
+            "global phase",
+            "h q; gphase({t}); ctrl @ gphase({u}) q[1]; inv @ gphase({v}); \
+             pow(2) @ negctrl @ gphase({t}) q[0];",
+        ),
+        (
+            "gate body",
+            "gate g(a, b) x, y { U(a, b, a / 2) x; cp(b) x, y; gphase(a); }\n\
+             h q; g({t}, {u}) q[0], q[1]; g(0.2, {v}) q[1], q[2];",
+        ),
+        (
+            "def body",
+            "def d(qubit a, qubit b, float w) { crz(w) a, b; U(w, 0.1, w) b; }\n\
+             h q; d(q[0], q[1], 3 * {t});",
+        ),
+    ] {
+        for values in [[0.0, 0.0, 0.0], [0.41, 1.27, -0.6], [-2.3, 5.9, 3.3]] {
+            let ((template, params), literal) = parametric_and_literal(body, &values);
+            assert_eq!(params.num_slots(), 3, "{label}");
+            let bound = params.bind(&template, &values).expect("bind");
+            assert_same_unitary(&bound, &literal, label);
+        }
+    }
+}
+
+#[test]
+fn an_angle_over_several_inputs_binds_as_the_sum_written() {
+    for (label, body) in [
+        ("rotation", "rx({t} + {u}) q[0];"),
+        (
+            "pair rotation",
+            "h q; rzz({t} - 2 * {u} + {v} / 3 + 0.3) q[0], q[1];",
+        ),
+        (
+            "Pauli rotation",
+            "h q; rxyz(({t} + {v}) / 2) q[0], q[1], q[2];",
+        ),
+        ("U", "U({t} + {u}, {u} - {v}, 2 * {v} + {t} - 0.1) q[0];"),
+        (
+            "controlled phase",
+            "h q; cp({t} + {u}) q[0], q[1]; crz({u} - {v}) q[1], q[2];",
+        ),
+        ("cu", "h q; cu({t}, {u}, {v}, {t} + {u}) q[0], q[1];"),
+        ("global phase", "h q; gphase({t} - {u});"),
+        (
+            "gate body",
+            "gate g(a, b) x { rz(a + b) x; ry(a - b) x; }\nh q; g({t} + {v}, {u}) q[0];",
+        ),
+        ("terms that cancel", "rx({t} + {u} - {t}) q[0];"),
+    ] {
+        for values in [[0.0, 0.0, 0.0], [0.41, 1.27, -0.6], [-2.3, 5.9, 3.3]] {
+            let ((template, params), literal) = parametric_and_literal(body, &values);
+            let bound = params.bind(&template, &values).expect("bind");
+            assert_same_unitary(&bound, &literal, label);
+        }
+    }
+}
+
+#[test]
+fn an_angle_over_several_inputs_differentiates_in_each() {
+    let source = "OPENQASM 3.0;
+input float t;
+input float u;
+qubit[2] q;
+h q;
+U(t + 2 * u, u, t) q[0];
+cp(t - u) q[0], q[1];
+rx(u / 2 + t) q[1];
+";
+    let (template, params) = openqasm::parse_parametric(source).expect("parse");
+    let obs = PauliObservable::from_terms([
+        (1.0, vec![PauliTerm::z(0), PauliTerm::x(1)]),
+        (-0.4, vec![PauliTerm::y(0)]),
+    ])
+    .unwrap();
+    let energy = |values: [f64; 2]| {
+        let circuit = params.bind(&template, &values).unwrap();
+        let observables: Vec<Vec<PauliTerm>> = obs.terms().iter().map(|(_, p)| p.clone()).collect();
+        let per_term = run_expectation_values(&circuit, &observables, SEED).unwrap();
+        obs.terms()
+            .iter()
+            .zip(per_term)
+            .map(|((c, _), v)| c * v)
+            .sum::<f64>()
+    };
+    let at = [0.37, -1.1];
+    let eps = 1e-5;
+    let bound = params.bind(&template, &at).unwrap();
+    let adjoint = run_expectation_gradient(&bound, &obs, &params, SEED).unwrap();
+    let shift = run_expectation_gradient_shift(&bound, &obs, &params, SEED).unwrap();
+    for slot in 0..2 {
+        let (mut up, mut down) = (at, at);
+        up[slot] += eps;
+        down[slot] -= eps;
+        let expected = (energy(up) - energy(down)) / (2.0 * eps);
+        for (label, gradient) in [("adjoint", &adjoint.gradient), ("shift", &shift.gradient)] {
+            assert!(
+                (gradient[slot] - expected).abs() < 1e-6,
+                "{label} slot {slot}: {} vs finite difference {expected}",
+                gradient[slot]
+            );
+        }
+    }
+}
+
+// Sixteen qubits so fusion runs every pass. The template holds each angle at an
+// input of zero, where the lowered gates are identities and capture declines,
+// so the plan is taken from a template bound at a generic point.
+#[test]
+fn lowered_inputs_rebind_through_the_fusion_plan() {
+    let body = |a: &str, b: &str, c: &str| {
+        format!(
+            "qubit[16] q;
+for int i in [0:15] {{ U({a} + i * 0.1, {b}, {c} - {a}) q[i]; }}
+for int i in [0:14] {{ cp({b} * (i + 1) / 4) q[i], q[i + 1]; }}
+for int i in [0:14] {{ crz({c} + {b}) q[i + 1], q[i]; }}
+for int i in [0:15] {{ U({c}, {a}, {b}) q[i]; }}
+"
+        )
+    };
+    let source = format!(
+        "OPENQASM 3.0;\ninput float[64] a;\ninput float[64] b;\ninput float[64] c;\n{}",
+        body("a", "b", "c")
+    );
+    let (template, params) = openqasm::parse_parametric(&source).expect("parse");
+    let seeded = params.bind(&template, &[0.9, -0.4, 1.6]).unwrap();
+    let mut prepared = PreparedCircuit::new(seeded, params.clone()).unwrap();
+    assert!(prepared.reuses_fusion_plan());
+    let mut refusing = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+    for values in [
+        [0.3, 1.1, -0.7],
+        [-1.7, 0.25, 2.2],
+        [2.9, -4.0, 0.0],
+        [0.3, 1.1, -0.7],
+    ] {
+        let [a, b, c] = values.map(|value| format!("({value:?})"));
+        let literal = openqasm::parse(&format!("OPENQASM 3.0;\n{}", body(&a, &b, &c))).unwrap();
+        let expected = common::run_and_state(&literal);
+        let rebound = common::run_and_state(prepared.bind_fused(&values).unwrap());
+        common::assert_amps_close(&rebound, &expected, SV_EPS, "bind_fused");
+        let fresh = common::run_and_state(refusing.bind_fused(&values).unwrap());
+        common::assert_amps_close(&fresh, &expected, SV_EPS, "fusion per binding");
     }
 }
 

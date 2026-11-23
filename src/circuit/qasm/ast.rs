@@ -93,7 +93,10 @@ pub(crate) enum StmtKind<'a> {
         targets: Vec<Operand<'a>>,
     },
     If(Box<Conditional<'a>>),
+    /// `for ty[width] variable in range`; a loop with no type reads as `int`.
     For {
+        ty: &'a str,
+        width: Option<Expr<'a>>,
         variable: &'a str,
         range: ForRange<'a>,
         body: Block<'a>,

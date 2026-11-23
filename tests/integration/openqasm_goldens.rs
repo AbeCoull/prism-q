@@ -748,8 +748,8 @@ fn an_input_broadcast_over_a_register_shares_one_slot() {
 
 // Every way an `input` can be written that the binding surface cannot carry.
 // A link writes one affine angle onto one gate, so an input reaching anything
-// else has nowhere to land, and a silent wrong angle is the failure worth
-// pinning against.
+// with no lowering to such gates has nowhere to land, and a silent wrong angle
+// is the failure worth pinning against.
 #[test]
 fn input_uses_the_binding_surface_cannot_carry_reject_by_name() {
     const PROLOGUE: &str = "OPENQASM 3.0;
@@ -761,12 +761,12 @@ bit[3] c;
     let rejected = [
         ("expression with a function", "rx(sin(t)) q[0];"),
         (
-            "two inputs on one gate",
+            "two inputs on a gate built as one matrix",
             "input float[64] u;
-r(t, u) q[0];",
+xx_plus_yy(t, u) q[0], q[1];",
         ),
-        ("gate carrying no angle", "cu(t, 0, 0, 0) q[0], q[1];"),
-        ("modified gate", "ctrl @ rx(t) q[0], q[1];"),
+        ("gate carrying no angle", "ms(t, 0, 0) q[0], q[1];"),
+        ("inverted gate", "inv @ rx(t) q[0];"),
         ("inside a guarded region", "if (c[0]) { rx(t) q[0]; }"),
         ("inside a guarded statement", "if (c[0]) rx(t) q[0];"),
         ("lowered gate", "xx_plus_yy(t, 0.2) q[0], q[1];"),

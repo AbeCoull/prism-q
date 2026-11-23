@@ -283,7 +283,9 @@ A `box[d]` whose delays run past `d` is a `Parse` error.
 
 - Standard names and aliases: id/i, x, y, z, h, s, sdg, t, tdg, sx, rx, ry, rz, p/phase,
   cx/CX/cnot, cy, cz, cp/cphase, crx, cry, crz, ch, swap, ccx/toffoli, cswap/fredkin, cu,
-  u1, u2, u3/u/U.
+  cu1, cu3, u0, u1, u2, u3/u/U, c3sqrtx. The legacy `qelib1.inc` names follow that file's
+  definitions: `cu1` is `cp`, `cu3(θ, φ, λ)` is `cu(θ, φ, λ, 0)`, `u0` is the identity
+  and `c3sqrtx` is `sx` under three controls.
 - Braket spellings: si, ti, v, vi, phaseshift, cphaseshift, cphaseshift00,
   cphaseshift01, cphaseshift10, cv, ccnot, prx, pswap, xy, xx, yy, zz. Most name a gate
   the list above carries; `cphaseshift00/01/10`, `pswap` and `xy` are their own matrices.
@@ -528,18 +530,38 @@ writes one angle to each.
 `parse` rejects a program that declares an input, since it has no value to take and a zero
 would be a quiet wrong answer. Use `parse_parametric`, or `PreparedCircuit` for a sweep.
 
-A gate angle may be affine in one input: `rx(-theta / 2)` and `rz(2 * theta + pi)` link
+A gate angle may be affine in its inputs: `rx(-theta / 2)` and `rz(2 * theta + pi)` link
 their gates with that scale and offset, so binding writes `scale * value + offset` and a
 gradient picks up the factor `scale`. The template holds each angle at an input of zero.
+
+A link reads one slot, so the parser emits one rotation per input an angle reads:
+`rx(a + 2 * b) q;` becomes `rx(a) q; rx(2 * b) q;`. A gate with no angle of its own is
+emitted as the rotations it equals, global phase included:
+
+| Call | Emitted |
+|---|---|
+| `U(theta, phi, lam)`, `u3`, `u2`, `u1` | `p(lam)`, `ry(theta)`, `p(phi)` |
+| `r(theta, phi)`, `prx` | `rz(-phi)`, `rx(theta)`, `rz(phi)` |
+| `cp(lam) a, b`, `cphase`, `cphaseshift` | `p(lam / 2) a`, `rz(lam / 2) b`, `rzz(-lam / 2) a, b` |
+| `crz(theta) c, t` | `rz(theta / 2) t`, `rzz(-theta / 2) c, t` |
+| `crx`, `cry` | `crz` between basis changes on the target |
+| `cu(theta, phi, lam, gamma)` | two `cx` around phase and `ry` gates |
+| `gphase(theta)` | `p(theta)`, `x`, `p(theta)`, `x` on one qubit |
+| `ctrl @` or `negctrl @` on `rx`, `ry`, `rz`, `p`, `U`, `gphase` | the controlled row above |
+
+The same call with no input in it parses to the single gate it always did. Fusion folds
+the emitted rotations back into one block from 10 qubits.
+
 An input reaches a gate through a `for` body, or as the argument of a `gate` or `def`
 whose body uses it in an angle; an `angle` parameter keeps it unwrapped, as a bound
 `input angle` is. A `float[32]` or fixed-width `angle` parameter would round it and
 declines.
 
-These return `UnsupportedConstruct` naming the reason: an angle over two inputs or not
-affine in one (`sin(theta)`, `theta * theta`), two inputs on one gate, an input on a gate
-that lowers to a sequence or has no rotation angle, a modified gate or `gphase`, a guarded
-body, and an input read as a classical value (an index, a loop bound, a declaration).
+These return `UnsupportedConstruct` naming the reason: an angle not affine in its inputs
+(`sin(theta)`, `theta * theta`), an input on a gate built as one matrix and not listed
+above (`xx_plus_yy`, `ms`, `pswap`), `inv @`, `pow @` or more than one control on a gate
+reading an input, a guarded body, and an input read as a classical value (an index, a
+loop bound, a declaration).
 
 `parse_parametric_with_inputs` takes values for some inputs by name. A supplied input
 folds as a declaration of its type initialized to the value would, so `input int[8] n;`
@@ -742,14 +764,14 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `box`, `box[d]` | Runs its body in place; `box[d]` resolves the stretches its alignment fixes | A length that is not a duration or is negative, or delays that run past it: `Parse` |
 | `duration`, `stretch`, `delay` | Parses; a delay is the identity | A length that is not a duration (`delay[10]`) or is negative, and a duration where a number belongs: `Parse`. A ratio or comparison over a stretch no `box[d]` has resolved, or mixing `dt` with SI units where the sample period decides the answer, and a runtime value in a duration under `parse_dynamic`: `UnsupportedConstruct` |
 | `durationof` | Folds to the block's length with every gate taking no time | A block holding anything but gate calls, `measure`, `reset`, `barrier`, `delay`, `nop` and `box`, or timelines mixing `dt` with SI units: `UnsupportedConstruct` |
-| `input`, `output` | Parses; an unsupplied `float` or `angle` input is a slot that gate angles affine in it link to | An unsupplied input of another type: `InvalidParameter`. `output` of a type other than `bit`, two inputs on one gate, or an unsupplied input anywhere but in an angle affine in it: `UnsupportedConstruct` |
+| `input`, `output` | Parses; an unsupplied `float` or `angle` input is a slot that gate angles affine in it link to | An unsupplied input of another type: `InvalidParameter`. `output` of a type other than `bit`, an input on a gate with no lowering to rotations, or an unsupplied input anywhere but in an angle affine in it: `UnsupportedConstruct` |
 | `measure`, `reset` | Parses | A register measure whose widths disagree: `Parse` |
 | `barrier;`, `barrier q;` and `barrier q[0], q[1];` | Parses | A bare `barrier;` spans every qubit declared so far, across registers |
 | `nop` | Parses; emits nothing | |
 | Casts, `int[8](x)`, `bool(c)` | Parses | A width on `bool`, an integer width outside 1 to 64 bits, a float width other than 16, 32, 64 or 128, or a float cast to `bit`: `Parse` |
 | Expression statements, `a == 2;` | Evaluated and discarded; scalar subroutine calls are inlined | See [Subroutines](#subroutines) for call limits |
 | `if`, `else`, `else if` | Parses | `else` at the head of a statement: `UnsupportedConstruct`. A condition over classical bits that no bit or register guard spells: `UnsupportedConstruct` under `parse`, evaluated at runtime under `parse_dynamic`. An `else` whose `if` body measures into a bit the condition reads: `Parse` |
-| `switch`, `case`, `default` | Parses | An arm that measures into the switched register: `Parse`. More case labels than the region depth bound when a `default` is present, or a target over classical bits that no register guard spells: `UnsupportedConstruct` |
+| `switch`, `case`, `default` | Parses | An arm that measures into the switched register, or more case labels than the region depth bound when a `default` is present: `Parse`. A target over classical bits that no register guard spells: `UnsupportedConstruct` |
 | `for` | Unrolls at parse time | A range in any form but `[start:stop]`, `[start:step:stop]` or `{a,b,c}`: `UnsupportedConstruct` naming what it found. The bounds may be classical variables and `def` or `extern` calls |
 | `while` | Parses under `parse_dynamic` | `UnsupportedConstruct` under `parse`: a loop that exits on a measurement has no finite instruction list |
 | `break`, `continue` | Parses inside `for` and `while` | Outside a loop, or at the top level of a `def` or `gate` body: `Parse`. In a `for` under a measurement-dependent branch: `UnsupportedConstruct` under `parse`, lowered into the graph under `parse_dynamic` |

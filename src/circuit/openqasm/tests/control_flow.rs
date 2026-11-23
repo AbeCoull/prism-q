@@ -271,6 +271,74 @@ fn for_loop_uint_keyword_accepted() {
 }
 
 #[test]
+fn for_loop_variable_holds_values_as_its_declaration_does() {
+    let unrolled: String = (0..=5)
+        .map(|v| format!("uint[2] j{v} = {v}; x q[j{v}];"))
+        .collect();
+    for (looped, declared) in [
+        ("for uint[2] i in [0:5] { x q[i]; }", unrolled.as_str()),
+        (
+            "for uint[2] i in [3:3] { i = i + 1; x q[i]; }",
+            "uint[2] j = 3; j = j + 1; x q[j];",
+        ),
+        (
+            "for uint[2] i in [3:3] { x q[i + 1]; }",
+            "uint[2] j = 3; x q[j + 1];",
+        ),
+        (
+            "for int[8] i in {200} { if (i < 0) x q[0]; }",
+            "int[8] j = 200; if (j < 0) x q[0];",
+        ),
+        (
+            "for uint[8] i in [-1:-1] { rz(i) q[0]; }",
+            "uint[8] j = -1; rz(j) q[0];",
+        ),
+    ] {
+        let header = "OPENQASM 3.0;\nqubit[6] q;\n";
+        let expected = parse(&format!("{header}{declared}")).unwrap();
+        let source = format!("{header}{looped}");
+        let circuit = parse(&source).unwrap();
+        let program = parse_dynamic(&source).unwrap();
+        for actual in [&circuit, program.static_circuit().expect("static loop")] {
+            assert_eq!(
+                format!("{:?}", actual.instructions),
+                format!("{:?}", expected.instructions),
+                "`{looped}` against `{declared}`"
+            );
+        }
+    }
+}
+
+#[test]
+fn for_loop_body_may_be_one_statement() {
+    for (unbraced, braced) in [
+        (
+            "for int i in [0:2] x q[i];",
+            "for int i in [0:2] { x q[i]; }",
+        ),
+        (
+            "for int i in [0:1] for int j in [0:1] cx q[i], q[j + 2];",
+            "for int i in [0:1] { for int j in [0:1] { cx q[i], q[j + 2]; } }",
+        ),
+    ] {
+        let header = "OPENQASM 3.0;\nqubit[4] q;\n";
+        let expected = parse(&format!("{header}{braced}")).unwrap();
+        let source = format!("{header}{unbraced} h q[0];");
+        let circuit = parse(&source).unwrap();
+        let program = parse_dynamic(&source).unwrap();
+        for actual in [&circuit, program.static_circuit().expect("static loop")] {
+            let (body, tail) = actual.instructions.split_at(expected.instructions.len());
+            assert_eq!(
+                format!("{body:?}"),
+                format!("{:?}", expected.instructions),
+                "`{unbraced}` against `{braced}`"
+            );
+            assert!(matches!(tail, [Instruction::Gate { gate: Gate::H, .. }]));
+        }
+    }
+}
+
+#[test]
 fn if_singleton_bit_selections_keep_guard_lowering() {
     for (condition, reference) in [
         ("c[0:0]", "c[0]"),

@@ -718,12 +718,13 @@ fn comparison<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<(CmpOp, Expr<'a>
 
 fn for_loop<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     stream.advance();
-    // `for int i in ...` and `for i in ...` both stand; the type is decoration
-    // the loop bounds already carry.
+    let (mut ty, mut width) = ("int", None);
     if stream.kind() == Kind::Ident && matches!(stream.peek().text, "int" | "uint") {
         let mark = stream.mark();
-        typename(stream)?;
-        if stream.kind() != Kind::Ident {
+        let typed = typename(stream)?;
+        if stream.kind() == Kind::Ident {
+            (ty, width) = typed;
+        } else {
             stream.rewind(mark);
         }
     }
@@ -732,8 +733,10 @@ fn for_loop<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         return Err(stream.expected("`in` after a loop variable"));
     }
     let range = for_range(stream)?;
-    let body = braced_block(stream)?;
+    let body = body(stream)?;
     Ok(StmtKind::For {
+        ty,
+        width,
         variable,
         range,
         body,

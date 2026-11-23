@@ -271,8 +271,14 @@ Frequencies and amplitudes are in Hz and times in seconds. The three outputs:
 - `unitary()`: the nearest unitary to the propagator restricted to `|0>` and `|1>` on
   every site, packed for `Gate::unitary` and `Circuit::add_unitary` with site 0 on the
   first target.
-- `leakage()`: per site, the probability of leaving `{|0>, |1>}` from `|0>` and from
-  `|1>`. These can parameterize the `Leakage` channel above.
+- `leakage()`: per site, the probability that the site leaves `{|0>, |1>}` from `|0>`
+  and from `|1>` while every other site starts in `|0>`. It misses leakage that needs an
+  excited neighbour, such as `|11>` to `|02>` on a coupled pair.
+- `leakage_from(levels)`: the total probability of ending outside the computational
+  subspace from one device basis state, `levels` giving each site's level. For `p` in
+  the `Leakage` channel above, take the mean of `leakage_from` over the computational
+  inputs. From an input with a site at `|2>` or above, one minus `leakage_from` is the
+  probability of returning, a value for `Seepage`.
 - `error_after(ideal)`: the coherent difference between the pulse and the gate it stands
   for, as a one-operator `Custom` or `Kraus2q` channel to attach after that gate with a
   `NoiseBuilder`.

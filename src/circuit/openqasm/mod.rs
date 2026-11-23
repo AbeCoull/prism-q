@@ -12,14 +12,14 @@
 //! | Qubit declaration | `qubit[4] q;` | OQ3 syntax (primary) |
 //! | Bit declaration | `bit[4] c;` `bit b = measure q[0];` `bit[2] f = "00";` | OQ3 syntax (primary). An initializer is a measurement, or a bit string (most significant bit first) or value of all zeros |
 //! | Legacy qreg/creg | `qreg q[4]; creg c[4];` | OQ2 compat |
-//! | Input parameter | `input float[64] theta;` `rx(-theta / 2) q[0];` | One named slot; [`parse_parametric`] returns them. An angle may be affine in one input, and an input may reach a gate or `def` body as an argument |
+//! | Input parameter | `input float[64] theta;` `rx(-theta / 2) q[0];` | One named slot; [`parse_parametric`] returns them. An angle may be affine in several inputs, on any gate with a lowering to rotations (`U`, `cp`, `crz`), and an input may reach a gate or `def` body as an argument |
 //! | Input value | `input int[8] n;` | [`parse_parametric_with_inputs`] folds a supplied value as a declaration of that type would; a supplied `float` or `angle` is a constant rather than a slot |
 //! | Output declaration | `output bit[4] c;` | Declares the register; every bit is reported anyway |
-//! | 1-qubit gates | `h q[0]; x q[1];` | id/i, x, y, z, h, s, sdg/si, t, tdg/ti, sx/v, sxdg/vi, p/phase/phaseshift, r/prx, gpi, gpi2, u/U forms |
+//! | 1-qubit gates | `h q[0]; x q[1];` | id/i, x, y, z, h, s, sdg/si, t, tdg/ti, sx/v, sxdg/vi, p/phase/phaseshift, r/prx, gpi, gpi2, u0, u/U forms |
 //! | Parametric gates | `rx(pi/4) q[0];` | rx, ry, rz, cu, ms, arithmetic expressions with `pi`, math functions |
-//! | 2-qubit gates | `cx q[0], q[1];` | cx/cnot, cy, cz, ch, cs, csdg, cp/cphase/cphaseshift, cphaseshift00/01/10, crx, cry, crz, csx/cv, swap, pswap, xy, xx_plus_yy, xx_minus_yy, ecr, iswap, dcx, syc, sqrt_iswap |
+//! | 2-qubit gates | `cx q[0], q[1];` | cx/cnot, cy, cz, ch, cs, csdg, cp/cphase/cphaseshift, cu1, cu3, cphaseshift00/01/10, crx, cry, crz, csx/cv, swap, pswap, xy, xx_plus_yy, xx_minus_yy, ecr, iswap, dcx, syc, sqrt_iswap |
 //! | Pauli rotation | `rzz(t) q[0], q[1];` `rxyz(t) q[0], q[1], q[2];` | `r` plus the Pauli letters, one per qubit argument; `rxx`, `ryy`, `rzz` are the two-letter cases, also spelled `xx`, `yy`, `zz` |
-//! | Multi-qubit gates | `ccx q[0], q[1], q[2];` | ccx/toffoli/ccnot, ccz, cswap/fredkin, c3x, c4x, mcx, rccx, rc3x/rcccx |
+//! | Multi-qubit gates | `ccx q[0], q[1], q[2];` | ccx/toffoli/ccnot, ccz, cswap/fredkin, c3x, c3sqrtx, c4x, mcx, rccx, rc3x/rcccx |
 //! | Gate modifiers | `inv @ h q[0];` | `inv @`, `ctrl @` and `negctrl @` (chainable), `ctrl(n) @` and `negctrl(n) @` for `n` of them, `pow(k) @` for any real k. A control applies to whatever the gate expanded to, so it reaches a user `gate` and a lowered gate as well as a direct one; a fractional `pow` is the principal power of what the call expanded to |
 //! | Global phase | `gphase(pi/2);` `ctrl @ gphase(pi/2) q[0];` | Carried rather than dropped: it is observable through a `state_vector` result and under a control |
 //! | Classical declaration | `int n = 3;` `const float t = pi/4;` | `int`, `uint`, `bool`, `float`, `angle`, with an optional width. Folded at parse time, so the value reads as an index, a loop bound, a gate angle or a condition operand. An integer is exact and wraps at its width, 64 bits by default; a float is 16, 32, 64 or 128 bits, `float[16]` and `float[32]` rounding to half and single precision; `angle[n]` holds the nearest multiple of `2 pi / 2^n`, modulo `2 pi` |
@@ -91,8 +91,9 @@
 //!   [`parse_dynamic`] writes them
 //! - a classical bit read as a value outside a guard, `int x = c[0] + c[1];`,
 //!   which [`parse_dynamic`] evaluates at runtime
-//! - `while`, `break` and `continue`, which [`parse_dynamic`] reads into a
-//!   control-flow graph
+//! - `while`, which [`parse_dynamic`] reads into a control-flow graph, and a
+//!   `break` or `continue` under a measurement-dependent branch, which it
+//!   lowers into the graph
 //! - a measurement-dependent scalar `def` result or early `return` under
 //!   `parse`; `parse_dynamic` lowers these into the graph
 //! - under `parse`, a dropped `bit` result; under both, a runtime `complex` value, a runtime duration in a
@@ -102,14 +103,14 @@
 //!   declares, but not a measurement into a bit parameter
 //! - `ctrl @` on a `def` call: a subroutine is not a gate and the language
 //!   gives it no controlled form
-//! - `ctrl @` and a fractional `pow(k) @` on a call spanning more than four
-//!   qubits: both reduce the call to a dense matrix first, and that matrix is
-//!   where the width bound sits
+//! - a fractional `pow(k) @` on a call spanning more than four qubits: it
+//!   reduces the call to a dense matrix first, and that matrix is where the
+//!   width bound sits
+//! - `ctrl @` on a body that measures, resets or branches, or that holds a gate
+//!   with no controlled form. The control applies to each instruction the call
+//!   expanded to, so the width of the call sets no bound
 //! - a `qubit` or `qreg` declaration in a program that also names physical
 //!   qubits (`$0`)
-//! - Bit literal comparisons against integers other than `0` / `1`
-//! - Negative integer literals in `if` register comparisons
-//! - `switch` with a `default` and more case labels than the region depth bound
 //! - a condition or `switch` target over classical bits that no bit or
 //!   register guard spells, such as `c[0] && c[1]`, which [`parse_dynamic`]
 //!   evaluates at runtime
@@ -123,10 +124,11 @@
 //!   with SI units
 //! - `output` of any type but `bit`
 //! - an unsupplied `input` anywhere but in a gate angle affine in it: an angle
-//!   over two inputs or not affine in one, a modified gate or `gphase`, a gate
-//!   that lowers to a sequence or carries no rotation angle, a guarded region,
-//!   and any classical value all reject. An unsupplied input of any type but
-//!   `float` and `angle` returns [`PrismError::InvalidParameter`]
+//!   not affine in its inputs, a gate built as one matrix with no lowering to
+//!   rotations (`xx_plus_yy`, `ms`), any modifier but one control on a rotation
+//!   or on `gphase`, a guarded region, and any classical value all reject. An
+//!   unsupplied input of any type but `float` and `angle` returns
+//!   [`PrismError::InvalidParameter`]
 //!
 //! # Error behaviour
 //!
@@ -134,7 +136,11 @@
 //! with the source line number. The parser never panics on user input. An `else`
 //! whose `if` body measures into a bit the condition reads, and a `switch` whose
 //! arm measures into the switched register, return `Parse`: both lowerings re-read
-//! the bits after an earlier body ran.
+//! the bits after an earlier body ran. Under `parse`, an `if` comparing a bit
+//! against anything but `0` or `1`, or a bit or register against a negative
+//! integer, returns `Parse`; [`parse_dynamic`] evaluates both at runtime. A
+//! `switch` with a `default` and more case labels than the region depth bound
+//! returns `Parse` under both.
 //!
 //! The reverse direction is [`qasm_export`](super::qasm_export).
 
@@ -259,14 +265,18 @@ fn without_slots(circuit: Circuit, params: &Parameters) -> Result<Circuit> {
 /// returned circuit is a template holding each linked angle at an input value of
 /// zero; bind it before running, since dispatch reads the angles it is given.
 ///
-/// A gate angle may be affine in one `float` or `angle` input, `-theta / 2` or
-/// `2 * theta + pi`, and its link carries that scale and offset. The input may
-/// reach the angle through a `for` body or as an argument to a `gate` or `def`.
-/// An angle over two inputs or not affine in one, a modified gate, a gate that
-/// lowers to a sequence or carries no rotation angle, a guarded region, and a
-/// classical value read from an input all return
-/// [`PrismError::UnsupportedConstruct`]. An `input` of any other type needs a
-/// value from [`parse_parametric_with_inputs`].
+/// A gate angle may be affine in `float` or `angle` inputs, `-theta / 2` or
+/// `2 * theta + phi`. Each link still reads one slot with a scale and offset:
+/// a rotation over several inputs is emitted as one rotation per input, and a
+/// gate with no angle of its own (`U`, `u2`, `r`, `cp`, `crx`, `cry`, `crz`,
+/// `cu`, `gphase`, one `ctrl` on a rotation) as the rotations it equals, so the
+/// template can hold more gates than the source names. The input may reach the
+/// angle through a `for` body or as an argument to a `gate` or `def`.
+///
+/// An angle not affine in its inputs, a gate built as one matrix with no such
+/// lowering, any other modifier, a guarded region, and a classical value read
+/// from an input all return [`PrismError::UnsupportedConstruct`]. An `input` of
+/// any other type needs a value from [`parse_parametric_with_inputs`].
 ///
 /// # Errors
 ///
@@ -609,13 +619,43 @@ fn invalid_index(kind: ast::RegisterKind, index: usize, register_size: usize) ->
     }
 }
 
-/// `scale * slot + offset` over one `input` slot, or the constant `offset` when
-/// `slot` is `None`.
-#[derive(Clone, Copy)]
+/// `sum(scale * slot) + offset` over `input` slots, a constant when `terms` is
+/// empty. No term has a scale of zero.
+#[derive(Clone)]
 struct Linear {
-    slot: Option<usize>,
-    scale: f64,
+    terms: SmallVec<[(usize, f64); 2]>,
     offset: f64,
+}
+
+impl Linear {
+    fn constant(offset: f64) -> Self {
+        Self {
+            terms: SmallVec::new(),
+            offset,
+        }
+    }
+
+    fn scaled(mut self, by: f64) -> Self {
+        for term in &mut self.terms {
+            term.1 *= by;
+        }
+        self.terms.retain(|term| term.1 != 0.0);
+        self.offset *= by;
+        self
+    }
+
+    /// `self + sign * other`, merging the terms that read one slot.
+    fn plus(mut self, other: &Linear, sign: f64) -> Self {
+        for &(slot, scale) in &other.terms {
+            match self.terms.iter_mut().find(|term| term.0 == slot) {
+                Some(term) => term.1 += sign * scale,
+                None => self.terms.push((slot, sign * scale)),
+            }
+        }
+        self.terms.retain(|term| term.1 != 0.0);
+        self.offset += sign * other.offset;
+        self
+    }
 }
 
 /// High word of the quiet NaN that stands for an angle reading an `input`; the
@@ -1004,10 +1044,17 @@ impl<'a> Parser<'a> {
         let mut angle = params[0];
         for modifier in modifiers {
             match modifier {
+                Modifier::Inv if tag_id(angle).is_some() => angle = self.mix(&[(-1.0, angle)], 0.0),
+                Modifier::Pow(k) if tag_id(angle).is_some() => {
+                    angle = self.mix(&[(*k, angle)], 0.0);
+                }
                 Modifier::Inv => angle = -angle,
                 Modifier::Pow(k) => angle *= k,
                 Modifier::Ctrl { .. } => {}
             }
+        }
+        if tag_id(angle).is_some() {
+            return self.tagged_global_phase(angle, qubits, &controls, line_num);
         }
 
         if controls.is_empty() {
@@ -1076,8 +1123,229 @@ impl<'a> Parser<'a> {
         Ok(Instruction::Gate { gate, targets })
     }
 
+    /// `gphase` over an `input`, as phase gates that carry the angle:
+    /// `X P(theta) X P(theta)` is `e^(i theta) I`, and under one control the
+    /// phase is `P(theta)` on that control.
+    fn tagged_global_phase(
+        &self,
+        angle: f64,
+        qubits: &[usize],
+        controls: &[bool],
+        line_num: usize,
+    ) -> Result<Vec<Instruction>> {
+        let mut out = Vec::new();
+        match (qubits, controls) {
+            ([], []) => {
+                if self.total_qubits == 0 {
+                    return Err(parse_error(
+                        line_num,
+                        "`gphase` needs a qubit to carry the phase, and none is declared",
+                    ));
+                }
+                let qubit = [self.phase_qubit];
+                for _ in 0..2 {
+                    self.rotation(Gate::P, angle, &qubit, &mut out);
+                    out.push(ig(Gate::X, &qubit));
+                }
+            }
+            (&[qubit], &[negated]) => {
+                self.rotation(Gate::P, angle, &[qubit], &mut out);
+                out = Self::conjugate_negations(out, &[qubit], &[negated]);
+            }
+            _ => {
+                return Err(unsupported(
+                    line_num,
+                    "`gphase` reading an `input` under more than one control",
+                ));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Push `gate(angle)`, once per slot a tagged angle reads. A constant
+    /// angle of zero pushes nothing.
+    fn rotation(
+        &self,
+        gate: fn(f64) -> Gate,
+        angle: f64,
+        targets: &[usize],
+        out: &mut Vec<Instruction>,
+    ) {
+        if angle == 0.0 {
+            return;
+        }
+        out.extend(
+            self.slot_angles(angle)
+                .into_iter()
+                .map(|part| ig(gate(part), targets)),
+        );
+    }
+
+    /// `U(theta, phi, lam)` as `P(phi) Ry(theta) P(lam)`.
+    fn euler(&self, theta: f64, phi: f64, lam: f64, qubit: usize, out: &mut Vec<Instruction>) {
+        self.rotation(Gate::P, lam, &[qubit], out);
+        self.rotation(Gate::Ry, theta, &[qubit], out);
+        self.rotation(Gate::P, phi, &[qubit], out);
+    }
+
+    /// Controlled `Rz(theta)` as `Rz(theta / 2)` on the target and
+    /// `Rzz(-theta / 2)` across the pair.
+    fn controlled_rz(&self, theta: f64, control: usize, target: usize, out: &mut Vec<Instruction>) {
+        self.rotation(Gate::Rz, self.mix(&[(0.5, theta)], 0.0), &[target], out);
+        self.rotation(
+            Gate::Rzz,
+            self.mix(&[(-0.5, theta)], 0.0),
+            &[control, target],
+            out,
+        );
+    }
+
+    /// Lower a call reading an `input` to gates that each carry one angle, or
+    /// `Ok(None)` for a name with no such lowering. Each sequence equals the
+    /// gate it stands for exactly, global phase included.
+    fn lower_tagged(
+        &self,
+        gate_name: &str,
+        params: &[f64],
+        qubits: &[usize],
+        line_num: usize,
+    ) -> Result<Option<Vec<Instruction>>> {
+        let shape = |angles: usize, width: usize| {
+            gate_library::expect_param_count(gate_name, params, angles, line_num)?;
+            gate_library::check_arity(gate_name, qubits, width)
+        };
+        let mut out = Vec::new();
+        match gate_name {
+            "u1" => {
+                shape(1, 1)?;
+                self.rotation(Gate::P, params[0], qubits, &mut out);
+            }
+            "u2" => {
+                shape(2, 1)?;
+                let quarter = std::f64::consts::FRAC_PI_2;
+                self.euler(quarter, params[0], params[1], qubits[0], &mut out);
+            }
+            "u3" | "u" | "U" => {
+                shape(3, 1)?;
+                self.euler(params[0], params[1], params[2], qubits[0], &mut out);
+            }
+            "r" | "prx" => {
+                shape(2, 1)?;
+                let back = self.mix(&[(-1.0, params[1])], 0.0);
+                self.rotation(Gate::Rz, back, qubits, &mut out);
+                self.rotation(Gate::Rx, params[0], qubits, &mut out);
+                self.rotation(Gate::Rz, params[1], qubits, &mut out);
+            }
+            "cp" | "cphase" | "cphaseshift" => {
+                shape(1, 2)?;
+                let half = self.mix(&[(0.5, params[0])], 0.0);
+                self.rotation(Gate::P, half, &qubits[..1], &mut out);
+                self.rotation(Gate::Rz, half, &qubits[1..], &mut out);
+                self.rotation(
+                    Gate::Rzz,
+                    self.mix(&[(-0.5, params[0])], 0.0),
+                    qubits,
+                    &mut out,
+                );
+            }
+            "crz" => {
+                shape(1, 2)?;
+                self.controlled_rz(params[0], qubits[0], qubits[1], &mut out);
+            }
+            "crx" => {
+                shape(1, 2)?;
+                let target = &qubits[1..];
+                out.push(ig(Gate::H, target));
+                self.controlled_rz(params[0], qubits[0], qubits[1], &mut out);
+                out.push(ig(Gate::H, target));
+            }
+            "cry" => {
+                shape(1, 2)?;
+                let target = &qubits[1..];
+                out.extend([ig(Gate::Sdg, target), ig(Gate::H, target)]);
+                self.controlled_rz(params[0], qubits[0], qubits[1], &mut out);
+                out.extend([ig(Gate::H, target), ig(Gate::S, target)]);
+            }
+            "cu" => {
+                shape(4, 2)?;
+                let &[theta, phi, lam, gamma] = params else {
+                    unreachable!("the parameter count was checked");
+                };
+                let (control, target) = (qubits[0], qubits[1]);
+                let on_control = self.mix(&[(1.0, gamma), (0.5, lam), (0.5, phi)], 0.0);
+                self.rotation(Gate::P, on_control, &[control], &mut out);
+                let on_target = self.mix(&[(0.5, lam), (-0.5, phi)], 0.0);
+                self.rotation(Gate::P, on_target, &[target], &mut out);
+                out.push(ig(Gate::Cx, qubits));
+                let sum = self.mix(&[(-0.5, phi), (-0.5, lam)], 0.0);
+                self.euler(self.mix(&[(-0.5, theta)], 0.0), 0.0, sum, target, &mut out);
+                out.push(ig(Gate::Cx, qubits));
+                self.euler(self.mix(&[(0.5, theta)], 0.0), phi, 0.0, target, &mut out);
+            }
+            _ => return Ok(None),
+        }
+        Ok(Some(out))
+    }
+
+    /// One control on a rotation reading an `input` is the controlled gate of
+    /// that rotation, which lowers to gates carrying the angle. Any other
+    /// modifier would act on the stand-in for the angle and is declined.
+    fn resolve_controlled_tagged(
+        &self,
+        gate_name: &str,
+        params: &[f64],
+        modifiers: &[Modifier],
+        qubits: &[usize],
+        line_num: usize,
+        out: &mut Vec<Instruction>,
+    ) -> Result<()> {
+        let controlled = match gate_name {
+            "rx" => Some("crx"),
+            "ry" => Some("cry"),
+            "rz" => Some("crz"),
+            "p" | "phase" | "phaseshift" | "u1" => Some("cp"),
+            "u3" | "u" | "U" => Some("cu"),
+            _ => None,
+        };
+        let (Some(controlled), &[Modifier::Ctrl { negated }], false) = (
+            controlled,
+            modifiers,
+            self.gate_defs.contains_key(gate_name),
+        ) else {
+            return Err(unsupported(
+                line_num,
+                format!("modifier on `{gate_name}` reading an `input`"),
+            ));
+        };
+        let mut angles: SmallVec<[f64; 4]> = SmallVec::from_slice(params);
+        if controlled == "cu" {
+            gate_library::expect_param_count(gate_name, params, 3, line_num)?;
+            angles.push(0.0);
+        } else {
+            gate_library::expect_param_count(gate_name, params, 1, line_num)?;
+        }
+        if qubits.len() != 2 {
+            return Err(PrismError::GateArity {
+                gate: gate_name.to_string(),
+                expected: 2,
+                got: qubits.len(),
+            });
+        }
+        if qubits[0] == qubits[1] {
+            return Err(parse_error(
+                line_num,
+                format!("qubit {} is both a control and a target", qubits[0]),
+            ));
+        }
+        let body = self
+            .lower_tagged(controlled, &angles, qubits, line_num)?
+            .expect("a controlled rotation has a lowering");
+        out.extend(Self::conjugate_negations(body, &qubits[..1], &[negated]));
+        Ok(())
+    }
+
     /// Resolve a call whose one tagged angle has to land unchanged on a single
-    /// bindable gate, then put the tag on that gate.
+    /// bindable gate, then put the tag on that gate, once per slot it reads.
     ///
     /// The call resolves with [`PROBE`] in place of the tag, so a gate that
     /// derives its stored angle from the argument reads back something else.
@@ -1089,26 +1357,33 @@ impl<'a> Parser<'a> {
         line_num: usize,
         out: &mut Vec<Instruction>,
     ) -> Result<()> {
-        let at = params
-            .iter()
-            .position(|value| tag_id(*value).is_some())
-            .expect("the caller saw a tag");
+        let mut tagged = (0..params.len()).filter(|&at| tag_id(params[at]).is_some());
+        let at = tagged.next().expect("the caller saw a tag");
+        if tagged.next().is_some() {
+            return Err(unsupported(
+                line_num,
+                format!("two `input` parameters on `{gate_name}`, which has no gate to carry each"),
+            ));
+        }
         let mut probed = params.to_vec();
         probed[at] = PROBE;
         let start = out.len();
         self.resolve_gate_body(gate_name, &probed, &[], qubits, false, line_num, out)?;
-        match &mut out[start..] {
-            [instr]
-                if gate_angle(instr).is_some_and(|angle| angle.to_bits() == PROBE.to_bits()) =>
-            {
-                *angle_mut(instr) = params[at];
-                Ok(())
-            }
-            _ => Err(unsupported(
+        let bindable = out.len() == start + 1
+            && gate_angle(&out[start]).is_some_and(|angle| angle.to_bits() == PROBE.to_bits());
+        if !bindable {
+            return Err(unsupported(
                 line_num,
                 format!("`input` on `{gate_name}`, which carries no rotation angle to bind"),
-            )),
+            ));
         }
+        let gate = out.pop().expect("one instruction was resolved");
+        for angle in self.slot_angles(params[at]) {
+            let mut part = gate.clone();
+            *angle_mut(&mut part) = angle;
+            out.push(part);
+        }
+        Ok(())
     }
 
     /// Build what one gate call names, splitting off the control qubits a
@@ -1129,6 +1404,10 @@ impl<'a> Parser<'a> {
         line_num: usize,
         out: &mut Vec<Instruction>,
     ) -> Result<()> {
+        if has_input && !modifiers.is_empty() {
+            return self
+                .resolve_controlled_tagged(gate_name, params, modifiers, qubits, line_num, out);
+        }
         let polarity: Vec<bool> = modifiers.iter().filter_map(Modifier::control).collect();
         if polarity.is_empty() {
             return self.resolve_gate_body(
@@ -1177,13 +1456,20 @@ impl<'a> Parser<'a> {
         if let Some(instrs) =
             gate_library::resolve_decomposed_gate(gate_name, params, qubits, line_num)?
         {
-            // A lowering folds the angle into its own arithmetic, so binding a
-            // slot afterwards would write the raw value over a derived one.
+            // A library lowering folds the angle into its own arithmetic, so
+            // binding a slot afterwards would write the raw value over a derived
+            // one. Only a lowering that keeps each angle on a gate binds.
             if has_input {
-                return Err(unsupported(
-                    line_num,
-                    format!("`input` on `{gate_name}`, which lowers to a gate sequence"),
-                ));
+                let lowered = self
+                    .lower_tagged(gate_name, params, qubits, line_num)?
+                    .ok_or_else(|| {
+                        unsupported(
+                            line_num,
+                            format!("`input` on `{gate_name}`, which lowers to a gate sequence"),
+                        )
+                    })?;
+                out.extend(lowered);
+                return Ok(());
             }
             out.extend(Self::modify_expansion(
                 instrs, modifiers, gate_name, line_num,
@@ -1198,6 +1484,10 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
         if has_input {
+            if let Some(lowered) = self.lower_tagged(gate_name, params, qubits, line_num)? {
+                out.extend(lowered);
+                return Ok(());
+            }
             return self.resolve_tagged(gate_name, params, qubits, line_num, out);
         }
 

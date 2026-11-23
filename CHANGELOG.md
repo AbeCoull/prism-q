@@ -2,6 +2,111 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.39.0] - 2026-11-23
+
+### Bug Fixes
+
+- **gpu:** Load NVRTC from a CUDA 13 toolkit as well as CUDA 12 (#679)([9b02976](https://github.com/AbeCoull/prism-q/commit/9b029764f6eba4c6913bce2ff8f9d9220f68c329))
+- **gpu:** Read device count table slot states with acquire (#671)([9046ee2](https://github.com/AbeCoull/prism-q/commit/9046ee27bbc29d2307626feb1c0d307ef8b39a0a))
+- Make documented panics match circuit and gate behaviour (#668)([2896099](https://github.com/AbeCoull/prism-q/commit/2896099df33ad1e6beba64e7d06c4ab58e97c635))
+- Break count ties in circuit summaries, shot display and SVG legend (#657)([fb8fe51](https://github.com/AbeCoull/prism-q/commit/fb8fe51b897f8d91ba4112973f17d339f055633d))
+- **fusion:** Split BatchPhase before refusing a fused stream (#653)([b7d32f2](https://github.com/AbeCoull/prism-q/commit/b7d32f26a48a418f18501aae5a4d7b3af3bc121d))
+- **sim:** Route wide Clifford+T shots off a register that cannot fit (#641)([7ac00ea](https://github.com/AbeCoull/prism-q/commit/7ac00ea85abe5c7bf223f553f5226b1f0ad83843))
+
+### CI
+
+- **bench:** Gate the SPP engine at 10 qubits (#684)([9d4ac82](https://github.com/AbeCoull/prism-q/commit/9d4ac82cc231f861e830610fa85e4e124c2a9f26))
+- Require a breaking title for compatibility entries (#683)([1bd6af4](https://github.com/AbeCoull/prism-q/commit/1bd6af4665479b8f86426d9a89bda05c3ad6dfab))
+- Drop scheduled runs of fuzz, mutation and bench smoke jobs (#666)([df8e864](https://github.com/AbeCoull/prism-q/commit/df8e864c6090ab70f03d7ef700d290afb3fd3bbb))
+- **bench:** Gate every simulation path in the CI row set (#637)([2627e6a](https://github.com/AbeCoull/prism-q/commit/2627e6abc8f395da903bd0c1489941b83c262aa0))
+
+### Documentation
+
+- **architecture:** Describe kernel traversals on threading page (#701)([f4e4dac](https://github.com/AbeCoull/prism-q/commit/f4e4daccd17b9b7d7148844ea12729a9e155c83d))
+- Merge the benchmark pages into one Performance page (#643)([47dc93f](https://github.com/AbeCoull/prism-q/commit/47dc93f4677c3ce27baaf0223d36671cb70a60ca))
+
+### Features
+
+- Fill OpenQASM gaps and extend pulse compilation (#708)([5cdd368](https://github.com/AbeCoull/prism-q/commit/5cdd36862d22502090089813b95f7e38398656f1))
+- **sim:** Return Clifford+T probabilities up to a 24 qubit register (#681) (**BREAKING**)([fdeb283](https://github.com/AbeCoull/prism-q/commit/fdeb2838a0f54cb11204015dad979eafc2db308c))
+- **tn:** Reduced density matrices over several qubits (#667)([b127ebb](https://github.com/AbeCoull/prism-q/commit/b127ebbe3980bd65875cd8c2a81fca2eb5c35a03))
+- **mps:** Report a run that cut no weight as exact (#665)([d1009de](https://github.com/AbeCoull/prism-q/commit/d1009de60af27b6ba1758bddae04703cc5fd1221))
+- **sim:** Draw Clifford register shots from a split register (#664) (**BREAKING**)([3fbc933](https://github.com/AbeCoull/prism-q/commit/3fbc933a120104892ec3e6b4b3da4caebf9524e5))
+- **pulse:** Compile pulse schedules on transmons to gate unitaries (#646)([880647b](https://github.com/AbeCoull/prism-q/commit/880647b1d4ace92e7cd954ddca07c7bc8513a056))
+- **qasm:** Fold durationof and resolve stretches in a fixed box (#636) (**BREAKING**)([3e9703b](https://github.com/AbeCoull/prism-q/commit/3e9703bf16cccdb3b383978a364f18192f05e650))
+
+### Miscellaneous
+
+- **release:** Stamp unreleased compatibility entries with the version (#686)([18aa407](https://github.com/AbeCoull/prism-q/commit/18aa40757d3c9fb32fc97d83dde74094ae2d1ccf))
+- **deps:** Bump softprops/action-gh-release (#635)([2364858](https://github.com/AbeCoull/prism-q/commit/23648586af9401fe006deb117ba4b485fbe6a59f))
+
+### Performance
+
+- **gpu:** Keep the host sampler when shots outnumber the readback (#705)([b7928c7](https://github.com/AbeCoull/prism-q/commit/b7928c77f391bdd9eba1b2f01764ec881e6d738f))
+- **gpu:** Square large probability readbacks into the pinned slots (#706)([075f0ae](https://github.com/AbeCoull/prism-q/commit/075f0aea0194ccc326965a62b5de4b29abb5254a))
+- **mps:** Close observable windows from the sweeps' own products (#704)([ba12330](https://github.com/AbeCoull/prism-q/commit/ba12330458c54e38ef8c6e7759c19bc6f692f8fa))
+- **compiled:** Fold route checks and keep one thread collapses serial (#703)([0ff2a0e](https://github.com/AbeCoull/prism-q/commit/0ff2a0e307336e6a7a41e193522f50455c3980f5))
+- **spp:** Branch on PauliRot strings natively (#702)([96f39e2](https://github.com/AbeCoull/prism-q/commit/96f39e2a5100b8272f3d4d2a3062d3754f353c5b))
+- **gpu:** Draw terminal shots and counts on the device (#700) (**BREAKING**)([2036e60](https://github.com/AbeCoull/prism-q/commit/2036e608f480e56b1244ebb154065c7bc4181bd6))
+- **tn:** Price planner pairs from counts and cache slice choices (#697)([d560fb5](https://github.com/AbeCoull/prism-q/commit/d560fb5e77b36ebc661b1ffb6a2cfc6e12edcb6a))
+- **compiled:** Scan only overlapping rows in weight minimization (#696)([abe9db7](https://github.com/AbeCoull/prism-q/commit/abe9db738a09d696b6a6ac2b115df5756b287ad9))
+- **spd:** Branch on PauliRot strings natively (#698)([dd8be71](https://github.com/AbeCoull/prism-q/commit/dd8be713de9253e1a7402ee5154cc4d3f52f26b9))
+- **gpu:** Stage large readbacks through pinned slots (#699)([b9c3fce](https://github.com/AbeCoull/prism-q/commit/b9c3fce7d32460857be4e8ccbf4a0f1876b2b569))
+- **sim:** Hold Clifford register parts of up to 26 qubits whole (#690) (**BREAKING**)([4b26dc1](https://github.com/AbeCoull/prism-q/commit/4b26dc133764a189c4161412e73ab2a5dbe1fa27))
+- **sim:** Read whole register parts out by a Walsh transform (#689) (**BREAKING**)([ad46811](https://github.com/AbeCoull/prism-q/commit/ad468115990f61272815c41b25984096b34faf6d))
+- **gpu:** Cut launches and readbacks in noisy device trajectories (#688)([6ccb52b](https://github.com/AbeCoull/prism-q/commit/6ccb52b0860ce084821d724523ea3ad5103f0941))
+- **sim:** Split statevector trajectories per shot up to 18 qubits (#687)([3f1f151](https://github.com/AbeCoull/prism-q/commit/3f1f151a7d642490e69c5216db8c36c14c14fe43))
+- **backend:** Give MPS and small parallel statevectors the P cores (#682)([53241f9](https://github.com/AbeCoull/prism-q/commit/53241f9c105f3bb1221e1a0eaa70c00849bdfc79))
+- **gpu:** Decide trajectory noise branches on the device (#680)([a4ba662](https://github.com/AbeCoull/prism-q/commit/a4ba6621a12dcc178434a1c8c7dd8f12b6fd4320))
+- **sim:** Compute observable variance in one pass on the statevector (#678)([764cf02](https://github.com/AbeCoull/prism-q/commit/764cf023a7273512dfffc9fc96e3983c32ea9633))
+- **gpu:** Run stabilizer circuits from 1000 qubits on the device (#677)([1568a14](https://github.com/AbeCoull/prism-q/commit/1568a145fbed9a895d18e5cda717bfe19b84cf2a))
+- **gpu:** Draw device sampler random bits on the device (#675) (**BREAKING**)([5e450cb](https://github.com/AbeCoull/prism-q/commit/5e450cb37b4ab73730c9fe46145f71ed4551f153))
+- **gpu:** Keep stabilizer measurement runs on the device (#674)([52931a1](https://github.com/AbeCoull/prism-q/commit/52931a15836120a274021fb859c727567cfe08fb))
+- **gpu:** Decide statevector measurements on the device (#673)([dd6675e](https://github.com/AbeCoull/prism-q/commit/dd6675e672199c44b242c332d2af41102f54ea02))
+- **stabilizer:** Keep the batch measurement index across collapses (#672)([a770e6f](https://github.com/AbeCoull/prism-q/commit/a770e6f951a2016426d1432e77e9c2e20b337216))
+- **qec:** Cut the record route's compile walk and noise allocations (#670)([236b8db](https://github.com/AbeCoull/prism-q/commit/236b8dbce39ee53c92ff62616408b9266458a431))
+- **qec:** Run the forced-zero reference on an inverse tableau (#662)([188a5e6](https://github.com/AbeCoull/prism-q/commit/188a5e67d6f53b81d8f98e11679732cc080d228d))
+- **sim:** Fold the Clifford register table in contiguous runs (#660)([9874e7d](https://github.com/AbeCoull/prism-q/commit/9874e7d93c34998397a4bd94c5d5ec2edd5feafe))
+- **sim:** Answer Clifford+T expectations from the register parts (#659)([4157908](https://github.com/AbeCoull/prism-q/commit/4157908a0a51685970f3865e81be5614ae9feabb))
+- **sim:** Send shallow wide expectations above the cap to tensors (#656)([22859a9](https://github.com/AbeCoull/prism-q/commit/22859a9133301b5cbfd07f58650d8b35a53f11db))
+- **qec:** Cut time to first shot on surface memory programs (#655)([f012c63](https://github.com/AbeCoull/prism-q/commit/f012c63ecbb78d8b414ac05e828f145ed7eeb322))
+- **stabilizer:** Apply long Clifford runs on qubit columns (#654)([660b5e1](https://github.com/AbeCoull/prism-q/commit/660b5e1744924ea0e26dc013989bfb6fea232db9))
+- **sim:** Route Clifford+T and dynamic shots by cost (#652) (**BREAKING**)([ffb4afb](https://github.com/AbeCoull/prism-q/commit/ffb4afbd7335ae520857d9f0b736c6b25a2bf2c5))
+- Cut compiled sampler fixed costs and refit the tensor route (#651)([b229212](https://github.com/AbeCoull/prism-q/commit/b229212edc1a315c21ab51e42bf5ccc023213bea))
+- **sim:** Reuse block states for wide terminal shots (#648)([e49743d](https://github.com/AbeCoull/prism-q/commit/e49743de2812c9208042b780d059eb0d96681133))
+- **spd:** Branch on Rx and Ry natively, square the threshold test (#645)([1ee32ee](https://github.com/AbeCoull/prism-q/commit/1ee32ee850942d0316f96818b0c250ebd1b6dc61))
+- **sim:** Read exact Clifford+T probabilities off the register (#642) (**BREAKING**)([6516a68](https://github.com/AbeCoull/prism-q/commit/6516a6869c0cd5b8eeb9b12669e5f026361aa598))
+
+### Refactor
+
+- Share noise, rowmul, factored and subcube kernels (#695)([7694f83](https://github.com/AbeCoull/prism-q/commit/7694f83de6e565be46687bb4c42d665c34d358cb))
+- Share sim primitives and split statevector and SIMD kernels (#694)([165b498](https://github.com/AbeCoull/prism-q/commit/165b4988b72a2ecfbafc1336dc246f9611cf3e4b))
+- Narrow backend, GPU and sampler internals to the crate (#693) (**BREAKING**)([c1e0889](https://github.com/AbeCoull/prism-q/commit/c1e0889eeff092e8c6d2a74e293a53d8860cd43e))
+- Split sim, qec and backend modules and share kernels (#692)([9a00972](https://github.com/AbeCoull/prism-q/commit/9a00972e7ea7b93cbbcb809f7989437d803afdf3))
+- Split oversized modules and share duplicated helpers (#691)([c6aa6f2](https://github.com/AbeCoull/prism-q/commit/c6aa6f270eb01be0f74298f37261423078cb439f))
+- **python:** Drop the deprecated QEC class names (#685) (**BREAKING**)([3b7a401](https://github.com/AbeCoull/prism-q/commit/3b7a401391fca0b227c63e815a7bccf6475dfb77))
+
+### Testing
+
+- Make skips loud, share test helpers and fill coverage gaps (#663)([52df0ee](https://github.com/AbeCoull/prism-q/commit/52df0ee990eff860f97b555d5625338a34bbd9c5))
+- **stabilizer:** Count Clifford register parts in the product gauge (#658)([a7dd8ff](https://github.com/AbeCoull/prism-q/commit/a7dd8ffdaa563ef5608cfb327723984a0ba386ca))
+
+### Bench
+
+- **comparison:** Add a circuit zoo, scaling ladders and a new host run (#707)([9bf424d](https://github.com/AbeCoull/prism-q/commit/9bf424dee487cf5f38a369e8da7a59984b661e53))
+- **gpu:** Route the device sampler rows to the device (#676)([5aa8fb5](https://github.com/AbeCoull/prism-q/commit/5aa8fb5f6adc682e0fd9dd287b489f9b49dd338c))
+- **stabilizer:** Census the canonical merge and a cut in two (#661)([fecee4e](https://github.com/AbeCoull/prism-q/commit/fecee4ee59d797b066049cf90015497a225ceb5b))
+- **qec:** Time parse, compile and first shot of a surface memory (#650)([1309219](https://github.com/AbeCoull/prism-q/commit/130921909d34b16b729387630dacf1bac7a83d78))
+- Let the interleaved runner compare two binaries (#649)([1ae970f](https://github.com/AbeCoull/prism-q/commit/1ae970fe2d5982aff9a5cd8485f6dcce89fd9a0a))
+- **clifford-t:** Price the register against the statevector (#647)([72a9b0a](https://github.com/AbeCoull/prism-q/commit/72a9b0aa614d25f8721f7fd66b6e6668a0dd70e3))
+- Fix bench tooling and comparison peers, restyle the docs (#644)([3e7a245](https://github.com/AbeCoull/prism-q/commit/3e7a24575aa06e75a9a12d306cee4a0b0d73745c))
+- **stabilizer-rank:** Add scrambled Clifford+T rows (#640)([085b570](https://github.com/AbeCoull/prism-q/commit/085b5707691bd56afb729fa6c1e086f7c42fa8d6))
+- **stab:** Add depth-50 and depth-100 random pair rows (#638)([634303a](https://github.com/AbeCoull/prism-q/commit/634303a140ff613022f251721b3204157672ec36))
+## [py-v0.38.0] - 2026-11-09
+
+### Miscellaneous
+
+- **python:** Release 0.38.0([f25dd45](https://github.com/AbeCoull/prism-q/commit/f25dd45b132d55ae7f2a6a15fc023c31c6224036))
 ## [0.38.0] - 2026-11-09
 
 ### Bug Fixes
@@ -42,6 +147,7 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ### Miscellaneous
 
+- Release([37a5bc6](https://github.com/AbeCoull/prism-q/commit/37a5bc609861d71c8bfb88cd40dc310acf033e8e))
 - **bench:** Lower TN HEA cap and fix bench and bit-order docs (#621)([3bf1744](https://github.com/AbeCoull/prism-q/commit/3bf17447c5a9252168a31621a10b57139fd9d3a7))
 
 ### Performance

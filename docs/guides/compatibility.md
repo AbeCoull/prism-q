@@ -42,7 +42,7 @@ not part of the surface.
 A breaking release can keep a public field and change what it reports. These fields
 changed meaning:
 
-- Unreleased: `run_stabilizer_rank_approx` runs on the Clifford register and changes three
+- 0.39.0: `run_stabilizer_rank_approx` runs on the Clifford register and changes three
   fields of its `StabRankResult`. `discarded_weight` is the sum over cuts of the exact
   2-norm each cut dropped, where it was the summed 1-norm of the dropped branch weights; a
   caller's `4 * discarded_weight` remains a valid bound on the summed absolute difference
@@ -50,12 +50,12 @@ changed meaning:
   coefficients, not branches. The new field `kept_norm_sqr` carries the kept norm, and
   `fidelity_bound()` uses both. A register wider than 20 qubits now returns
   `BackendUnsupported`, and `seed` is ignored.
-- Unreleased: `run_stabilizer_rank`, and `run()` on `BackendKind::StabilizerRank`, build
+- 0.39.0: `run_stabilizer_rank`, and `run()` on `BackendKind::StabilizerRank`, build
   the Clifford register up to 24 qubits wide, where the cap was 20. A circuit whose
   register is 21 to 24 qubits wide and carries more than 20 T gates now returns its
   probabilities, where it returned `BackendUnsupported` for too many terms.
   `run_stabilizer_rank_approx` keeps the 20 qubit cap.
-- Unreleased: `RunMetadata::exactness` on an MPS run reports the run instead of the route.
+- 0.39.0: `RunMetadata::exactness` on an MPS run reports the run instead of the route.
   A run whose cuts discarded a summed squared weight of at most 1e-24 is `Exact` at any
   bond cap, where any chain wider than bond 1 was `Approximate` with a bound of 1.0.
   Python's `is_exact` follows it. `require_exact` still declines the MPS route before the
@@ -88,7 +88,7 @@ Seeded output has changed in these releases:
   state in one pass. Dynamic programs on the host statevector branch the same way, so
   their shots no longer follow `mix_seed(seed, i)`. Compiled Clifford counts at high shot
   counts draw from a corrected binomial sampler, which also fixes their spread.
-- Unreleased: these routes draw differently:
+- 0.39.0: these routes draw differently:
   - Shots from the Clifford register draw differently on every circuit that route
     serves: `Auto` and explicit `StabilizerRank` terminal shots of a Clifford+T circuit,
     and circuits whose mid-circuit measurements move to the end. The register is split

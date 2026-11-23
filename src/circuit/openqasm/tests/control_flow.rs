@@ -271,6 +271,45 @@ fn for_loop_uint_keyword_accepted() {
 }
 
 #[test]
+fn for_loop_variable_holds_values_as_its_declaration_does() {
+    let unrolled: String = (0..=5)
+        .map(|v| format!("uint[2] j{v} = {v}; x q[j{v}];"))
+        .collect();
+    for (looped, declared) in [
+        ("for uint[2] i in [0:5] { x q[i]; }", unrolled.as_str()),
+        (
+            "for uint[2] i in [3:3] { i = i + 1; x q[i]; }",
+            "uint[2] j = 3; j = j + 1; x q[j];",
+        ),
+        (
+            "for uint[2] i in [3:3] { x q[i + 1]; }",
+            "uint[2] j = 3; x q[j + 1];",
+        ),
+        (
+            "for int[8] i in {200} { if (i < 0) x q[0]; }",
+            "int[8] j = 200; if (j < 0) x q[0];",
+        ),
+        (
+            "for uint[8] i in [-1:-1] { rz(i) q[0]; }",
+            "uint[8] j = -1; rz(j) q[0];",
+        ),
+    ] {
+        let header = "OPENQASM 3.0;\nqubit[6] q;\n";
+        let expected = parse(&format!("{header}{declared}")).unwrap();
+        let source = format!("{header}{looped}");
+        let circuit = parse(&source).unwrap();
+        let program = parse_dynamic(&source).unwrap();
+        for actual in [&circuit, program.static_circuit().expect("static loop")] {
+            assert_eq!(
+                format!("{:?}", actual.instructions),
+                format!("{:?}", expected.instructions),
+                "`{looped}` against `{declared}`"
+            );
+        }
+    }
+}
+
+#[test]
 fn if_singleton_bit_selections_keep_guard_lowering() {
     for (condition, reference) in [
         ("c[0:0]", "c[0]"),

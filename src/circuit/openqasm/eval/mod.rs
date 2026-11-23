@@ -1142,10 +1142,15 @@ impl<'a> Parser<'a> {
                 Ok(())
             }
             StmtKind::For {
+                ty,
+                width,
                 variable,
                 range,
                 body,
-            } => self.exec_for(stmt, variable, range, body, line, out),
+            } => {
+                let ty = self.classical_type(ty, width.as_ref(), line)?;
+                self.exec_for(stmt, variable, ty, range, body, line, out)
+            }
             StmtKind::Switch { target, arms } if self.switch_needs_graph(stmt, target) => {
                 self.exec_switch_branches(target, arms, line)
             }

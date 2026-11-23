@@ -181,10 +181,12 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn exec_for(
         &mut self,
         stmt: &Stmt<'a>,
         variable: &'a str,
+        ty: ClassicalType,
         range: &ForRange<'a>,
         body: &Block<'a>,
         line: usize,
@@ -218,7 +220,7 @@ impl<'a> Parser<'a> {
         let shadowed_decl = Rc::make_mut(&mut self.classical).insert(
             variable,
             ClassicalDecl {
-                ty: ClassicalType::Int(RuntimeType::Int { width: 64 }),
+                ty,
                 constant: false,
                 value: None,
             },
@@ -253,7 +255,7 @@ impl<'a> Parser<'a> {
             // for one pass, while a write to an outer name carries on.
             self.param_vars
                 .get_or_insert_with(HashMap::new)
-                .insert(variable, ClassicalValue::Int(i128::from(value)));
+                .insert(variable, ty.store(ClassicalValue::Int(i128::from(value))));
             let was_nested = std::mem::replace(&mut self.nested, true);
             let produced = self.execute(body);
             self.nested = was_nested;

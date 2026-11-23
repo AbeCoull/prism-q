@@ -206,6 +206,31 @@ fn coupled_pair_matches_closed_form_in_register_order() {
 }
 
 #[test]
+fn leakage_from_counts_leakage_through_a_neighbour() {
+    // Site 1 at f0 - alpha puts |11> and |02> on resonance. Site 0 keeps two levels, so
+    // the exchange coupling, matrix element sqrt 2 g between them, is an exact two-level
+    // problem: the |11> population leaks as sin^2(2 pi sqrt 2 g t). The one-excitation
+    // manifold has no leaked state, so leakage() sees nothing.
+    let (f1, g) = (4.9e9, 3e6);
+    let device = Device::new([transmon(f1 + ALPHA, 2), transmon(f1, 3)]).couple(0, 1, g);
+    for duration in [30.0 * NS, 100.0 * NS] {
+        let mut schedule = Schedule::new(NS);
+        schedule.play(0, 0.0, duration, Envelope::Constant { amp: 0.0 });
+        let compiled = compile(&device, &schedule, 1).unwrap();
+        let expected = (TAU * 2f64.sqrt() * g * duration).sin().powi(2);
+        let leaked = compiled.leakage_from(&[1, 1]);
+        assert!(
+            (leaked - expected).abs() < 1e-12,
+            "leaked {leaked}, expected {expected}"
+        );
+        let stays = compiled.leakage_from(&[0, 2]);
+        assert!((stays - (1.0 - expected)).abs() < 1e-12, "stays {stays}");
+        assert!(compiled.leakage_from(&[0, 1]) < 1e-12);
+        assert!(compiled.leakage()[1][1] < 1e-6);
+    }
+}
+
+#[test]
 fn mixed_levels_factor_into_single_sites() {
     let single = pi_pulse(&Device::new([transmon(5e9, 3)]), drag_beta());
     let pair = pi_pulse(
@@ -227,6 +252,8 @@ fn mixed_levels_factor_into_single_sites() {
     }
     assert!((pair.leakage()[0][1] - single.leakage()[0][1]).abs() < 1e-15);
     assert_eq!(pair.leakage()[1], [0.0, 0.0]);
+    assert_eq!(single.leakage_from(&[1]), single.leakage()[0][1]);
+    assert!((pair.leakage_from(&[1, 1]) - single.leakage()[0][1]).abs() < 1e-15);
 }
 
 #[test]

@@ -26,9 +26,12 @@ const MIN_SINGULAR_VALUE: f64 = 1e-6;
 /// ideal gate's width differs from the number of sites, or on a three-qubit gate other
 /// than [`Gate::Unitary`] and [`Gate::Mcu`]; [`CompiledGate::error_after`] also panics on
 /// a three-site device, which no [`NoiseChannel`] variant can carry.
+/// [`CompiledGate::leakage_from`] panics unless `levels` names one level per site, each
+/// below that site's truncation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledGate {
     sites: usize,
+    levels: Vec<usize>,
     propagator: Vec<Complex64>,
     subspace: Vec<Complex64>,
     unitary: Vec<Complex64>,
@@ -72,6 +75,7 @@ impl CompiledGate {
 
         Ok(CompiledGate {
             sites,
+            levels,
             propagator: to_row_major(&propagator, dim),
             subspace: to_row_major(&block, width),
             unitary: to_row_major(&unitary, width),
@@ -96,10 +100,49 @@ impl CompiledGate {
         self.unitary.clone()
     }
 
-    /// Per site, the probability of leaving `{|0>, |1>}` from `|0>` and from `|1>`, with
-    /// every other site starting in `|0>`.
+    /// Per site, the probability that the site itself leaves `{|0>, |1>}` from `|0>` and
+    /// from `|1>`, with every other site starting in `|0>`. Leakage that needs an excited
+    /// neighbour, such as `|11>` to `|02>`, does not show here; see
+    /// [`CompiledGate::leakage_from`].
     pub fn leakage(&self) -> &[[f64; 2]] {
         &self.leakage
+    }
+
+    /// Total probability of ending outside the computational subspace, from the device
+    /// basis state with site `j` at level `levels[j]`.
+    ///
+    /// From a state with some site at `|2>` or above, one minus this is the probability of
+    /// returning to the computational subspace.
+    pub fn leakage_from(&self, levels: &[usize]) -> f64 {
+        assert_eq!(
+            levels.len(),
+            self.sites,
+            "{} levels for a device of {} sites",
+            levels.len(),
+            self.sites
+        );
+        let mut column = 0;
+        let mut stride = 1;
+        for (site, (&level, &truncation)) in levels.iter().zip(&self.levels).enumerate() {
+            assert!(
+                level < truncation,
+                "site {site} keeps {truncation} levels, asked for level {level}"
+            );
+            column += level * stride;
+            stride *= truncation;
+        }
+        let dim = stride;
+        (0..dim)
+            .filter(|&row| {
+                let mut rest = row;
+                self.levels.iter().any(|&truncation| {
+                    let level = rest % truncation;
+                    rest /= truncation;
+                    level >= 2
+                })
+            })
+            .map(|row| self.propagator[row * dim + column].norm_sqr())
+            .sum()
     }
 
     /// Average gate fidelity of [`CompiledGate::subspace`] against `ideal`, counting

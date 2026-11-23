@@ -283,7 +283,9 @@ A `box[d]` whose delays run past `d` is a `Parse` error.
 
 - Standard names and aliases: id/i, x, y, z, h, s, sdg, t, tdg, sx, rx, ry, rz, p/phase,
   cx/CX/cnot, cy, cz, cp/cphase, crx, cry, crz, ch, swap, ccx/toffoli, cswap/fredkin, cu,
-  u1, u2, u3/u/U.
+  cu1, cu3, u0, u1, u2, u3/u/U, c3sqrtx. The legacy `qelib1.inc` names follow that file's
+  definitions: `cu1` is `cp`, `cu3(θ, φ, λ)` is `cu(θ, φ, λ, 0)`, `u0` is the identity
+  and `c3sqrtx` is `sx` under three controls.
 - Braket spellings: si, ti, v, vi, phaseshift, cphaseshift, cphaseshift00,
   cphaseshift01, cphaseshift10, cv, ccnot, prx, pswap, xy, xx, yy, zz. Most name a gate
   the list above carries; `cphaseshift00/01/10`, `pswap` and `xy` are their own matrices.

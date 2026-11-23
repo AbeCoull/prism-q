@@ -15,11 +15,11 @@
 //! | Input parameter | `input float[64] theta;` `rx(-theta / 2) q[0];` | One named slot; [`parse_parametric`] returns them. An angle may be affine in one input, and an input may reach a gate or `def` body as an argument |
 //! | Input value | `input int[8] n;` | [`parse_parametric_with_inputs`] folds a supplied value as a declaration of that type would; a supplied `float` or `angle` is a constant rather than a slot |
 //! | Output declaration | `output bit[4] c;` | Declares the register; every bit is reported anyway |
-//! | 1-qubit gates | `h q[0]; x q[1];` | id/i, x, y, z, h, s, sdg/si, t, tdg/ti, sx/v, sxdg/vi, p/phase/phaseshift, r/prx, gpi, gpi2, u/U forms |
+//! | 1-qubit gates | `h q[0]; x q[1];` | id/i, x, y, z, h, s, sdg/si, t, tdg/ti, sx/v, sxdg/vi, p/phase/phaseshift, r/prx, gpi, gpi2, u0, u/U forms |
 //! | Parametric gates | `rx(pi/4) q[0];` | rx, ry, rz, cu, ms, arithmetic expressions with `pi`, math functions |
-//! | 2-qubit gates | `cx q[0], q[1];` | cx/cnot, cy, cz, ch, cs, csdg, cp/cphase/cphaseshift, cphaseshift00/01/10, crx, cry, crz, csx/cv, swap, pswap, xy, xx_plus_yy, xx_minus_yy, ecr, iswap, dcx, syc, sqrt_iswap |
+//! | 2-qubit gates | `cx q[0], q[1];` | cx/cnot, cy, cz, ch, cs, csdg, cp/cphase/cphaseshift, cu1, cu3, cphaseshift00/01/10, crx, cry, crz, csx/cv, swap, pswap, xy, xx_plus_yy, xx_minus_yy, ecr, iswap, dcx, syc, sqrt_iswap |
 //! | Pauli rotation | `rzz(t) q[0], q[1];` `rxyz(t) q[0], q[1], q[2];` | `r` plus the Pauli letters, one per qubit argument; `rxx`, `ryy`, `rzz` are the two-letter cases, also spelled `xx`, `yy`, `zz` |
-//! | Multi-qubit gates | `ccx q[0], q[1], q[2];` | ccx/toffoli/ccnot, ccz, cswap/fredkin, c3x, c4x, mcx, rccx, rc3x/rcccx |
+//! | Multi-qubit gates | `ccx q[0], q[1], q[2];` | ccx/toffoli/ccnot, ccz, cswap/fredkin, c3x, c3sqrtx, c4x, mcx, rccx, rc3x/rcccx |
 //! | Gate modifiers | `inv @ h q[0];` | `inv @`, `ctrl @` and `negctrl @` (chainable), `ctrl(n) @` and `negctrl(n) @` for `n` of them, `pow(k) @` for any real k. A control applies to whatever the gate expanded to, so it reaches a user `gate` and a lowered gate as well as a direct one; a fractional `pow` is the principal power of what the call expanded to |
 //! | Global phase | `gphase(pi/2);` `ctrl @ gphase(pi/2) q[0];` | Carried rather than dropped: it is observable through a `state_vector` result and under a control |
 //! | Classical declaration | `int n = 3;` `const float t = pi/4;` | `int`, `uint`, `bool`, `float`, `angle`, with an optional width. Folded at parse time, so the value reads as an index, a loop bound, a gate angle or a condition operand. An integer is exact and wraps at its width, 64 bits by default; a float is 16, 32, 64 or 128 bits, `float[16]` and `float[32]` rounding to half and single precision; `angle[n]` holds the nearest multiple of `2 pi / 2^n`, modulo `2 pi` |

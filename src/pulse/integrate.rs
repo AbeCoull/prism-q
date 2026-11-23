@@ -27,6 +27,8 @@ pub(super) struct Plan<'a> {
     site_hz: Vec<f64>,
     frame_hz: f64,
     static_phase: Vec<Complex64>,
+    #[cfg(test)]
+    reuse: bool,
 }
 
 impl<'a> Plan<'a> {
@@ -116,6 +118,8 @@ impl<'a> Plan<'a> {
             site_hz,
             frame_hz,
             static_phase,
+            #[cfg(test)]
+            reuse: true,
         })
     }
 
@@ -131,7 +135,11 @@ impl<'a> Plan<'a> {
         for index in 0..dim {
             total[index * dim + index] = ONE;
         }
-        let lags = self.walk(|step, _| total = multiply(step, &total, dim));
+        let mut product = vec![ZERO; dim * dim];
+        let lags = self.walk(|step, _| {
+            multiply_into(step, &total, &mut product, dim);
+            std::mem::swap(&mut total, &mut product);
+        });
         for row in 0..dim {
             let angle: f64 = (0..self.levels.len())
                 .map(|site| lags[site] * ((row / self.strides[site]) % self.levels[site]) as f64)
@@ -147,11 +155,13 @@ impl<'a> Plan<'a> {
     pub(super) fn populations(&self, initial: &[Complex64]) -> Vec<Vec<f64>> {
         let dim = self.dim;
         let mut state = initial.to_vec();
+        let mut next = vec![ZERO; dim];
         let mut rows = Vec::with_capacity(self.timeline.samples);
         self.walk(|step, sample_end| {
-            state = (0..dim)
-                .map(|row| (0..dim).map(|k| step[k * dim + row] * state[k]).sum())
-                .collect();
+            for (row, amplitude) in next.iter_mut().enumerate() {
+                *amplitude = (0..dim).map(|k| step[k * dim + row] * state[k]).sum();
+            }
+            std::mem::swap(&mut state, &mut next);
             if sample_end {
                 rows.push(state.iter().map(Complex64::norm_sqr).collect());
             }
@@ -175,6 +185,12 @@ impl<'a> Plan<'a> {
         let mut lag = vec![0.0f64; sites];
         let mut next_update = vec![0usize; sites];
         let mut next_play = vec![0usize; sites];
+        let mut hamiltonian = vec![ZERO; dim * dim];
+        let mut cache = StepCache {
+            exponent: vec![ZERO; dim * dim],
+            step: Vec::new(),
+            filled: false,
+        };
 
         let apply_updates =
             |sample: usize, carrier: &mut [f64], phase: &mut [f64], next_update: &mut [usize]| {
@@ -205,7 +221,7 @@ impl<'a> Plan<'a> {
             }
             for sub in 0..self.substeps {
                 let offset = (sub as f64 + 0.5) * self.segment;
-                let mut hamiltonian = self.static_phase.clone();
+                hamiltonian.copy_from_slice(&self.static_phase);
                 for (site, line) in self.timeline.lines.iter().enumerate() {
                     let Some(play) = line
                         .plays
@@ -221,7 +237,11 @@ impl<'a> Plan<'a> {
                     let coefficient = omega * Complex64::from_polar(PI * self.segment, angle);
                     self.add_drive(&mut hamiltonian, site, coefficient);
                 }
-                step(&exponential(&hamiltonian, dim), sub + 1 == self.substeps);
+                #[cfg(test)]
+                if !self.reuse {
+                    cache.filled = false;
+                }
+                step(cache.step(&hamiltonian, dim), sub + 1 == self.substeps);
             }
             for (lag, carrier) in lag.iter_mut().zip(&carrier) {
                 *lag += TAU * (carrier - self.frame_hz) * self.period;
@@ -277,6 +297,30 @@ fn reference_frequency(timeline: &Timeline<'_>, site_hz: &[f64]) -> f64 {
         })
 }
 
+/// The last segment's exponent and its exponential, reused while the exponent repeats bit
+/// for bit, as it does on a flat top driven at the integration frame.
+struct StepCache {
+    exponent: Vec<Complex64>,
+    step: Vec<Complex64>,
+    filled: bool,
+}
+
+impl StepCache {
+    fn step(&mut self, exponent: &[Complex64], dim: usize) -> &[Complex64] {
+        let repeated =
+            self.filled
+                && self.exponent.iter().zip(exponent).all(|(a, b)| {
+                    a.re.to_bits() == b.re.to_bits() && a.im.to_bits() == b.im.to_bits()
+                });
+        if !repeated {
+            self.exponent.copy_from_slice(exponent);
+            self.step = exponential(exponent, dim);
+            self.filled = true;
+        }
+        &self.step
+    }
+}
+
 /// `exp(-i H)` for a Hermitian `H` of dimensionless phases, column major.
 fn exponential(hamiltonian: &[Complex64], dim: usize) -> Vec<Complex64> {
     let (values, vectors) = hermitian_eigen(hamiltonian, dim);
@@ -288,6 +332,12 @@ fn exponential(hamiltonian: &[Complex64], dim: usize) -> Vec<Complex64> {
 /// `a * b` for column-major square matrices.
 pub(super) fn multiply(a: &[Complex64], b: &[Complex64], dim: usize) -> Vec<Complex64> {
     let mut out = vec![ZERO; dim * dim];
+    multiply_into(a, b, &mut out, dim);
+    out
+}
+
+fn multiply_into(a: &[Complex64], b: &[Complex64], out: &mut [Complex64], dim: usize) {
+    out.fill(ZERO);
     for column in 0..dim {
         for k in 0..dim {
             let scale = b[column * dim + k];
@@ -296,5 +346,78 @@ pub(super) fn multiply(a: &[Complex64], b: &[Complex64], dim: usize) -> Vec<Comp
             }
         }
     }
-    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Envelope, Transmon};
+    use super::*;
+
+    const NS: f64 = 1e-9;
+
+    fn transmon(frequency: f64) -> Transmon {
+        Transmon {
+            frequency,
+            anharmonicity: -300e6,
+            levels: 3,
+        }
+    }
+
+    fn same_bits(a: &[f64], b: &[f64]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+    }
+
+    fn flatten(matrix: &[Complex64]) -> Vec<f64> {
+        matrix.iter().flat_map(|z| [z.re, z.im]).collect()
+    }
+
+    #[test]
+    fn reused_steps_match_fresh_exponentials_bit_for_bit() {
+        let device = Device::new([transmon(5.0e9), transmon(4.9e9)]).couple(0, 1, 3e6);
+        let mut cross = Schedule::new(NS);
+        cross.set_frequency(0, 0.0, 4.9e9).play(
+            0,
+            0.0,
+            300.0 * NS,
+            Envelope::GaussianSquare {
+                amp: 20e6,
+                sigma: 10.0 * NS,
+                width: 260.0 * NS,
+            },
+        );
+        let mut mixed = cross.clone();
+        mixed.set_frequency(1, 0.0, 5.0e9).play(
+            1,
+            100.0 * NS,
+            50.0 * NS,
+            Envelope::Constant { amp: 5e6 },
+        );
+
+        for schedule in [&cross, &mixed] {
+            let mut plan = Plan::new(&device, schedule, 4).unwrap();
+            let mut previous: Vec<Complex64> = Vec::new();
+            let mut repeats = 0;
+            plan.walk(|step, _| {
+                if same_bits(&flatten(step), &flatten(&previous)) {
+                    repeats += 1;
+                }
+                previous = step.to_vec();
+            });
+            assert!(repeats > 500, "{repeats} repeated steps");
+
+            let initial = vec![Complex64::new(0.6, 0.0), Complex64::new(0.0, 0.8)]
+                .into_iter()
+                .chain(std::iter::repeat(ZERO))
+                .take(plan.dimension())
+                .collect::<Vec<_>>();
+            let cached = (plan.propagator(), plan.populations(&initial));
+            plan.reuse = false;
+            let fresh = (plan.propagator(), plan.populations(&initial));
+            assert!(same_bits(&flatten(&cached.0), &flatten(&fresh.0)));
+            assert_eq!(cached.1.len(), fresh.1.len());
+            for (a, b) in cached.1.iter().zip(&fresh.1) {
+                assert!(same_bits(a, b));
+            }
+        }
+    }
 }

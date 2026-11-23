@@ -310,6 +310,35 @@ fn for_loop_variable_holds_values_as_its_declaration_does() {
 }
 
 #[test]
+fn for_loop_body_may_be_one_statement() {
+    for (unbraced, braced) in [
+        (
+            "for int i in [0:2] x q[i];",
+            "for int i in [0:2] { x q[i]; }",
+        ),
+        (
+            "for int i in [0:1] for int j in [0:1] cx q[i], q[j + 2];",
+            "for int i in [0:1] { for int j in [0:1] { cx q[i], q[j + 2]; } }",
+        ),
+    ] {
+        let header = "OPENQASM 3.0;\nqubit[4] q;\n";
+        let expected = parse(&format!("{header}{braced}")).unwrap();
+        let source = format!("{header}{unbraced} h q[0];");
+        let circuit = parse(&source).unwrap();
+        let program = parse_dynamic(&source).unwrap();
+        for actual in [&circuit, program.static_circuit().expect("static loop")] {
+            let (body, tail) = actual.instructions.split_at(expected.instructions.len());
+            assert_eq!(
+                format!("{body:?}"),
+                format!("{:?}", expected.instructions),
+                "`{unbraced}` against `{braced}`"
+            );
+            assert!(matches!(tail, [Instruction::Gate { gate: Gate::H, .. }]));
+        }
+    }
+}
+
+#[test]
 fn if_singleton_bit_selections_keep_guard_lowering() {
     for (condition, reference) in [
         ("c[0:0]", "c[0]"),

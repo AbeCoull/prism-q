@@ -733,7 +733,7 @@ fn for_loop<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         return Err(stream.expected("`in` after a loop variable"));
     }
     let range = for_range(stream)?;
-    let body = braced_block(stream)?;
+    let body = body(stream)?;
     Ok(StmtKind::For {
         ty,
         width,

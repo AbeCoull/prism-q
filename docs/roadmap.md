@@ -26,6 +26,7 @@ says what each release promises.
 
 | Item | Status |
 | --- | --- |
+| A dense or MPS engine for each slice of a sliced tensor network contraction, for circuits whose peak passes the tensor network cap. A Clifford engine per slice is ruled out, since a sliced bond keeps every non-Clifford gate | Research |
 | Entanglement entropy and Schmidt values on the sparse, tensor-network and distributed backends | Needs a use case |
 | Device SVD for MPS runs at high bond dimension | Research |
 
@@ -84,8 +85,5 @@ binary.
 ## Not planned
 
 - A command-line tool. PRISM-Q is a Rust library and a Python package.
-- Single-precision amplitudes. Every backend computes in `f64` complex.
-- A separate engine for each slice of a sliced tensor network contraction. Slicing a
-  bond inserts a projector and keeps every T gate, so no slice becomes Clifford.
-- A C ABI, WASM bindings or QIR, until someone needs one. A discussion with the use case
+- Single-precision amplitudes. Every backend computes in `f64` complex.- A C ABI, WASM bindings or QIR, until someone needs one. A discussion with the use case
   reopens it.

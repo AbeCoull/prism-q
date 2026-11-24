@@ -1878,7 +1878,7 @@ fn born_weights_on_a_fresh_chain_match_the_dense_vector() {
 
     for site in 0..n {
         let mut b = base.clone();
-        let weights = b.born_weights(site);
+        let weights = b.born_weights(site).unwrap();
         assert_eq!(b.center, Some(site));
         b.assert_gauge(site);
 
@@ -3158,7 +3158,7 @@ fn the_walk_drops_a_column_only_where_it_carries_rounding() {
     let mut b = mps_after(&crate::circuits::brickwork_circuit(8, 6, 42), 4096);
     b.establish_center(0);
     let mark = b.qr_discarded;
-    b.project_z_outcome(3, false);
+    b.project_z_outcome(3, false).unwrap();
     let before = interior_bonds(&b);
     b.establish_center(0);
     b.move_center(7);
@@ -3179,8 +3179,8 @@ fn the_walk_drops_a_column_only_where_it_carries_rounding() {
     // twice its left, which is the case the rank cap decides rather than the
     // tolerance. This host reads 1.7e-96 out of the walk that crosses it.
     let mut b = mps_after(&crate::circuits::brickwork_circuit(8, 6, 42), 4096);
-    b.project_z_outcome(0, false);
-    b.project_z_outcome(1, false);
+    b.project_z_outcome(0, false).unwrap();
+    b.project_z_outcome(1, false).unwrap();
     let (site, t) = b
         .sites
         .iter()
@@ -3305,7 +3305,7 @@ fn a_truncated_chain_resets_and_reads_normalized_weights() {
     assert!((b.qubit_probability(0).unwrap() - 1.0).abs() < EPS);
     let rho = b.reduced_density_matrix_1q(1).unwrap();
     assert!((rho[0][0].re + rho[1][1].re - 1.0).abs() < EPS, "{rho:?}");
-    assert!((b.project_z_outcome(0, true) - 1.0).abs() < EPS);
+    assert!((b.project_z_outcome(0, true).unwrap() - 1.0).abs() < EPS);
 
     let circuit = truncated_bell_beside_a_one();
     for seed in 0..16 {
@@ -3318,6 +3318,97 @@ fn a_truncated_chain_resets_and_reads_normalized_weights() {
             p1.abs() < EPS,
             "seed {seed}: q0 reads one with {p1} after a reset"
         );
+    }
+}
+
+/// A Bell pair whose first site is scaled by 1e-16, so the chain carries a
+/// squared norm of 1e-32, under `NORM_CLAMP_MIN`, with half of it on each
+/// outcome.
+fn underweight_bell(seed: u64) -> MpsBackend {
+    let mut c = Circuit::new(2, 2);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    let mut b = MpsBackend::new(seed, 4);
+    b.init(2, 2).unwrap();
+    b.apply_instructions(&c.instructions).unwrap();
+    b.center = None;
+    for x in &mut b.sites[0].data {
+        *x *= 1e-16;
+    }
+    b
+}
+
+fn measure(b: &mut MpsBackend, qubit: usize, classical_bit: usize) -> bool {
+    b.apply(&Instruction::Measure {
+        qubit,
+        classical_bit,
+    })
+    .unwrap();
+    b.classical_results()[classical_bit]
+}
+
+#[test]
+fn a_low_weight_chain_collapses_on_measurement() {
+    for seed in 0..16 {
+        let mut b = underweight_bell(seed);
+        let first = measure(&mut b, 0, 0);
+        let p1 = b.qubit_probability(0).unwrap();
+        assert!(
+            p1.min(1.0 - p1) < EPS,
+            "seed {seed}: q0 reads one with {p1} after it was measured"
+        );
+        assert_eq!(measure(&mut b, 0, 1), first, "seed {seed}: q0 read twice");
+    }
+}
+
+#[test]
+fn a_low_weight_bell_pair_reads_correlated_bits() {
+    for seed in 0..16 {
+        let mut b = underweight_bell(seed);
+        let q0 = measure(&mut b, 0, 0);
+        assert_eq!(measure(&mut b, 1, 1), q0, "seed {seed}: the pair disagreed");
+    }
+}
+
+#[test]
+fn a_low_weight_chain_resets() {
+    for seed in 0..16 {
+        let mut b = underweight_bell(seed);
+        b.apply(&Instruction::Reset { qubit: 0 }).unwrap();
+        let p1 = b.qubit_probability(0).unwrap();
+        assert!(
+            p1.abs() < EPS,
+            "seed {seed}: q0 reads one with {p1} after a reset"
+        );
+    }
+}
+
+#[test]
+fn a_low_weight_chain_keeps_a_branch_with_half_its_weight() {
+    for outcome in [false, true] {
+        let mut b = underweight_bell(42);
+        let p = b.project_z_outcome(0, outcome).unwrap();
+        assert!((p - 0.5).abs() < EPS, "outcome {outcome} kept {p}");
+    }
+}
+
+#[test]
+fn a_chain_with_no_weight_left_refuses_to_collapse() {
+    for factor in [0.0, f64::NAN] {
+        let fresh = || {
+            let mut b = underweight_bell(42);
+            for x in &mut b.sites[0].data {
+                *x *= factor;
+            }
+            b
+        };
+        let measure = Instruction::Measure {
+            qubit: 0,
+            classical_bit: 0,
+        };
+        assert!(fresh().apply(&measure).is_err(), "{factor}: measured");
+        assert!(fresh().reset(0).is_err(), "{factor}: reset");
+        assert!(fresh().project_z_outcome(0, false).is_err(), "{factor}");
     }
 }
 

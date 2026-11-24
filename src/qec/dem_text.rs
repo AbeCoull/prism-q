@@ -345,8 +345,17 @@ impl State {
     fn detector_index(&mut self, target: u64, line: usize) -> Result<usize> {
         let index = target
             .checked_add(self.detector_offset)
-            .filter(|&index| index < u32::MAX as u64)
-            .ok_or_else(|| dem_error(line, "detector index out of range"))?;
+            .filter(|&index| index < QEC_MAX_INDEX as u64)
+            .ok_or_else(|| {
+                dem_error(
+                    line,
+                    format!(
+                        "detector index must be below {QEC_MAX_INDEX}, got {target} plus a \
+                         shift of {}",
+                        self.detector_offset
+                    ),
+                )
+            })?;
         self.num_detectors = self.num_detectors.max(index + 1);
         Ok(index as usize)
     }

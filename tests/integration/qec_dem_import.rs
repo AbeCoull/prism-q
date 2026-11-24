@@ -143,6 +143,25 @@ fn rejects_observable_indices_past_the_cap() {
     assert_eq!(model.num_observables(), 1 << 24);
 }
 
+#[test]
+fn rejects_detector_indices_past_the_cap() {
+    for text in [
+        "error(0.1) D16777216",
+        "error(0.1) D4294967294",
+        "detector(0, 0) D20000000",
+        "shift_detectors 16777215\nerror(0.1) D1",
+    ] {
+        let err = DetectorErrorModel::from_text(text).unwrap_err();
+        assert!(
+            matches!(&err, prism_q::PrismError::Parse { message, .. }
+                if message.contains("below 16777216")),
+            "{text}: {err}"
+        );
+    }
+    let model = DetectorErrorModel::from_text("shift_detectors 4090\nerror(0.1) D5").unwrap();
+    assert_eq!(model.num_detectors(), 4096);
+}
+
 fn derived_models() -> Vec<DetectorErrorModel> {
     let data: Vec<usize> = (0..9).collect();
     vec![

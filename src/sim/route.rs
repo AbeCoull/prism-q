@@ -970,21 +970,22 @@ fn trajectory_plan(
         let has = |wide: fn(&Gate) -> bool| {
             crate::circuit::any_gate(&circuit.instructions, &mut |gate| wide(gate))
         };
-        let lowering = if has(|gate| matches!(gate, Gate::QftBlock { .. })) {
-            Some(("QFT block", "circuit::expand_qft_blocks"))
-        } else if has(|gate| matches!(gate, Gate::PauliRot(_))) {
-            Some(("Pauli rotation", "circuit::expand_pauli_rotations"))
-        } else {
-            None
-        };
-        if let Some((form, expand)) = lowering {
+        let lowerings = [
+            has(|gate| matches!(gate, Gate::QftBlock { .. }))
+                .then_some("circuit::expand_qft_blocks"),
+            has(|gate| matches!(gate, Gate::PauliRot(_)))
+                .then_some("circuit::expand_pauli_rotations"),
+        ];
+        let lowerings: Vec<&str> = lowerings.into_iter().flatten().collect();
+        if !lowerings.is_empty() {
             return Err(crate::error::PrismError::IncompatibleBackend {
                 backend: format!("{:?}", plan.resolved()),
                 reason: format!(
                     "noisy trajectories apply the instruction stream raw so noise events \
-                     stay aligned to it, which leaves no room for the {form} lowering this \
-                     backend needs; run on the statevector, or expand the circuit with \
-                     {expand} and attach the noise model to the expanded circuit"
+                     stay aligned to it, which leaves no room for the lowering this backend \
+                     needs; run on the statevector, or expand the circuit with {} and attach \
+                     the noise model to the expanded circuit",
+                    lowerings.join(" and ")
                 ),
             });
         }

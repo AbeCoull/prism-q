@@ -6,7 +6,7 @@ use std::f64::consts::PI;
 
 use num_complex::Complex64;
 
-use super::region::any_bare_gate;
+use super::region::any_gate;
 use super::{Circuit, GuardedRegion, Instruction, smallvec};
 use crate::gates::Gate;
 
@@ -391,10 +391,11 @@ impl QftTextbookStep {
 
 /// Expand `Gate::QftBlock` instructions to textbook QFT gates.
 ///
-/// Backends without native support call this before dispatch. Returns
-/// `Cow::Borrowed` when there is nothing to expand.
+/// Backends without native support call this before dispatch. A block under an
+/// [`Instruction::Conditional`] becomes an [`Instruction::Region`] holding its
+/// gates. Returns `Cow::Borrowed` when there is nothing to expand.
 pub fn expand_qft_blocks(circuit: &Circuit) -> std::borrow::Cow<'_, Circuit> {
-    if !any_bare_gate(&circuit.instructions, &mut |gate| {
+    if !any_gate(&circuit.instructions, &mut |gate| {
         matches!(gate, Gate::QftBlock { .. })
     }) {
         return std::borrow::Cow::Borrowed(circuit);
@@ -443,6 +444,20 @@ fn expanded_qft_blocks(instructions: &[Instruction]) -> Vec<Instruction> {
                     }),
                 }
             }
+        } else if let Instruction::Conditional {
+            condition,
+            gate: gate @ Gate::QftBlock { .. },
+            targets,
+        } = inst
+        {
+            let bare = Instruction::Gate {
+                gate: gate.clone(),
+                targets: targets.clone(),
+            };
+            out.push(Instruction::Region(Box::new(GuardedRegion::new(
+                condition.clone(),
+                expanded_qft_blocks(&[bare]),
+            ))));
         } else if let Instruction::Region(region) = inst {
             out.push(Instruction::Region(Box::new(GuardedRegion::new(
                 region.condition().clone(),

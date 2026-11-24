@@ -982,3 +982,46 @@ fn trajectories_decline_a_gate_only_the_statevector_applies_and_name_the_lowerin
         }
     }
 }
+
+#[test]
+fn the_named_lowering_clears_a_guarded_wide_gate_under_noise() {
+    let mut circuit = Circuit::new(5, 5);
+    circuit.add_gate(Gate::X, &[0]);
+    circuit.add_measure(0, 0);
+    circuit.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::QftBlock {
+            start: 2,
+            num: 3,
+            inverse: false,
+            swaps: true,
+            big_endian: false,
+        },
+        targets: SmallVec::from_slice(&[2, 3, 4]),
+    });
+    circuit.add_pauli_rotation(0.7, &[PauliTerm::x(1), PauliTerm::y(2), PauliTerm::z(3)]);
+    for q in 1..5 {
+        circuit.add_measure(q, q);
+    }
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    match run_shots_with_noise(BackendKind::Sparse, &circuit, &noise, 4, 42) {
+        Err(PrismError::IncompatibleBackend { reason, .. }) => {
+            assert!(reason.contains("expand_qft_blocks"), "{reason}");
+            assert!(reason.contains("expand_pauli_rotations"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let lowered = circuit::expand_qft_blocks(&circuit);
+    let lowered = circuit::expand_pauli_rotations(&lowered).into_owned();
+    let lowered_noise = NoiseModel::uniform_depolarizing(&lowered, 0.01);
+    for kind in [
+        BackendKind::Sparse,
+        BackendKind::Mps { max_bond_dim: 8 },
+        BackendKind::Factored,
+        BackendKind::TensorNetwork,
+    ] {
+        let shots = run_shots_with_noise(kind.clone(), &lowered, &lowered_noise, 4, 42)
+            .unwrap_or_else(|err| panic!("{kind:?}: {err}"));
+        assert_eq!(shots.shots.len(), 4, "{kind:?}");
+    }
+}

@@ -618,3 +618,95 @@ fn wide_gates_over_the_statevector_cap_plan_and_run() {
         }
     }
 }
+
+// A guard that fires with certainty over a gate only the statevector applies. The
+// QFT case undoes a flat state and the rotation flips its three qubits, so every
+// measured bit is certain and a guard that did not lower reads as a wrong record.
+fn guarded_wide_gate_circuits() -> [(&'static str, Circuit, Vec<bool>); 2] {
+    let build = |flat: bool, wide: Gate| {
+        let mut circuit = Circuit::new(5, 5);
+        circuit.add_gate(Gate::X, &[0]);
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        if flat {
+            for q in 2..5 {
+                circuit.add_gate(Gate::H, &[q]);
+            }
+        }
+        circuit.add_measure(0, 0);
+        circuit
+            .instructions
+            .push(prism_q::Instruction::Conditional {
+                condition: prism_q::ClassicalCondition::BitIsOne(0),
+                gate: wide,
+                targets: [2, 3, 4].into_iter().collect(),
+            });
+        for q in 1..5 {
+            circuit.add_measure(q, q);
+        }
+        circuit
+    };
+    let qft = Gate::QftBlock {
+        start: 2,
+        num: 3,
+        inverse: false,
+        swaps: true,
+        big_endian: false,
+    };
+    let mut rotation = Circuit::new(5, 0);
+    rotation.add_pauli_rotation(
+        std::f64::consts::PI,
+        &[PauliTerm::x(2), PauliTerm::x(3), PauliTerm::x(4)],
+    );
+    let prism_q::Instruction::Gate { gate: rotation, .. } = rotation.instructions.remove(0) else {
+        unreachable!()
+    };
+    [
+        (
+            "qft",
+            build(true, qft),
+            vec![true, true, false, false, false],
+        ),
+        ("pauli rotation", build(false, rotation), vec![true; 5]),
+    ]
+}
+
+#[test]
+fn a_guarded_wide_gate_lowers_on_every_backend() {
+    for (name, circuit, record) in guarded_wide_gate_circuits() {
+        let key = vec![
+            record
+                .iter()
+                .rev()
+                .fold(0u64, |acc, &bit| acc << 1 | u64::from(bit)),
+        ];
+        let capped = Limits::new().max_statevector_qubits(4);
+        for (kind, limits) in [
+            (BackendKind::Statevector, Limits::new()),
+            (BackendKind::Sparse, Limits::new()),
+            (BackendKind::Mps { max_bond_dim: 8 }, Limits::new()),
+            (BackendKind::Factored, Limits::new()),
+            (BackendKind::TensorNetwork, Limits::new()),
+            (BackendKind::Auto, capped),
+        ] {
+            let request = || {
+                simulate(&circuit)
+                    .backend(kind.clone())
+                    .limits(limits)
+                    .seed(42)
+            };
+            for query in [Query::Run, Query::Shots(8), Query::Counts(8)] {
+                let plan = request().plan(query).unwrap();
+                assert!(plan.would_fail.is_none(), "{name} {kind:?}");
+            }
+            let result = request().run().unwrap();
+            assert_eq!(result.classical_bits, record, "{name} {kind:?}");
+            let result = request().shots(8).unwrap();
+            assert!(
+                result.shots.iter().all(|shot| *shot == record),
+                "{name} {kind:?}"
+            );
+            let result = request().sample_counts(8).unwrap();
+            assert_eq!(result.counts.get(&key), Some(&8), "{name} {kind:?}");
+        }
+    }
+}

@@ -1,7 +1,7 @@
 //! Pauli rotation lowering to CNOT ladders, and the basis rotations behind Pauli-product
 //! measurement.
 
-use super::region::any_bare_gate;
+use super::region::any_gate;
 use super::{Circuit, GuardedRegion, Instruction, SmallVec, smallvec};
 use crate::gates::{Gate, PauliRotData};
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
@@ -152,9 +152,11 @@ pub(crate) fn append_parity_rotations<S: GateSink>(
 }
 
 /// Expand `Gate::PauliRot` instructions to the CNOT-ladder lowering, for backends
-/// without the native kernel. Returns `Cow::Borrowed` when there is nothing to expand.
+/// without the native kernel. A rotation under an [`Instruction::Conditional`]
+/// becomes an [`Instruction::Region`] holding its ladder. Returns `Cow::Borrowed`
+/// when there is nothing to expand.
 pub fn expand_pauli_rotations(circuit: &Circuit) -> std::borrow::Cow<'_, Circuit> {
-    if !any_bare_gate(&circuit.instructions, &mut |gate| {
+    if !any_gate(&circuit.instructions, &mut |gate| {
         matches!(gate, Gate::PauliRot(_))
     }) {
         return std::borrow::Cow::Borrowed(circuit);
@@ -178,6 +180,20 @@ fn expanded_pauli_rotations(instructions: &[Instruction]) -> Vec<Instruction> {
                     targets: SmallVec::from_slice(tgts),
                 });
             });
+        } else if let Instruction::Conditional {
+            condition,
+            gate: gate @ Gate::PauliRot(_),
+            targets,
+        } = inst
+        {
+            let bare = Instruction::Gate {
+                gate: gate.clone(),
+                targets: targets.clone(),
+            };
+            out.push(Instruction::Region(Box::new(GuardedRegion::new(
+                condition.clone(),
+                expanded_pauli_rotations(&[bare]),
+            ))));
         } else if let Instruction::Region(region) = inst {
             out.push(Instruction::Region(Box::new(GuardedRegion::new(
                 region.condition().clone(),

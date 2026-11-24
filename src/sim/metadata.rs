@@ -212,7 +212,9 @@ impl RunMetadata {
     /// certificate. Errors compound across SVDs, and summing the weights
     /// understates the compounded error, since the strict bound on the
     /// infidelity is the square of the summed square roots. The two agree
-    /// only when a single SVD truncates. The sparse backend at a raised
+    /// only when a single SVD truncates. A chain that truncates heavily can
+    /// carry the summed discard past 1, where the bound clamps to zero and
+    /// certifies nothing. The sparse backend at a raised
     /// pruning threshold reports 1 minus the absolute squared weight it
     /// dropped, the same first-order estimate; it renormalizes what it keeps,
     /// so the dropped weight is the whole of the error it reports. The

@@ -310,9 +310,9 @@ compiled sampler copies the record onto a fresh alias instead and accepts the re
 Noise never executes during compiled sampling. It compiles into record flips: the
 deferred lowering produces the noiseless circuit plus positioned noise events, and
 backward Pauli propagation walks the circuit in reverse, carrying each
-measurement's observable to each event position. Every event becomes sensitivity rows:
-for each noise branch, the records whose propagated Pauli anticommutes with the
-injected error, packed as flip masks. A program whose records are read starts every shot
+measurement's observable to each event position. For a program whose records are
+sampled, the walk carries one record fingerprint word per live alias and keeps an event
+when one of its branches moves that word. A program whose records are read starts every shot
 from one noiseless reference run: a stabilizer tableau run of the program with every
 random outcome forced to 0. A fair-coin Pauli Z at the birth of each alias (an initial
 qubit, a reset, a Pauli-product scratch qubit) spreads it over the noiseless outcome
@@ -324,12 +324,13 @@ as it reaches it. Compile memory then follows the live qubit count rather than r
 times aliases. The same walk reads the noiseless detector and observable values from
 the propagated signs, and falls back to the record path if any is random. A
 noiseless program takes the same walk with no events, at cost live qubits times
-records. Compiling the deferred circuit forward grew with the square of the record
-count.
+records. On the record path the walk carries the fingerprint word alone, so its compile
+also follows the live qubit count rather than the record count.
 
 At sample time the reference records fill every shot, then the coins and faults land
-through a Pauli frame walked forward over the deferred circuit. Each noise event XORs its
-branch flip masks into the shot-major record buffer. Small-probability events skip
+through a Pauli frame walked forward over the deferred circuit: a fault lands on its
+alias's frame at its anchor, the gates push the frame on, and an alias's X frame at its
+last use is the flip of its record. Small-probability events skip
 between firing shots by geometric sampling. Dense events (probability at or above `0.5`,
 or a unit of fewer than 32 shots) iterate every shot. `DEPOLARIZE2` precomputes the flip
 masks of all 15 non-identity two-qubit Pauli branches and picks one uniformly per

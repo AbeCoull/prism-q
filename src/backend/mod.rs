@@ -694,8 +694,9 @@ pub trait Backend: sealed::Sealed {
         Exactness::Exact
     }
 
-    /// Where the state lived during the run. Only the statevector has a device
-    /// path, and only when the `gpu` feature is on.
+    /// Where the state lived during the run. The default reports the host; the
+    /// statevector and the density matrix report a device when their buffer sits
+    /// on one under the `gpu` feature.
     fn placement(&self) -> Placement {
         Placement::Host
     }

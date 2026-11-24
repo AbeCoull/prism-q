@@ -19,22 +19,14 @@ says what each release promises.
 
 | Item | Status |
 | --- | --- |
-| Shorter time to first shot on large surface code memory experiments, where parsing and compiling the program take most of a single-shot run | Planned |
-| Readout faults on mid-circuit measurements that flip the recorded bit, and every conditional that reads it, without touching the state | Planned |
 | Raise two [declared limits](./guides/capabilities.md#declared-limits): `EXP_VAL` past 64 qubits on the reference QEC runner, and analytical postselection past 12 rows | Planned |
 | Error mitigation primitives on the expectation-value API | Needs a use case |
-
-## Stabilizer and Clifford+T
-
-| Item | Status |
-| --- | --- |
-| Exact Clifford+T sampling when the T gates reach more than 20 qubits, by splitting the register into independent parts that each stay within the width cap | Research |
 
 ## Large structured circuits
 
 | Item | Status |
 | --- | --- |
-| Per-slice engine choice when a tensor-network contraction is sliced, so a Clifford slice runs on the stabilizer tableau | Research |
+| A dense or MPS engine for each slice of a sliced tensor network contraction, for circuits whose peak passes the tensor network cap. A Clifford engine per slice is ruled out, since a sliced bond keeps every non-Clifford gate | Research |
 | Entanglement entropy and Schmidt values on the sparse, tensor-network and distributed backends | Needs a use case |
 | Device SVD for MPS runs at high bond dimension | Research |
 
@@ -42,7 +34,6 @@ says what each release promises.
 
 | Item | Status |
 | --- | --- |
-| OpenQASM 3 constructs that decline today: private measurement storage in subroutines and the `complex` type. [The subset](./guides/openqasm.md#the-subset) lists the rest | Planned |
 | Conversion from Python circuit frameworks, behind an optional dependency | Planned |
 | Checkpoint and resume across processes, which needs a state format first | Research |
 | Gate channels from a pulse-level device model. A closed-system compile to a unitary and leakage rates ships behind the `unstable-pulse` feature (see [Noise Models](./guides/noise.md#gates-compiled-from-pulses)); a Lindblad channel during the gate and OpenPulse input wait on a caller | Needs a use case |
@@ -51,7 +42,6 @@ says what each release promises.
 
 | Item | Status |
 | --- | --- |
-| Stabilizer measurement that stays on the device instead of reading back to the host each time; the device tableau runs slower than the CPU today | Research |
 | Two-qubit Kraus noise and dense three- and four-qubit unitaries on the device statevector, which declines both | Needs a use case |
 
 ## CPU reach
@@ -74,8 +64,10 @@ says what each release promises.
 
 ## Hardware that would help
 
-Thresholds and tile sizes were tuned on one desktop, an Intel i7-6700K with a GTX
-1080 Ti (see [Performance](./performance/index.md)). The Needs hardware items wait on one of
+The thresholds and tile sizes in the source were tuned on an Intel i7-6700K with a GTX
+1080 Ti and have not been derived again on the current development host, an Intel Core
+Ultra 7 270K Plus with a 16 GiB RTX 5070 Ti, which
+[Performance](./performance/index.md) describes. The Needs hardware items wait on one of
 these:
 
 - an x86-64 CPU with AVX-512
@@ -93,6 +85,5 @@ binary.
 ## Not planned
 
 - A command-line tool. PRISM-Q is a Rust library and a Python package.
-- Single-precision amplitudes. Every backend computes in `f64` complex.
-- A C ABI, WASM bindings or QIR, until someone needs one. A discussion with the use case
+- Single-precision amplitudes. Every backend computes in `f64` complex.- A C ABI, WASM bindings or QIR, until someone needs one. A discussion with the use case
   reopens it.

@@ -63,8 +63,9 @@ says what each release promises.
 
 ## Hardware that would help
 
-Thresholds and tile sizes were tuned on one desktop at a time: first an Intel i7-6700K
-with a GTX 1080 Ti, now an Intel Core Ultra 7 270K Plus with a 16 GiB RTX 5070 Ti, which
+The thresholds and tile sizes in the source were tuned on an Intel i7-6700K with a GTX
+1080 Ti and have not been derived again on the current development host, an Intel Core
+Ultra 7 270K Plus with a 16 GiB RTX 5070 Ti, which
 [Performance](./performance/index.md) describes. The Needs hardware items wait on one of
 these:
 

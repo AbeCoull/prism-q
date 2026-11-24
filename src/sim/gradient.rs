@@ -783,10 +783,10 @@ pub fn run_expectation_gradient_shift(
 /// them together is a different quantity: two `Rx(θ)` on one qubit under `⟨Z⟩`
 /// give `cos 2θ`, whose joint ±π/2 shift is zero rather than `-2 sin 2θ`.
 ///
-/// Under `noise` every forward evaluation reads the exact mixture, so `kind`
-/// must be a density-matrix kind, which the caller checks. The channels do not
-/// depend on the shifted angle, so `⟨H⟩` stays a degree-1 trigonometric
-/// polynomial in it and the shift is still exact.
+/// Under `noise`, `kind` must be a density-matrix kind, whose evaluations read the
+/// exact mixture, or `PauliPath`, which carries the channels through its truncated
+/// Pauli sum; the caller checks. The channels do not depend on the shifted angle,
+/// so `⟨H⟩` stays a degree-1 trigonometric polynomial in it and the shift rule holds.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn shift_gradient(
     kind: &BackendKind,

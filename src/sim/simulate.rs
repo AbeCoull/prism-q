@@ -1021,7 +1021,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// backend must be [`BackendKind::DensityMatrix`] or its device sibling,
     /// where every evaluation reads the exact mixture, or
     /// [`BackendKind::PauliPath`], which carries the channels through its
-    /// truncated Pauli sum. The shift stays exact because the channels do not
+    /// truncated Pauli sum. The shift rule holds because the channels do not
     /// depend on the shifted angle. See
     /// [`gradient::run_expectation_gradient_shift`].
     #[inline]

@@ -201,6 +201,46 @@ fn tensor_network_fallback_refuses_an_over_cap_observable_without_slicing() {
 }
 
 #[test]
+fn only_a_lowering_refusal_reroutes_to_the_reference_runner() {
+    use crate::error::{ResourceKind, ResourceLimit};
+    use crate::limits::LimitSource;
+
+    let refusal = PrismError::IncompatibleBackend {
+        backend: "QEC deferred lowering".to_string(),
+        reason: "cannot lower".to_string(),
+    };
+    assert!(is_lowering_refusal(&refusal));
+    let cap = PrismError::ResourceLimit(Box::new(ResourceLimit {
+        backend: "statevector".to_string(),
+        operation: "allocation".to_string(),
+        resource: ResourceKind::Qubits,
+        required: 40,
+        limit: 29,
+        env_var: None,
+        knob: None,
+        limit_source: LimitSource::Detected,
+    }));
+    assert!(!is_lowering_refusal(&cap));
+    let malformed = PrismError::InvalidQubit {
+        index: 3,
+        register_size: 2,
+    };
+    assert!(!is_lowering_refusal(&malformed));
+
+    let mut non_terminal = QecProgram::with_options(1, options(16));
+    non_terminal
+        .expectation_value(&[super::super::QecPauli::z(0)], 1.0)
+        .unwrap();
+    non_terminal.push_gate(Gate::X, &[0]).unwrap();
+    let lowering_error = lower_pauli_observables(&non_terminal).err().unwrap();
+    assert!(!is_lowering_refusal(&lowering_error), "{lowering_error}");
+    assert_eq!(
+        run_qec_program_auto_or_reference(&non_terminal).unwrap_err(),
+        lowering_error
+    );
+}
+
+#[test]
 fn auto_uses_tensor_network_when_spd_nonexact_and_camps_fails() {
     let program = h_t_h_program(256);
     let expected = run_qec_program_tensor_network_observable(&program).unwrap();

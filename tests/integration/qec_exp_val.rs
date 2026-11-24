@@ -334,6 +334,30 @@ fn exp_val_falls_back_to_the_reference_runner_when_the_ladder_cannot_lower() {
 }
 
 #[test]
+fn exp_val_fallback_failure_names_the_lowering_refusal() {
+    let mut program = program_with_shots(40, 4);
+    program.push_gate(Gate::X, &[0]).unwrap();
+    let record = QecRecordRef::absolute(program.measure_z(0).unwrap());
+    let correction = vec![QecOp::Gate {
+        gate: Gate::X,
+        targets: vec![39],
+    }];
+    program.feedforward(&[record], true, correction).unwrap();
+    program.expectation_value(&[QecPauli::z(39)], 1.0).unwrap();
+
+    let err = run_qec_program(&program).unwrap_err();
+    let message = err.to_string();
+    assert!(
+        matches!(&err, prism_q::PrismError::ResourceLimit(limit) if limit.required == 40),
+        "{message}"
+    );
+    assert!(
+        message.contains("FEEDFORWARD") && message.contains("needs 40 qubits"),
+        "{message}"
+    );
+}
+
+#[test]
 fn exp_val_under_leakage_names_what_to_drop() {
     let program = QecProgram::from_text("LEAK(0.1) 0\nEXP_VAL Z0").unwrap();
     let err = run_qec_program(&program).unwrap_err();

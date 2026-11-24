@@ -67,12 +67,39 @@ pub fn run_qec_program_with_strategy(
 }
 
 /// Run the Auto ladder, or [`run_qec_program_reference`] when the analytical lowering
-/// refuses the program; an error after lowering is returned as is.
+/// refuses the program. Any other lowering error, and any error after lowering, is
+/// returned as is; a failed reference run carries the refusal in its error.
 pub(super) fn run_qec_program_auto_or_reference(program: &QecProgram) -> Result<QecSampleResult> {
-    let Ok(lowered) = lower_pauli_observables(program) else {
-        return run_qec_program_reference(program);
-    };
-    run_qec_program_auto(program, &lowered)
+    match lower_pauli_observables(program) {
+        Ok(lowered) => run_qec_program_auto(program, &lowered),
+        Err(refusal) if is_lowering_refusal(&refusal) => run_qec_program_reference(program)
+            .map_err(|reference_error| with_lowering_refusal(reference_error, &refusal)),
+        Err(err) => Err(err),
+    }
+}
+
+/// The analytical lowering reports a program shape it cannot express (noise, detectors,
+/// `FEEDFORWARD`, reuse without reset, a gate on three or more qubits) as
+/// `IncompatibleBackend`. Every other variant is a malformed program or a resource cap.
+fn is_lowering_refusal(err: &PrismError) -> bool {
+    matches!(err, PrismError::IncompatibleBackend { .. })
+}
+
+fn with_lowering_refusal(reference_error: PrismError, refusal: &PrismError) -> PrismError {
+    let context = format!("the analytical ladder refused the program ({refusal})");
+    match reference_error {
+        PrismError::ResourceLimit(mut limit) => {
+            limit.operation = format!(
+                "{context}, and its reference fallback for {}",
+                limit.operation
+            );
+            PrismError::ResourceLimit(limit)
+        }
+        other => PrismError::IncompatibleBackend {
+            backend: "QEC EXP_VAL routing".to_string(),
+            reason: format!("{context}, and its reference fallback failed: {other}"),
+        },
+    }
 }
 
 fn run_qec_program_auto(

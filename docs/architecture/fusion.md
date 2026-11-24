@@ -139,7 +139,8 @@ expanded QFT back into one block, so a QFT parsed from OpenQASM runs as the FFT 
 than as `n^2 / 2` controlled phases. It matches every sequence `qft_textbook_steps`
 emits: forward or inverse, with or without the bit-reversal swaps, in either label order.
 The phases of one column may come in any order with either qubit as control, and the
-swaps in any order, which covers the gate order Qiskit's QFT decomposes to. Each phase
+swaps in any order, so a decomposition that emits each column's phases from the nearest
+qubit outward, or puts the control on the other qubit, still folds. Each phase
 must equal `e^{±iπ/2^d}` to within `1e-12`, so an approximate QFT stays as gates.
 
 Only ranges the FFT runs natively fold: blocks starting at `q[0]` that span the register

@@ -121,6 +121,9 @@ feature, and `pip install "prism-q[cuda12]"` adds NVRTC from PyPI. See
 | `kernels/bts.rs` | Launchers for compiled BTS shot sampling; source in `kernels/bts.cu` |
 | `kernels/density.rs` | Launchers for the density-matrix path: sandwiches, Kraus channels, projection and Pauli expectation; source in `kernels/density.cu` |
 
+Kernel design notes live in the module docstrings under `src/gpu/kernels/`. The
+statevector crossover measurement is on `MIN_QUBITS_DEFAULT` in `src/gpu/mod.rs`.
+
 ## Kernel coverage
 
 Every `Gate` variant runs on the device, though not each through a kernel of its own.
@@ -201,7 +204,10 @@ The golden equality tests do not cover three limits on what a seed guarantees.
 - Stabilizer `probabilities()`, `export_tableau()`, and `export_statevector()` read
   back to the CPU.
 - Every trajectory shot rebuilds the backend and reallocates the device buffer,
-  measured at 0.1 ms per shot at 20 qubits. `Custom` Kraus branch probabilities come
-  from the qubit's reduced density matrix, computed on the device (`rdm_qubit`).
-- Kernel design notes live in the module docstrings under `src/gpu/kernels/`. The
-  statevector crossover measurement is on `MIN_QUBITS_DEFAULT` in `src/gpu/mod.rs`.
+  measured at 0.1 ms per shot at 20 qubits.
+- A one-qubit `Custom` Kraus channel with more than 16 operators, or with an operator
+  whose diagonal test depends on the branch weight, picks its branch on the host from a
+  reduced density matrix read back from the device (`rdm_qubit`). Damping, thermal
+  relaxation and the other `Custom` channels pick the branch on the device.
+- The device statevector declines two-qubit Kraus channels, so `Auto` with a device
+  keeps such a model on the host statevector.

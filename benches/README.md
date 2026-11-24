@@ -237,7 +237,7 @@ baseline and comparing later.
 ./scripts/bench_ab.sh --build-only /tmp/ref-circuits             # build a reference to reuse
 ./scripts/bench_ab.sh -f '^sparse/' --ref-exe /tmp/ref-circuits  # skip the reference build
 ./scripts/bench_ab.sh -f '^x/affected/' -c '^x/control/'         # controls at 10 samples
-./scripts/bench_ab.sh -f '^statevector/' --light                 # triage tier, about a fifth of the time
+./scripts/bench_ab.sh -f '^statevector/' --light                 # triage tier, about a third of the time
 ./scripts/bench_ab.sh -f '^statevector/' --light --escalate      # then the full tier on rows that moved
 ./scripts/bench_ab.sh -f '^sparse/' -c '^mps/random_d10/16$' --interleave  # interleaved rounds, below
 ```

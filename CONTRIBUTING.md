@@ -167,8 +167,8 @@ lands between them, and a byte-identical control group has read as much as +98%.
 every change with its control column, and say when a delta sits inside the noise floor.
 `benches/README.md` has the method and the rows the A/B cannot resolve.
 
-Stored baselines still serve for tracking a number over weeks and for the CI gate,
-where both sides run in one job:
+Stored baselines still serve for tracking a number over weeks. They are not a gate: the
+CI gate runs the same A/B through `scripts/bench_ci.sh`.
 
 ```bash
 cargo bench --features parallel

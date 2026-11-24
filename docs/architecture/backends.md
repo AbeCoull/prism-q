@@ -181,9 +181,12 @@ Single-qubit gates absorb with FMA SIMD over bond-dimension slices. Two-qubit ga
 contract adjacent sites, apply, and SVD-truncate back; non-adjacent gates route through
 SWAP chains. The SVD is faer's for `m×n ≥ 256` and a Jacobi sweep below.
 
-Once any bond reaches 128, a truncating cut first moves the orthogonality center to the
-cut, so the discarded singular weight is the state's 2-norm error. Below that, cuts run
-ungauged and treat drops under four machine epsilons of the largest value as rounding.
+A cut that can reach the bond cap first moves the orthogonality center to the cut, at any
+bond, so the discarded singular weight is the state's 2-norm error. A threshold cut does
+the same once any bond reaches 128. Below that, a threshold cut runs ungauged and treats
+drops under four machine epsilons of the largest value as rounding; one that would drop a
+larger value is thrown away and made again in gauge. Once a center is recorded, every
+later two-qubit gate keeps it.
 
 ## Product State
 
@@ -219,10 +222,10 @@ A one-qubit reduced density matrix and a Pauli expectation contract the network 
 its conjugate, so they cost what the doubled network costs. An identity factor is a
 closed leg: a weight-`k` observable adds `k` tensors, not `n`.
 
-The trajectory engine needs only that one-qubit reduction for general noise, so
-amplitude damping, phase damping, thermal relaxation and one-qubit custom Kraus
-channels run here under explicit dispatch. Two-qubit Kraus channels do not, because the
-backend declines the two-qubit reduction.
+The trajectory engine draws general noise from the one- and two-qubit reductions, so
+amplitude damping, phase damping, thermal relaxation and custom Kraus channels on one or
+two qubits run here under explicit dispatch. The two-qubit reduction is the same doubled
+contraction with both qubits' ket and bra legs left open.
 
 ## Factored
 
@@ -251,8 +254,10 @@ budgeted against free memory at `init`. An 11 GiB card holds 14 qubits, so the d
 for throughput, not width. `Auto` and `AutoGpu` never select either kind, and the device
 kind has no host fallback.
 
-With a noise model attached it is the exact route for every `Simulate` terminal except
-the adjoint gradient, which needs a pure state to walk backward. `run` and `marginals`
+With a noise model attached it is the exact route for every `Simulate` terminal that
+reads a mixture. Four decline because they need a pure state: the adjoint gradient,
+which walks one backward, and `state_vector`, `overlap` and `entanglement_entropy`,
+whose answers a mixture does not define. `run` and `marginals`
 reject a model carrying readout error and point at `sample_counts`.
 [Noise across the terminals](./engine.md#noise-across-the-terminals) has the full rules.
 

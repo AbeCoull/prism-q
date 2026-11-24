@@ -115,7 +115,9 @@ payloads change whenever its width differs from the comparison run's.
   are collected in shot order. Pauli-noise runs that simulate each distinct error pattern
   once keep the rule, since a shot's pattern, outcome and readout flips all draw from its
   own seed. So do damping runs that walk the shared no-jump state once: a shot copies the
-  walk where its own draws leave it, whichever worker walked that far.
+  walk where its own draws leave it, whichever worker walked that far. Pauli noise on a
+  Clifford circuit usually takes the compiled family instead, and on the noisy compiled
+  sampler its shots depend on the pool width (see compiled sampling below).
 - **Native block sampling: bitwise for a given seed, at any thread count.** The sparse,
   factored and product-state samplers draw shots in blocks of 256, each block from its
   own ChaCha8 stream keyed on the block index. The blocks depend on the shot count
@@ -159,7 +161,10 @@ payloads change whenever its width differs from the comparison run's.
   `rayon::current_num_threads()`, so another pool width yields a different, equally
   distributed shot set. Pin the width when byte-identical payloads matter across
   machines: `RAYON_NUM_THREADS` on the global path, the `ThreadPool::with_threads` width
-  on the scoped one. Within a stream the AVX-512, AVX2, NEON and scalar kernels lay the
+  on the scoped one. The noisy compiled sampler, which takes Pauli noise on most
+  Clifford circuits, depends on the width the same way: from 4,096 shots its scalar and pair noise passes
+  split the shots into one chunk per Rayon thread and seed each chunk from the master
+  stream, so one seed gives different shots at another pool width. Within a stream the AVX-512, AVX2, NEON and scalar kernels lay the
   same four xoshiro lanes over the shot words, so an x86 host and an Apple or Graviton
   host draw the same shots from one seed;
   `tests/integration/qec_ir.rs` pins the noiseless fingerprint on every CI platform.

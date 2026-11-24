@@ -95,9 +95,11 @@ serves as the mixture oracle.
 
 `expectation_gradient` rejects a noise model on every backend, because the adjoint method
 backpropagates through a pure state. `expectation_gradient_shift` accepts one on the
-density matrix kinds: the channels do not depend on the shifted angle, so the shift rule
-holds and each of the `1 + 2 * links` evaluations reads the exact mixture. Other backends
-reject the pair, naming the density matrix.
+density matrix kinds and on `BackendKind::PauliPath`: the channels do not depend on the
+shifted angle, so the shift rule holds. On the density matrix each of the `1 + 2 * links`
+evaluations reads the exact mixture; the Pauli path applies each channel's adjoint and
+is approximate only where its budget truncates. Other backends reject the pair, naming
+the density matrix.
 
 ## Result provenance
 
@@ -171,7 +173,7 @@ Each of these is tested before the state route, with its own constants in
 | Clifford register parts (stabilizer rank) | An expectation or marginals terminal, or `probabilities_of` on at most 10 qubits, on a unitary Clifford+T circuit. Each observable pulled through the Clifford is a product of one factor per part, the register qubits that excess T rotations link: a lone qubit's Bloch vector, a dense array of the part up to 20 qubits, or the observable propagated back through up to 20 excess rotations of the part, whichever costs less. From 12 qubits under the statevector cap when the tableau, priced at `(instructions + t n) n` letter updates, plus the parts cost less than the dense run, at the register's 25 statevector instruction-amplitudes per unit; above the cap whenever every touched part has an exact engine |
 | Deterministic Pauli marginals | A marginals terminal on a unitary Clifford+T circuit of at least 12 qubits that the register parts decline. The propagation is exact, and at or below the statevector cap it hands over to the tree once its summed term count passes the dense run's amplitude updates divided by 64 |
 | Deterministic Pauli expectations | An expectation terminal on a Clifford circuit |
-| Scalar tensor contraction | An expectation or marginals terminal on a unitary circuit whose bounded greedy plan for every observable stays under `2^12` elements: from 18 qubits under the statevector cap, and above it when the plan costs less than an estimate of the MPS run `Auto` would take |
+| Scalar tensor contraction | An expectation or marginals terminal on a unitary circuit whose bounded greedy plan for every observable stays under a peak bound. From 18 qubits under the statevector cap the bound is `2^12` elements. Above the cap it is the tensor network peak cap (`PRISM_MAX_TN_PEAK_QUBITS`), and the plan must also cost less than an estimate of the MPS run `Auto` would take |
 
 Each answers where the tree would have said statevector or stabilizer, so the backend a
 result reports

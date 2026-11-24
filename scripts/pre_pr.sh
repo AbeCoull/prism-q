@@ -31,16 +31,30 @@
 #   clippy-no-default  a .rs file
 #   clippy-<target>    a target_os, target_arch, target_feature or similar cfg line;
 #                      the Linux and macOS targets the host has installed
-#   check-gpu-dist     src/sim/dispatch.rs or a cfg(feature) line
+#   check-gpu-dist     src/sim/dispatch.rs, a cfg(feature) line, Cargo.toml, a GPU or
+#                      distributed path below, or a changed file gated on gpu or
+#                      distributed: one that carries `feature = "gpu"` or
+#                      `feature = "distributed"`, or a manifest target requiring either
+#   check-bench-internal
+#                      Cargo.toml or a changed file gated on bench-internal, the same
+#                      way; no other check enables that feature
 #   nextest-dist       src/distributed/ or src/backend/distributed_statevector/
 #   clippy-pulse, nextest-pulse, doc-pulse
 #                      src/pulse/ or tests/pulse_compile.rs, built with the
 #                      unstable-pulse feature no other check enables
-#   test:<script>      scripts/X.sh or scripts/X_test.sh, when scripts/X_test.sh exists
+#   test:<script>      scripts/X.sh or scripts/X_test.sh, for each of scripts/X_test.sh
+#                      and scripts/X_*_test.sh that exists
 #   py-tools           a Python file under scripts/
 #   sh-syntax          a .sh file
-#   owed-gpu, owed-mpi src/gpu/, or the MPI surface: printed, never run, since they
-#                      need the card or the MSVC and MS-MPI environment
+#   owed-gpu, owed-mpi printed, never run, since they need the card or the MSVC and
+#                      MS-MPI environment. owed-gpu: a GPU path (src/gpu/, a source
+#                      file with gpu in its name, the GPU golden and census tests), or a
+#                      changed line naming gpu or device in a file that carries
+#                      `feature = "gpu"`. owed-mpi: the MPI surface
+#
+# PRE_PR_CHANGED_FILES, with --plan only, names a file of changed paths, one per line,
+# read in place of the diff. No line is read then, so triggers on line content stay
+# quiet. scripts/pre_pr_plan_test.sh drives the plan through it.
 #
 # The public-api and semver checks skip, saying why, when the pinned nightly or the
 # tool is missing. Their pins and feature lists are read from .github/workflows/ci.yml.
@@ -57,7 +71,7 @@
 #                  semver-checks resolves the release type, as CI does
 #
 # Exit status: 0 when every check passed or was skipped, 1 when any failed, and 2
-# when a benchmark measurement holds the host (see bench_lock.sh).
+# when a benchmark measurement holds the host (see bench_lock.sh) and --plan is not set.
 
 set -uo pipefail
 
@@ -86,8 +100,13 @@ done
 
 cd "$PROJECT_DIR" || exit 1
 
+if [[ -n "${PRE_PR_CHANGED_FILES:-}" && -z "$PLAN" ]]; then
+    echo "Error: PRE_PR_CHANGED_FILES is read with --plan only; unset it to run the checks" >&2
+    exit 1
+fi
+
 LOCK="$(bench_lock_path "$PROJECT_DIR")"
-if [[ -f "$LOCK" ]]; then
+if [[ -z "$PLAN" && -f "$LOCK" ]]; then
     lock_pid="$(awk '/^pid: / { print $2; exit }' "$LOCK")"
     if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
         echo "Error: a measurement is running on this host. $LOCK says:" >&2
@@ -144,6 +163,12 @@ RECORDS="$SCRATCH/records"
     /^-/  { print "-" US file US oline US ctx US substr($0, 2); oline++; next }
 ' > "$RECORDS"
 
+if [[ -n "${PRE_PR_CHANGED_FILES:-}" ]]; then
+    UNTRACKED=()
+    mapfile -t CHANGED < <(tr -d '\r' < "$PRE_PR_CHANGED_FILES" | sed '/^$/d' | sort -u)
+    : > "$RECORDS"
+fi
+
 # The first changed file matching the regex.
 first_file() {
     printf '%s\n' "${CHANGED[@]}" | grep -m1 -E -- "$1"
@@ -165,6 +190,54 @@ first_hit_in_context() {
         $2 ~ ENVIRON["F"] && $4 ~ ENVIRON["C"] && $5 !~ /^[[:space:]]*(\/\/.*)?$/ {
             t = $5; sub(/^[[:space:]]+/, "", t)
             printf "%s:%s: %s (in %s)\n", $2, $3, substr(t, 1, 50), substr($4, 1, 40); exit
+        }' "$RECORDS"
+}
+
+# Manifest targets with required features, as `path<TAB>feature feature ...`.
+MANIFEST_TARGETS="$(LC_ALL=C awk '
+    function flush() {
+        if (kind != "" && req != "") print (path != "" ? path : dir[kind] "/" name ".rs") "\t" req
+        kind = ""; name = ""; path = ""; req = ""
+    }
+    BEGIN { dir["bench"] = "benches"; dir["example"] = "examples"; dir["test"] = "tests"; dir["bin"] = "src/bin" }
+    /^\[\[(bench|example|test|bin)\]\]/ { flush(); kind = $0; gsub(/[][]/, "", kind); next }
+    /^\[/ { flush(); next }
+    kind != "" && /^(name|path|required-features)[[:space:]]*=/ {
+        key = $0; sub(/[[:space:]]*=.*/, "", key)
+        value = $0; sub(/^[^=]*=[[:space:]]*/, "", value); gsub(/[]["]/, "", value); gsub(/,[[:space:]]*/, " ", value)
+        if (key == "name") name = value; else if (key == "path") path = value; else req = value
+    }
+    END { flush() }' Cargo.toml)"
+
+# The first changed file gated on feature $1: a .rs file that carries
+# `feature = "$1"`, or a manifest target that requires it. Prints the file and why.
+gated_file() {
+    local feature="$1" f
+    for f in "${CHANGED[@]}"; do
+        if [[ "$f" == *.rs && -f "$f" ]] && grep -q -E "feature[[:space:]]*=[[:space:]]*\"$feature\"" "$f"; then
+            printf '%s (carries feature = "%s")\n' "$f" "$feature"; return
+        fi
+        if F="$f" X="$feature" awk -F '\t' '$1 == ENVIRON["F"] && (" " $2 " ") ~ (" " ENVIRON["X"] " ") { hit = 1 }
+            END { exit !hit }' <<< "$MANIFEST_TARGETS"; then
+            printf '%s (a target that requires %s)\n' "$f" "$feature"; return
+        fi
+    done
+}
+
+# The first added or removed line naming gpu or device, in its text or its hunk's
+# context line, in a changed file that carries `feature = "gpu"`.
+gpu_line_hit() {
+    local f files=""
+    for f in "${CHANGED[@]}"; do
+        [[ "$f" == *.rs && -f "$f" ]] && grep -q -E 'feature[[:space:]]*=[[:space:]]*"gpu"' "$f" \
+            && files+="$f"$'\n'
+    done
+    [[ -z "$files" ]] && return 0
+    FILES="$files" LC_ALL=C awk -F $'\x1f' '
+        BEGIN { n = split(ENVIRON["FILES"], list, "\n"); for (i = 1; i <= n; i++) gated[list[i]] = 1 }
+        ($2 in gated) && ($5 ~ /[Gg][Pp][Uu]|[Dd]evice/ || $4 ~ /[Gg][Pp][Uu]|[Dd]evice/) {
+            t = $5; sub(/^[[:space:]]+/, "", t)
+            printf "%s:%s: %s\n", $2, $3, substr(t, 1, 70); exit
         }' "$RECORDS"
 }
 
@@ -321,10 +394,14 @@ check_nextest()      { cargo nextest run --features parallel; }
 check_doctest()      { cargo test --doc --features parallel; }
 check_no_default()   { cargo clippy --all-targets --no-default-features "${LINT[@]}"; }
 check_gpu_dist()     { cargo check --all-targets --features "parallel gpu distributed"; }
+check_bench_internal() { cargo check --all-targets --features "parallel gpu distributed bench-internal"; }
 check_clippy_py()    { cargo clippy -p prism-q-py --all-targets "${LINT[@]}"; }
 check_nextest_dist() { cargo nextest run --features "parallel distributed" -E 'test(distributed)'; }
 check_clippy_pulse() { cargo clippy --all-targets --features "parallel unstable-pulse" "${LINT[@]}"; }
-check_nextest_pulse() { cargo nextest run --features "parallel unstable-pulse" --test pulse_compile; }
+check_nextest_pulse() {
+    cargo nextest run --features "parallel unstable-pulse" --lib --test pulse_compile \
+        -E 'not kind(lib) or test(/^pulse::/)'
+}
 
 check_doc_build() {
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features "${DOC_FEATURES//,/ }"
@@ -459,9 +536,19 @@ for target in x86_64-unknown-linux-gnu aarch64-apple-darwin; do
 done
 CROSS_UNBUILT="$(first_hit '^[+-]$' '^(examples|tools|tests|benches|bindings)/' 'target_(os|arch)')"
 
+GPU_PATHS='^src/gpu/|^src/(.*/)?[^/]*gpu[^/]*\.rs$|^tests/(golden_gpu[^/]*\.rs|gpu_pass_census\.rs|gpu_device/)'
+DIST_PATHS='^src/(distributed|backend/distributed_statevector)/'
 GPU_DIST_HIT="$(first_file '^src/sim/dispatch\.rs$')"
 GPU_DIST_HIT="${GPU_DIST_HIT:-$(first_hit '^[+-]$' '\.rs$' 'cfg(_attr)?!?\(.*feature')}"
-run_if check-gpu-dist "$GPU_DIST_HIT" "no dispatch or cfg(feature) change" check_gpu_dist
+GPU_DIST_HIT="${GPU_DIST_HIT:-$(first_file "^Cargo\.toml$|$GPU_PATHS|$DIST_PATHS")}"
+GPU_DIST_HIT="${GPU_DIST_HIT:-$(gated_file gpu)}"
+GPU_DIST_HIT="${GPU_DIST_HIT:-$(gated_file distributed)}"
+run_if check-gpu-dist "$GPU_DIST_HIT" "no dispatch, cfg(feature), GPU or distributed change" \
+    check_gpu_dist
+
+BENCH_INTERNAL_HIT="$(first_file '^Cargo\.toml$')"
+BENCH_INTERNAL_HIT="${BENCH_INTERNAL_HIT:-$(gated_file bench-internal)}"
+run_if check-bench-internal "$BENCH_INTERNAL_HIT" "no bench-internal change" check_bench_internal
 
 PUB_HIT="$(first_hit '^[+-]$' '^src/.*\.rs$' '^[[:space:]]*pub[[:space:]]+((unsafe|async|const|extern)[[:space:]]+)*(fn|struct|enum|trait|type|const|static|mod|use|union)[[:space:]]|^[[:space:]]*pub[[:space:]]+[a-z_][a-z0-9_]*[[:space:]]*:')"
 PUB_HIT="${PUB_HIT:-$(first_hit_in_context '^src/.*\.rs$' '^pub (enum|struct|trait|union) ')}"
@@ -499,7 +586,7 @@ fi
 PY_BINDINGS_HIT="${PUB_HIT:-$(first_file '^bindings/')}"
 run_if clippy-py "$PY_BINDINGS_HIT" "no public item or bindings/ change" check_clippy_py
 
-run_if nextest-dist "$(first_file '^src/(distributed|backend/distributed_statevector)/')" \
+run_if nextest-dist "$(first_file "$DIST_PATHS")" \
     "no distributed change" check_nextest_dist
 
 PULSE_HIT="$(first_file '^(src/pulse/|tests/pulse_compile\.rs$|benches/bench_pulse\.rs$)')"
@@ -514,11 +601,13 @@ SCRIPT_TESTS=()
 for f in "${CHANGED[@]}"; do
     [[ "$f" =~ ^scripts/(.+)\.sh$ ]] || continue
     stem="${BASH_REMATCH[1]%_test}"
-    test_script="scripts/${stem}_test.sh"
-    [[ -f "$test_script" ]] || continue
-    [[ " ${SCRIPT_TESTS[*]} " == *" $test_script "* ]] && continue
-    SCRIPT_TESTS+=("$test_script")
-    add "test:${stem}" run "$f" check_script_test "$test_script"
+    for test_script in "scripts/${stem}_test.sh" "scripts/${stem}"_*_test.sh; do
+        [[ -f "$test_script" ]] || continue
+        [[ " ${SCRIPT_TESTS[*]} " == *" $test_script "* ]] && continue
+        SCRIPT_TESTS+=("$test_script")
+        name="${test_script#scripts/}"
+        add "test:${name%_test.sh}" run "$f" check_script_test "$test_script"
+    done
 done
 
 PY_TOOLS_HIT="$(first_file '^scripts/[^/]*\.py$')"
@@ -531,7 +620,8 @@ fi
 mapfile -t SH_FILES < <(printf '%s\n' "${CHANGED[@]}" | grep -E '\.sh$')
 run_if sh-syntax "${SH_FILES[0]:-}" "no shell script changed" check_sh_syntax
 
-GPU_HIT="$(first_file '^src/gpu/')"
+GPU_HIT="$(first_file "$GPU_PATHS")"
+GPU_HIT="${GPU_HIT:-$(gpu_line_hit)}"
 [[ -n "$GPU_HIT" ]] && add owed-gpu owed "$GPU_HIT" \
     "scripts/test-gpu.ps1 on a host with a card; the GPU goldens fail without one"
 MPI_HIT="$(first_file '^src/(.*/)?([^/]*_)?mpi[^/]*$|^src/distributed/comm\.rs$|^tools/dist_mpi_check\.rs$')"

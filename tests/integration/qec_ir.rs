@@ -166,6 +166,51 @@ fn qec_program_rejects_repeated_gate_targets() {
 }
 
 #[test]
+fn qec_text_readers_cap_qubit_and_observable_indices() {
+    for (text, line) in [
+        ("H 16777216", 1),
+        ("H 1000000000000", 1),
+        ("CX 0 18446744073709551615", 1),
+        ("H 0\nEXP_VAL Z16777216", 2),
+        ("MPP X0*Z99999999999", 1),
+        ("M 0\nOBSERVABLE_INCLUDE(18446744073709551615) rec[-1]", 2),
+        ("M 0\nOBSERVABLE_INCLUDE(1000000000000) rec[-1]", 2),
+    ] {
+        let err = parse_qec_program(text).unwrap_err();
+        assert!(
+            matches!(&err, PrismError::Parse { line: at, message }
+                if *at == line && message.contains("below 16777216")),
+            "{text}: {err}"
+        );
+    }
+    for text in ["M !16777216", "M 0\nCX rec[-1] 16777216", "CZ 0 16777216"] {
+        let err = parse_stim_circuit(text).unwrap_err();
+        assert!(format!("{err}").contains("16777216"), "{text}: {err}");
+    }
+
+    let ops = vec![
+        QecOp::Measure {
+            basis: QecBasis::Z,
+            qubit: 0,
+        },
+        QecOp::ObservableInclude {
+            observable: usize::MAX,
+            records: vec![QecRecordRef::absolute(0)],
+        },
+    ];
+    let err = QecProgram::from_ops(1, QecOptions::default(), ops).unwrap_err();
+    assert!(
+        matches!(&err, PrismError::InvalidParameter { message } if message.contains("16777216")),
+        "{err}"
+    );
+
+    let program =
+        parse_qec_program("H 16777215\nM 0\nOBSERVABLE_INCLUDE(16777215) rec[-1]").unwrap();
+    assert_eq!(program.num_qubits(), 1 << 24);
+    assert_eq!(program.num_observables(), 1 << 24);
+}
+
+#[test]
 fn qec_program_append_methods_match_from_ops_on_a_surface_memory() {
     let memory =
         QecProgram::surface_memory(5, 5, QecBasis::Z, &QecCircuitNoise::uniform(0.001)).unwrap();

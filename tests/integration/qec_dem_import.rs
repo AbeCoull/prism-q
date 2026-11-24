@@ -125,6 +125,24 @@ fn rejects_malformed_text() {
     }
 }
 
+#[test]
+fn rejects_observable_indices_past_the_cap() {
+    for text in [
+        "error(0.1) L18446744073709551615",
+        "error(0.1) D0 ^ L16777216",
+        "logical_observable L18446744073709551615",
+    ] {
+        let err = DetectorErrorModel::from_text(text).unwrap_err();
+        assert!(
+            matches!(&err, prism_q::PrismError::Parse { line: 1, message }
+                if message.contains("below 16777216")),
+            "{text}: {err}"
+        );
+    }
+    let model = DetectorErrorModel::from_text("error(0.1) D5 L16777215").unwrap();
+    assert_eq!(model.num_observables(), 1 << 24);
+}
+
 fn derived_models() -> Vec<DetectorErrorModel> {
     let data: Vec<usize> = (0..9).collect();
     vec![

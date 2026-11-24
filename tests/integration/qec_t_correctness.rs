@@ -642,6 +642,46 @@ fn analytical_strategies_reject_active_noise_route_to_reference() {
 }
 
 #[test]
+fn analytical_strategies_refuse_a_gate_on_three_qubits() {
+    use prism_q::gates::McuData;
+    use prism_q::{PrismError, QecPauli, run_qec_program};
+
+    let toffoli = || Gate::Mcu(Box::new(McuData::new(Gate::X.matrix_2x2(), 2)));
+    let prepared = || {
+        let mut program = QecProgram::with_options(3, options(256));
+        program.push_gate(Gate::X, &[0]).unwrap();
+        program.push_gate(Gate::X, &[1]).unwrap();
+        program.push_gate(toffoli(), &[0, 1, 2]).unwrap();
+        program
+    };
+    let mut measured = prepared();
+    let m2 = measured.measure_z(2).unwrap();
+    measured
+        .observable_include(0, &[QecRecordRef::absolute(m2)])
+        .unwrap();
+    for strategy in ANALYTICAL_STRATEGIES {
+        let err = run_qec_program_with_strategy(&measured, strategy).unwrap_err();
+        assert!(
+            matches!(&err, PrismError::IncompatibleBackend { reason, .. }
+                if reason.contains("at most two qubits")
+                    && reason.contains("run_qec_program_reference")),
+            "{strategy:?}: {err}"
+        );
+    }
+    let reference = run_qec_program_with_strategy(&measured, QecTStrategy::Reference).unwrap();
+    assert_eq!(reference.total_shots, 256);
+
+    let mut estimated = prepared();
+    estimated.expectation_value(&[QecPauli::z(2)], 1.0).unwrap();
+    let result = run_qec_program(&estimated).unwrap();
+    let mean = result.expectation_values.expect("estimates")[0].mean;
+    assert!(
+        (mean + 1.0).abs() < 1e-12,
+        "<Z2> after CCX on |110> is -1, got {mean}"
+    );
+}
+
+#[test]
 fn analytical_strategies_reject_detectors() {
     let mut program = QecProgram::with_options(1, options(256));
     program.push_gate(Gate::H, &[0]).unwrap();

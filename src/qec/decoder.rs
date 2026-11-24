@@ -424,7 +424,8 @@ pub(super) fn graphlike_edges(model: &DetectorErrorModel, decoding: &str) -> Res
             _ => {
                 return Err(PrismError::InvalidParameter {
                     message: format!(
-                        "mechanism `{}` flips {} detectors; {decoding} decoding needs a                          graphlike model, apply `decompose_graphlike` first",
+                        "mechanism `{}` flips {} detectors; {decoding} decoding needs a \
+                         graphlike model, apply `decompose_graphlike` first",
                         symptom_label(mechanism),
                         mechanism.detectors().len()
                     ),

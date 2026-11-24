@@ -1,8 +1,8 @@
 //! The [`QecProgram`] builder: op appending, record resolution, and op validation.
 
 use super::{
-    QEC_PROBABILITY_SUM_TOLERANCE, QecBasis, QecNoise, QecOp, QecOptions, QecPauli, QecProgram,
-    QecRecordRef, QecSampleResult, parse_qec_program, parse_stim_circuit, qec_op_name,
+    QEC_MAX_INDEX, QEC_PROBABILITY_SUM_TOLERANCE, QecBasis, QecNoise, QecOp, QecOptions, QecPauli,
+    QecProgram, QecRecordRef, QecSampleResult, parse_qec_program, parse_stim_circuit, qec_op_name,
     resolve_records,
 };
 use crate::error::{PrismError, Result};
@@ -85,7 +85,7 @@ impl QecProgram {
 
     /// True when any op is a leakage annotation, which routes
     /// [`run_qec_program`](super::run_qec_program) to the leakage sampler and fills
-    /// [`QecSampleResult::heralds`].
+    /// [`QecSampleResult::heralds`]; with active leakage, an `EXP_VAL` op is rejected.
     pub fn has_leakage(&self) -> bool {
         self.ops
             .iter()
@@ -339,7 +339,20 @@ impl QecProgram {
                 validate_records(records, next_measurement)?;
                 validate_finite_values(coords, "detector coordinate")?;
             }
-            QecOp::ObservableInclude { records, .. } | QecOp::Postselect { records, .. } => {
+            QecOp::ObservableInclude {
+                observable,
+                records,
+            } => {
+                if *observable >= QEC_MAX_INDEX {
+                    return Err(PrismError::InvalidParameter {
+                        message: format!(
+                            "observable index must be below {QEC_MAX_INDEX}, got {observable}"
+                        ),
+                    });
+                }
+                validate_records(records, next_measurement)?;
+            }
+            QecOp::Postselect { records, .. } => {
                 validate_records(records, next_measurement)?;
             }
             QecOp::ExpectationValue { terms, coefficient } => {

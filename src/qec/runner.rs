@@ -42,11 +42,14 @@ use rayon::prelude::*;
 /// [`QecSampleResult::expectation_values`]:
 /// - With active noise, a program with no measurement records or postselection that fits
 ///   the density-matrix cap is estimated exactly as `Tr(rho P)` with `variance` `0.0`;
-///   every other noisy program runs through [`run_qec_program_reference`].
+///   every other noisy program runs through [`run_qec_program_reference`]. A program
+///   with leakage annotations is rejected, since no runner estimates under leakage.
 /// - A noiseless program with detectors splits into a packed sampling run and an
 ///   analytical estimator run, falling back to the reference runner when either half
 ///   cannot lower.
-/// - Otherwise the analytical Auto T-strategy ladder evaluates it.
+/// - Otherwise the analytical Auto T-strategy ladder evaluates it. A program its lowering
+///   refuses, such as one with a `FEEDFORWARD`, a measured qubit reused without a reset,
+///   or a gate on three or more qubits, runs through [`run_qec_program_reference`].
 ///
 /// Limitations:
 /// - Non-Clifford gates are rejected on the packed path; the `EXP_VAL` route accepts them.
@@ -108,10 +111,7 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
         if program.num_detectors() > 0 {
             return run_qec_program_detectors_and_exp_val(program);
         }
-        return super::t_sampler::run_qec_program_with_strategy(
-            program,
-            super::t_sampler::QecTStrategy::Auto,
-        );
+        return super::t_sampler::run_qec_program_auto_or_reference(program);
     }
     program
         .compile_validated_sampler()?
@@ -134,6 +134,15 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
 /// else, including a lowering or oracle error, falls back to [`run_qec_program_reference`].
 fn run_qec_program_noisy_exp_val(program: &QecProgram) -> Result<QecSampleResult> {
     qec_runner_chunk_size(program.options())?;
+    if program.has_leakage() {
+        return Err(PrismError::IncompatibleBackend {
+            backend: "QEC EXP_VAL estimator".to_string(),
+            reason: "no QEC runner estimates `EXP_VAL` under leakage annotations (`LEAK`, \
+                     `SEEP`, `LEAK_TRANSPORT`); drop the `EXP_VAL` ops to sample the leakage \
+                     through `run_qec_program`, or drop the annotations to estimate"
+                .to_string(),
+        });
+    }
     if program.num_measurements() > 0
         || !program.postselection_rows()?.is_empty()
         || program.num_qubits()

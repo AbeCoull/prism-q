@@ -80,6 +80,18 @@ fn deterministic_t_one_program(shots: usize) -> QecProgram {
     program
 }
 
+fn run_qec_program_tensor_network_observable(program: &QecProgram) -> Result<QecSampleResult> {
+    let limits = tensor_network_fallback_limits(ResolvedLimits::process_default());
+    run_qec_program_tensor_network_observable_within(program, &limits)
+}
+
+fn run_qec_program_tensor_network_observable_within(
+    program: &QecProgram,
+    limits: &ResolvedLimits,
+) -> Result<QecSampleResult> {
+    tensor_network_on_lowered(program, &lower_pauli_observables(program)?, limits)
+}
+
 fn estimates(result: &QecSampleResult) -> &[QecObservableEstimate] {
     result
         .observable_expectations
@@ -192,8 +204,8 @@ fn tensor_network_fallback_refuses_an_over_cap_observable_without_slicing() {
 fn auto_uses_tensor_network_when_spd_nonexact_and_camps_fails() {
     let program = h_t_h_program(256);
     let expected = run_qec_program_tensor_network_observable(&program).unwrap();
-    let spd_nonexact = |program: &QecProgram| {
-        let mut result = run_qec_program_spd(program)?;
+    let spd_nonexact = |program: &QecProgram, lowered: &LoweredPauliObservables| {
+        let mut result = spd_on_lowered(program, lowered)?;
         for estimates in [
             result.observable_expectations.as_mut(),
             result.expectation_values.as_mut(),
@@ -207,12 +219,14 @@ fn auto_uses_tensor_network_when_spd_nonexact_and_camps_fails() {
         }
         Ok(result)
     };
-    let camps_failure = |_: &QecProgram| {
+    let camps_failure = |_: &QecProgram, _: &LoweredPauliObservables| {
         Err(PrismError::BackendUnsupported {
             backend: "QEC CAMPS".to_string(),
             operation: "forced CAMPS failure for auto-dispatch test".to_string(),
         })
     };
-    let actual = run_qec_program_auto_with(&program, spd_nonexact, camps_failure).unwrap();
+    let lowered = lower_pauli_observables(&program).unwrap();
+    let actual =
+        run_qec_program_auto_with(&program, &lowered, spd_nonexact, camps_failure).unwrap();
     assert_estimates_close(&actual, &expected);
 }

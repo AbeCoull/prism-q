@@ -182,6 +182,7 @@ fn decoder_rejects_hypergraph_models() {
         err.contains("decompose_graphlike"),
         "points at the fix: {err}"
     );
+    assert!(!err.contains("  "), "no run of spaces: {err}");
 }
 
 #[test]
@@ -477,6 +478,7 @@ fn matching_rejects_hypergraph_models_and_bad_inputs() {
     assert!(err.contains("D0 D1 D2"), "names the symptom: {err}");
     assert!(err.contains("matching decoding"), "{err}");
     assert!(err.contains("decompose_graphlike"), "{err}");
+    assert!(!err.contains("  "), "no run of spaces: {err}");
 
     let (_, model) = repetition_model(3, 1, 0.05);
     let decoder = MatchingDecoder::from_model(&model).unwrap();

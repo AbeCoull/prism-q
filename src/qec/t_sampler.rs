@@ -59,29 +59,46 @@ pub fn run_qec_program_with_strategy(
     strategy: QecTStrategy,
 ) -> Result<QecSampleResult> {
     match strategy {
-        QecTStrategy::Auto => {
-            run_qec_program_auto_with(program, run_qec_program_spd, run_qec_program_camps)
-        }
+        QecTStrategy::Auto => run_qec_program_auto(program, &lower_pauli_observables(program)?),
         QecTStrategy::Reference => run_qec_program_reference(program),
         QecTStrategy::Spd => run_qec_program_spd(program),
         QecTStrategy::Camps => run_qec_program_camps(program),
     }
 }
 
+/// Run the Auto ladder, or [`run_qec_program_reference`] when the analytical lowering
+/// refuses the program; an error after lowering is returned as is.
+pub(super) fn run_qec_program_auto_or_reference(program: &QecProgram) -> Result<QecSampleResult> {
+    let Ok(lowered) = lower_pauli_observables(program) else {
+        return run_qec_program_reference(program);
+    };
+    run_qec_program_auto(program, &lowered)
+}
+
+fn run_qec_program_auto(
+    program: &QecProgram,
+    lowered: &LoweredPauliObservables,
+) -> Result<QecSampleResult> {
+    run_qec_program_auto_with(program, lowered, spd_on_lowered, camps_on_lowered)
+}
+
 fn run_qec_program_auto_with(
     program: &QecProgram,
-    spd: impl FnOnce(&QecProgram) -> Result<QecSampleResult>,
-    camps: impl FnOnce(&QecProgram) -> Result<QecSampleResult>,
+    lowered: &LoweredPauliObservables,
+    spd: impl FnOnce(&QecProgram, &LoweredPauliObservables) -> Result<QecSampleResult>,
+    camps: impl FnOnce(&QecProgram, &LoweredPauliObservables) -> Result<QecSampleResult>,
 ) -> Result<QecSampleResult> {
-    match spd(program) {
+    match spd(program, lowered) {
         Ok(result) if analytical_result_has_no_truncation(&result) => Ok(result),
         Ok(_) => run_qec_program_auto_after_camps(
             program,
+            lowered,
             camps,
             "light-cone SPD exceeded its exact truncation budget".to_string(),
         ),
         Err(spd_error) => run_qec_program_auto_after_camps(
             program,
+            lowered,
             camps,
             format!("light-cone SPD failed ({spd_error})"),
         ),
@@ -90,13 +107,15 @@ fn run_qec_program_auto_with(
 
 fn run_qec_program_auto_after_camps(
     program: &QecProgram,
-    camps: impl FnOnce(&QecProgram) -> Result<QecSampleResult>,
+    lowered: &LoweredPauliObservables,
+    camps: impl FnOnce(&QecProgram, &LoweredPauliObservables) -> Result<QecSampleResult>,
     spd_context: String,
 ) -> Result<QecSampleResult> {
-    match camps(program) {
+    match camps(program, lowered) {
         Ok(result) => Ok(result),
         Err(camps_error) => {
-            run_qec_program_tensor_network_observable(program).map_err(|tn_error| {
+            let limits = tensor_network_fallback_limits(ResolvedLimits::process_default());
+            tensor_network_on_lowered(program, lowered, &limits).map_err(|tn_error| {
                 PrismError::IncompatibleBackend {
                     backend: "QEC auto T-strategy".to_string(),
                     reason: format!(
@@ -182,6 +201,17 @@ fn lower_qec_program_for_pauli_observable(
                 return Err(PrismError::IncompatibleBackend {
                     backend: "QEC SPD / CAMPS".to_string(),
                     reason: "analytical strategies do not emit detector records yet".to_string(),
+                });
+            }
+            QecOp::Gate { gate, targets } if targets.len() > 2 => {
+                return Err(PrismError::IncompatibleBackend {
+                    backend: "QEC SPD / CAMPS".to_string(),
+                    reason: format!(
+                        "analytical strategies lower gates on at most two qubits, got `{}` on \
+                         {}; route the program through `run_qec_program_reference`",
+                        gate.name(),
+                        targets.len()
+                    ),
                 });
             }
             _ => {}
@@ -641,12 +671,18 @@ const QEC_CAMPS_MAX_BOND_DIM: usize = 256;
 /// Z-strings, and `EXP_VAL` terms may carry any X/Y/Z letters. The path
 /// shares SPD's restricted lowering.
 fn run_qec_program_camps(program: &QecProgram) -> Result<QecSampleResult> {
+    camps_on_lowered(program, &lower_pauli_observables(program)?)
+}
+
+fn camps_on_lowered(
+    program: &QecProgram,
+    lowered: &LoweredPauliObservables,
+) -> Result<QecSampleResult> {
     use super::camps_prefix::{
         SignedCliffordPrefix, apply_t_via_camps, evaluate_pauli_observable_camps,
     };
     use crate::circuit::Instruction;
 
-    let lowered = lower_pauli_observables(program)?;
     let circuit = &lowered.circuit;
 
     let mut backend = MpsBackend::new(program.options().seed, QEC_CAMPS_MAX_BOND_DIM);
@@ -683,19 +719,12 @@ fn run_qec_program_camps(program: &QecProgram) -> Result<QecSampleResult> {
     // Algorithm 1 OFD). The observable `⟨ψ|Π P_k|ψ⟩` is evaluated as
     // `⟨ϕ| C†(Π P_k) C |ϕ⟩` by composing twisted Pauli rows and calling
     // [`crate::backend::mps::MpsBackend::pauli_expectation`].
-    evaluate_observable_program(program, &lowered, |terms| {
+    evaluate_observable_program(program, lowered, |terms| {
         Ok(ConditionalEval {
             mean: evaluate_pauli_observable_camps(&prefix, &backend, terms)?,
             discarded_sq: 0.0,
         })
     })
-}
-
-// Private exact fallback for Auto. Contracts each scalar observable directly
-// as <0| U^dagger P U |0> and does not materialize a dense statevector.
-fn run_qec_program_tensor_network_observable(program: &QecProgram) -> Result<QecSampleResult> {
-    let limits = tensor_network_fallback_limits(ResolvedLimits::process_default());
-    run_qec_program_tensor_network_observable_within(program, &limits)
 }
 
 /// Turn slicing off unless the slice budget was set explicitly. The fallback runs after
@@ -708,13 +737,15 @@ fn tensor_network_fallback_limits(mut limits: ResolvedLimits) -> ResolvedLimits 
     limits
 }
 
-fn run_qec_program_tensor_network_observable_within(
+// Private exact fallback for Auto. Contracts each scalar observable directly
+// as <0| U^dagger P U |0> and does not materialize a dense statevector.
+fn tensor_network_on_lowered(
     program: &QecProgram,
+    lowered: &LoweredPauliObservables,
     limits: &ResolvedLimits,
 ) -> Result<QecSampleResult> {
-    let lowered = lower_pauli_observables(program)?;
     let circuit = &lowered.circuit;
-    evaluate_observable_program(program, &lowered, |terms| {
+    evaluate_observable_program(program, lowered, |terms| {
         Ok(ConditionalEval {
             mean: crate::backend::tensornetwork::expectation_zero_state(circuit, terms, limits)?,
             discarded_sq: 0.0,
@@ -863,9 +894,15 @@ pub fn run_qec_program_spd_rerouted(
 /// the diagonal sum on `|0^n⟩` per observable. Truncation error is
 /// reported via `QecObservableEstimate::variance = total_discarded²`.
 fn run_qec_program_spd(program: &QecProgram) -> Result<QecSampleResult> {
-    let lowered = lower_pauli_observables(program)?;
+    spd_on_lowered(program, &lower_pauli_observables(program)?)
+}
+
+fn spd_on_lowered(
+    program: &QecProgram,
+    lowered: &LoweredPauliObservables,
+) -> Result<QecSampleResult> {
     let circuit = &lowered.circuit;
-    evaluate_observable_program(program, &lowered, |terms| {
+    evaluate_observable_program(program, lowered, |terms| {
         let result =
             run_spd_observable_light_cone(circuit, terms, QEC_SPD_EPSILON, QEC_SPD_MAX_TERMS)?;
         Ok(ConditionalEval {

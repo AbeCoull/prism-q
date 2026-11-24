@@ -332,3 +332,40 @@ impl ExactSizeIterator for ProbabilitiesIter<'_> {}
 #[cfg(test)]
 #[path = "probability_tests.rs"]
 mod tests;
+
+// `Factored` is constructed only below `usize::BITS` qubits (64 and above are refused
+// at construction). `checked_len` must never overflow at any `total_qubits`, returning
+// `None` from `usize::BITS` upward, and `len` and `iter().len()` must equal `2^n` across
+// every admitted width without shift overflow.
+#[cfg(kani)]
+mod proofs {
+    use super::Probabilities;
+
+    #[kani::proof]
+    fn factored_len_does_not_overflow() {
+        let total_qubits: usize = kani::any();
+        let probs = Probabilities::Factored {
+            blocks: Vec::new(),
+            total_qubits,
+        };
+        let checked = probs.checked_len();
+        if total_qubits < usize::BITS as usize {
+            let expected = 1usize << total_qubits;
+            assert_eq!(checked, Some(expected));
+            assert_eq!(probs.len(), expected);
+        } else {
+            assert_eq!(checked, None);
+        }
+    }
+
+    #[kani::proof]
+    fn factored_iter_len_does_not_overflow() {
+        let total_qubits: u32 = kani::any();
+        kani::assume(total_qubits < usize::BITS);
+        let probs = Probabilities::Factored {
+            blocks: Vec::new(),
+            total_qubits: total_qubits as usize,
+        };
+        assert_eq!(probs.iter().len(), 1usize << total_qubits);
+    }
+}

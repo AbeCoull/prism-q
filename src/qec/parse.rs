@@ -2,8 +2,8 @@
 //! instructions, `rec[-k]` record references, and flattened `REPEAT` blocks.
 
 use super::{
-    QEC_PROBABILITY_SUM_TOLERANCE, QecBasis, QecCorrelatedBranch, QecNoise, QecOp, QecOptions,
-    QecPauli, QecProgram, QecRecordRef,
+    QEC_MAX_INDEX, QEC_PROBABILITY_SUM_TOLERANCE, QecBasis, QecCorrelatedBranch, QecNoise, QecOp,
+    QecOptions, QecPauli, QecProgram, QecRecordRef,
 };
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
@@ -22,7 +22,8 @@ const MAX_QEC_EXPANDED_LINES: usize = 1_000_000;
 /// `QUBIT_COORDS`, `SHIFT_COORDS` (ignored), flattened `REPEAT` blocks, the leakage
 /// annotations `LEAK(p)`, `SEEP(p)`, and `LEAK_TRANSPORT(p)` (pairs) described on
 /// [`QecNoise`], and `RECORD_FLIP(p)`, a [`QecOp::RecordFlip`] of the record just
-/// produced. Comments use `#`.
+/// produced. Comments use `#`. Qubit and observable indices must be below `2^24`, and a
+/// two-qubit gate pair must name two distinct qubits.
 ///
 /// `M(p)` and `MR(p)` lower `p` into a Pauli flip before the measurement; `MPP`, the
 /// pair measurements and `MPAD` take no argument, and a `RECORD_FLIP` line flips their
@@ -285,6 +286,12 @@ impl QecTextParser {
         let qubits = parse_qubit_pairs(targets, name, line_num)?;
         for pair in qubits.as_chunks::<2>().0 {
             let (a, b) = (pair[0], pair[1]);
+            if a == b {
+                return Err(qec_parse_error(
+                    line_num,
+                    format!("`{name}` names qubit {a} twice"),
+                ));
+            }
             self.use_qubit(a);
             self.use_qubit(b);
             let ops = &mut self.ops;
@@ -700,7 +707,11 @@ impl QecTextParser {
         targets: &[String],
         line_num: usize,
     ) -> Result<()> {
-        let observable = parse_single_usize_arg(args, "OBSERVABLE_INCLUDE", line_num)?;
+        let observable = check_text_index(
+            parse_single_usize_arg(args, "OBSERVABLE_INCLUDE", line_num)?,
+            "`OBSERVABLE_INCLUDE` index",
+            line_num,
+        )?;
         let records = self.parse_record_targets(targets, line_num)?;
         self.ops.push(QecOp::ObservableInclude {
             observable,
@@ -1279,9 +1290,20 @@ fn parse_qubit_pairs(targets: &[String], name: &str, line_num: usize) -> Result<
 
 fn parse_qubit_target(target: &str, line_num: usize) -> Result<usize> {
     reject_inverted_target(target, line_num)?;
-    target
+    let qubit = target
         .parse::<usize>()
-        .map_err(|_| qec_parse_error(line_num, format!("expected qubit target, got `{target}`")))
+        .map_err(|_| qec_parse_error(line_num, format!("expected qubit target, got `{target}`")))?;
+    check_text_index(qubit, "qubit index", line_num)
+}
+
+fn check_text_index(index: usize, what: &str, line_num: usize) -> Result<usize> {
+    if index >= QEC_MAX_INDEX {
+        return Err(qec_parse_error(
+            line_num,
+            format!("{what} must be below {QEC_MAX_INDEX}, got {index}"),
+        ));
+    }
+    Ok(index)
 }
 
 fn parse_pauli_product(target: &str, line_num: usize) -> Result<Vec<QecPauli>> {
@@ -1322,7 +1344,10 @@ fn parse_pauli_term(term: &str, line_num: usize) -> Result<QecPauli> {
             format!("Pauli target `{term}` has an invalid qubit index"),
         )
     })?;
-    Ok(QecPauli::new(basis, qubit))
+    Ok(QecPauli::new(
+        basis,
+        check_text_index(qubit, "qubit index", line_num)?,
+    ))
 }
 
 fn parse_record_ref(

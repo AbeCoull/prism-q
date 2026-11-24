@@ -1,5 +1,6 @@
 //! Reader for the common detector error model text format.
 
+use super::QEC_MAX_INDEX;
 use super::dem::{DetectorErrorModel, ErrorMechanism, Symptom};
 use crate::error::{PrismError, Result};
 
@@ -315,7 +316,7 @@ impl State {
                 }
                 Instruction::Observable { targets } => {
                     for &target in targets {
-                        self.num_observables = self.num_observables.max(target + 1);
+                        self.observable_index(target, *line)?;
                     }
                 }
                 Instruction::Shift { coords, detectors } => {
@@ -344,10 +345,30 @@ impl State {
     fn detector_index(&mut self, target: u64, line: usize) -> Result<usize> {
         let index = target
             .checked_add(self.detector_offset)
-            .filter(|&index| index < u32::MAX as u64)
-            .ok_or_else(|| dem_error(line, "detector index out of range"))?;
+            .filter(|&index| index < QEC_MAX_INDEX as u64)
+            .ok_or_else(|| {
+                dem_error(
+                    line,
+                    format!(
+                        "detector index must be below {QEC_MAX_INDEX}, got {target} plus a \
+                         shift of {}",
+                        self.detector_offset
+                    ),
+                )
+            })?;
         self.num_detectors = self.num_detectors.max(index + 1);
         Ok(index as usize)
+    }
+
+    fn observable_index(&mut self, target: u64, line: usize) -> Result<usize> {
+        if target >= QEC_MAX_INDEX as u64 {
+            return Err(dem_error(
+                line,
+                format!("observable index must be below {QEC_MAX_INDEX}, got {target}"),
+            ));
+        }
+        self.num_observables = self.num_observables.max(target + 1);
+        Ok(target as usize)
     }
 
     fn error(&mut self, probability: f64, targets: &[Target], line: usize) -> Result<()> {
@@ -381,10 +402,7 @@ impl State {
         for &target in targets {
             match target {
                 Target::Detector(index) => detectors.push(self.detector_index(index, line)?),
-                Target::Observable(index) => {
-                    self.num_observables = self.num_observables.max(index + 1);
-                    observables.push(index as usize);
-                }
+                Target::Observable(index) => observables.push(self.observable_index(index, line)?),
                 Target::Separator => unreachable!("components are split on separators"),
             }
         }

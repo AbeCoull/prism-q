@@ -41,6 +41,7 @@ pub(crate) fn env_limits() -> &'static EnvLimits {
         limits.max_mps_workspace_qubits = qubits("PRISM_MAX_MPS_WORKSPACE_QUBITS");
         limits.max_tn_peak_qubits = qubits("PRISM_MAX_TN_PEAK_QUBITS");
         limits.max_tn_slices = crate::env_knobs::usize_override("PRISM_MAX_TN_SLICES", 1);
+        limits.max_qec_reference_qubits = qubits("PRISM_MAX_QEC_REFERENCE_QUBITS");
         EnvLimits {
             limits,
             dense_outcome_bits: qubits("PRISM_MAX_DENSE_OUTCOME_BITS"),

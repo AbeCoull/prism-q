@@ -100,7 +100,8 @@ impl DetectorErrorModel {
     /// others of the same symptom; `^` separators become its
     /// [`ErrorMechanism::suggested_decomposition`]. Instruction tags (`error[tag](p)`)
     /// are ignored and `#` starts a comment. The detector and observable counts are one
-    /// past the highest index any instruction names.
+    /// past the highest index any instruction names; a shifted detector index and an
+    /// observable index must be below `2^24`.
     ///
     /// # Examples
     ///

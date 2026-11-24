@@ -18,7 +18,8 @@ use crate::error::{PrismError, ResourceKind};
 /// to detection, and the highest layer that sets a value wins. A layer that sets
 /// `memory_budget_bytes` re-derives every memory cap from its budget and discards the
 /// per-cap values of the layers below it; its own per-cap values still apply. The slice
-/// budget and the bond dimension are not memory caps and survive a budget.
+/// budget, the bond dimension and the QEC reference width are not memory caps and
+/// survive a budget.
 ///
 /// Each field names the environment variable it overrides.
 ///
@@ -57,6 +58,12 @@ pub struct Limits {
     /// Bond dimension of the MPS that auto routing picks past the statevector cap
     /// (default 256). Zero reads as one.
     pub auto_mps_bond_dim: Option<usize>,
+    /// Width up to which [`run_qec_program`](crate::run_qec_program) runs an `EXP_VAL`
+    /// program the analytical ladder cannot lower on the per-shot reference runner
+    /// (`PRISM_MAX_QEC_REFERENCE_QUBITS`, default 20), still within the statevector cap.
+    /// The default is fixed rather than derived from memory because that runner costs
+    /// time, shots times `2^n`, before it costs memory.
+    pub max_qec_reference_qubits: Option<usize>,
 }
 
 impl Limits {
@@ -73,6 +80,7 @@ impl Limits {
         max_tn_peak_qubits: None,
         max_tn_slices: None,
         auto_mps_bond_dim: None,
+        max_qec_reference_qubits: None,
     };
 
     /// Limits that set nothing, so every value comes from the layers below.
@@ -139,6 +147,11 @@ impl Limits {
         self.auto_mps_bond_dim = Some(bond_dim);
         self
     }
+
+    pub fn max_qec_reference_qubits(mut self, qubits: usize) -> Self {
+        self.max_qec_reference_qubits = Some(qubits);
+        self
+    }
 }
 
 /// Layer a resolved cap came from, lowest precedence first.
@@ -169,6 +182,7 @@ pub enum LimitKnob {
     StabilizerClusterQubits,
     MpsWorkspaceQubits,
     TnPeakQubits,
+    QecReferenceQubits,
 }
 
 impl LimitKnob {
@@ -184,6 +198,7 @@ impl LimitKnob {
             LimitKnob::StabilizerClusterQubits => "max_stabilizer_cluster_qubits",
             LimitKnob::MpsWorkspaceQubits => "max_mps_workspace_qubits",
             LimitKnob::TnPeakQubits => "max_tn_peak_qubits",
+            LimitKnob::QecReferenceQubits => "max_qec_reference_qubits",
         }
     }
 
@@ -200,6 +215,7 @@ impl LimitKnob {
             LimitKnob::StabilizerClusterQubits => "PRISM_MAX_STABILIZER_CLUSTER_QUBITS",
             LimitKnob::MpsWorkspaceQubits => "PRISM_MAX_MPS_WORKSPACE_QUBITS",
             LimitKnob::TnPeakQubits => "PRISM_MAX_TN_PEAK_QUBITS",
+            LimitKnob::QecReferenceQubits => "PRISM_MAX_QEC_REFERENCE_QUBITS",
         }
     }
 }
@@ -256,12 +272,14 @@ pub struct ResolvedLimits {
     pub(crate) tn_peak_qubits: Limit,
     pub(crate) tn_slices: Limit,
     pub(crate) auto_mps_bond_dim: Limit,
+    pub(crate) qec_reference_qubits: Limit,
 }
 
 /// Slicing trades a multiplicative time factor for a divided peak, so the slice budget
 /// is the worst-case slowdown a contraction takes in place of a rejection.
 const DEFAULT_TN_SLICES: usize = 1 << 10;
 const DEFAULT_AUTO_MPS_BOND_DIM: usize = 256;
+const DEFAULT_QEC_REFERENCE_QUBITS: usize = 20;
 
 /// Bytes per stored sparse entry: the worst-case peak across the double-buffered
 /// maps (24 payload bytes, table slot overhead, and load-factor headroom on both).
@@ -400,6 +418,7 @@ impl Layers {
                 tn_peak_qubits: detected(0),
                 tn_slices: detected(DEFAULT_TN_SLICES),
                 auto_mps_bond_dim: detected(DEFAULT_AUTO_MPS_BOND_DIM),
+                qec_reference_qubits: detected(DEFAULT_QEC_REFERENCE_QUBITS),
             },
             density_matrix_override: None,
         };
@@ -469,6 +488,10 @@ impl Layers {
         set(&mut caps.tn_peak_qubits, limits.max_tn_peak_qubits);
         set(&mut caps.tn_slices, limits.max_tn_slices);
         set(&mut caps.auto_mps_bond_dim, limits.auto_mps_bond_dim);
+        set(
+            &mut caps.qec_reference_qubits,
+            limits.max_qec_reference_qubits,
+        );
         if let Some(value) = limits.max_density_matrix_qubits {
             self.density_matrix_override = Some(Limit { value, source });
         }

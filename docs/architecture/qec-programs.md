@@ -16,8 +16,9 @@ typed builders (`push_gate`, `measure`, `measure_pauli_product`, `reset`, `detec
 it is appended. `measure` and `measure_pauli_product` return the new record index, and
 `detector` the detector index. Validation covers gate arity, qubit bounds, finite
 coordinates, coefficients and probabilities, record-reference scope, duplicate qubits
-in a Pauli product, branch probabilities summing to at most 1, and target pairing for
-`DEPOLARIZE2` and `PAULI_CHANNEL_2`.
+in a gate's targets or a Pauli product, observable indices below `2^24`, branch
+probabilities summing to at most 1, and target pairing for `DEPOLARIZE2` and
+`PAULI_CHANNEL_2`.
 
 | `QecOp` variant | Payload | Semantics |
 | --- | --- | --- |
@@ -94,7 +95,9 @@ annotations (`LEAK(p)`, `SEEP(p)`, and `LEAK_TRANSPORT(p)` on pairs), `TICK`,
 instructions below, which lower onto the same ops. `rec[-k]` resolves to an absolute
 index while parsing. A numeric argument on a basis measurement, such as `M(0.001)`,
 lowers to a Pauli flip on that record just before the measurement. Inverted (`!`)
-targets are rejected, and instruction tags such as `X_ERROR[tag](p)` are ignored.
+targets, a two-qubit gate pair naming one qubit twice (`CX 0 0`), and a qubit or
+observable index of `2^24` or more are rejected, and instruction tags such as
+`X_ERROR[tag](p)` are ignored.
 
 | Instruction | Lowering |
 | --- | --- |
@@ -212,6 +215,7 @@ flowchart TD
     E -- yes --> S[two-run split]
     E -- no --> L[analytical Auto ladder]
     S -- either half fails --> R
+    L -- lowering refuses --> R
     B -- no --> F{active noise?}
     F -- yes --> N[noisy compiled sampler]
     F -- no --> P[clean compiled sampler]
@@ -233,6 +237,16 @@ runs the program without its `EXP_VAL` ops (real measurement, detector and obser
 records), and the analytical ladder runs it without its detectors (exact estimates
 attached to the sampled result). When either half cannot run (non-Clifford gates on the
 packed half), the whole program falls back to the reference runner.
+
+A noiseless `EXP_VAL` program without detectors goes to the Auto ladder, which lowers it
+once for all three strategies. When that lowering refuses the program (a `FEEDFORWARD`,
+a measured qubit reused without a reset, or a gate on three or more qubits), the program
+runs on the reference runner instead, when it is no wider than
+`Limits::max_qec_reference_qubits` (default 20, since that runner costs shots times
+`2^n`) and fits the statevector cap. A wider program returns the refusal, naming the
+limit. An error after lowering, such as the 12-row postselection cap or a contraction
+over the tensor network cap, is returned. A noisy `EXP_VAL` program with leakage
+annotations is rejected, since no runner estimates under leakage.
 
 The density-matrix estimator serves noisy `EXP_VAL` programs whose ensemble the mixed
 state can carry in full. There `Tr(rho P)` is the exact value the reference runner

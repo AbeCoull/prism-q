@@ -71,6 +71,10 @@ use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 /// is accepted.
 pub(super) const QEC_PROBABILITY_SUM_TOLERANCE: f64 = 1e-9;
 
+/// Exclusive bound on qubit and observable indices read from QEC text, and on observable
+/// indices a program accepts, since runners size buffers from the highest index.
+pub(super) const QEC_MAX_INDEX: usize = 1 << 24;
+
 /// Pauli basis used by QEC measurements and Pauli products.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QecBasis {

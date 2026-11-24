@@ -112,8 +112,10 @@ below decides: `memory_budget_bytes`; the qubit caps `max_statevector_qubits`,
 `max_export_qubits` (a dense state vector export), `max_sparse_qubits`,
 `max_factored_merge_qubits`, `max_stabilizer_cluster_qubits`,
 `max_mps_workspace_qubits` and `max_tn_peak_qubits`; `max_tn_slices` (default 1024),
-the slices a tensor network contraction may sum over; and `auto_mps_bond_dim` (default
-256), the bond cap of the MPS that automatic dispatch falls back to.
+the slices a tensor network contraction may sum over; `auto_mps_bond_dim` (default
+256), the bond cap of the MPS that automatic dispatch falls back to; and
+`max_qec_reference_qubits` (default 20), the widest `EXP_VAL` program the analytical
+ladder cannot lower that `run_qec_program` runs on the reference runner.
 `default_limits()` returns the process default.
 
 ### Distributions too wide to write down

@@ -6,7 +6,8 @@ use prism_q::circuit::openqasm;
 use prism_q::{
     Gate, PackedShots, PrismError, QecBasis, QecCircuitNoise, QecDetectorReference, QecNoise,
     QecOp, QecOptions, QecPauli, QecProgram, QecRecordRef, QecSampleResult, ShotLayout,
-    compile_qec_program_rows, parse_qec_program, run_qec_program, run_qec_program_reference,
+    compile_qec_program_rows, parse_qec_program, parse_stim_circuit, run_qec_program,
+    run_qec_program_reference,
 };
 
 use crate::common::stats::fnv1a;
@@ -101,6 +102,112 @@ fn qec_program_from_ops_validates_records_and_qubits() {
             .noise(QecNoise::Depolarize2(0.001), &[0, 0])
             .is_err()
     );
+}
+
+#[test]
+fn qec_program_rejects_repeated_gate_targets() {
+    for (text, name, qubit) in [
+        ("CX 0 0\nM 0\nDETECTOR rec[-1]", "`CX`", 0),
+        ("CX 0 1 2 2", "`CX`", 2),
+        ("SWAP 1 1", "`SWAP`", 1),
+        ("ISWAP 3 3", "`ISWAP`", 3),
+    ] {
+        let err = parse_qec_program(text).unwrap_err();
+        assert!(
+            matches!(&err, PrismError::Parse { line: 1, message }
+                if message.contains(name) && message.contains(&format!("qubit {qubit} twice"))),
+            "{text}: {err}"
+        );
+    }
+    for text in ["CZ 2 2", "M 0\nCX rec[-1] 1 4 4"] {
+        let err = parse_stim_circuit(text).unwrap_err();
+        assert!(
+            matches!(&err, PrismError::Parse { message, .. } if message.contains("twice")),
+            "{text}: {err}"
+        );
+    }
+
+    let names_qubit_twice = |err: PrismError, gate: &str, qubit: usize| {
+        assert!(
+            matches!(&err, PrismError::InvalidParameter { message }
+                if message.contains(gate) && message.contains(&format!("qubit {qubit} twice"))),
+            "{err}"
+        );
+    };
+    let mut program = QecProgram::new(3);
+    names_qubit_twice(program.push_gate(Gate::Cx, &[0, 0]).unwrap_err(), "cx", 0);
+    let record = program.measure_z(0).unwrap();
+    let body = vec![QecOp::Gate {
+        gate: Gate::Cz,
+        targets: vec![1, 1],
+    }];
+    names_qubit_twice(
+        program
+            .feedforward(&[QecRecordRef::absolute(record)], true, body)
+            .unwrap_err(),
+        "cz",
+        1,
+    );
+    assert_eq!(program.ops().len(), 1);
+    let ops = vec![QecOp::Gate {
+        gate: Gate::Cx,
+        targets: vec![2, 2],
+    }];
+    names_qubit_twice(
+        QecProgram::from_ops(3, QecOptions::default(), ops).unwrap_err(),
+        "cx",
+        2,
+    );
+
+    let program = parse_qec_program("CX 0 1 1 0\nSWAP 1 2").unwrap();
+    assert_eq!(program.num_qubits(), 3);
+    assert_eq!(program.ops().len(), 5);
+    assert!(parse_stim_circuit("M 0\nCX rec[-1] 1 1 2").is_ok());
+}
+
+#[test]
+fn qec_text_readers_cap_qubit_and_observable_indices() {
+    for (text, line) in [
+        ("H 16777216", 1),
+        ("H 1000000000000", 1),
+        ("CX 0 18446744073709551615", 1),
+        ("H 0\nEXP_VAL Z16777216", 2),
+        ("MPP X0*Z99999999999", 1),
+        ("M 0\nOBSERVABLE_INCLUDE(18446744073709551615) rec[-1]", 2),
+        ("M 0\nOBSERVABLE_INCLUDE(1000000000000) rec[-1]", 2),
+    ] {
+        let err = parse_qec_program(text).unwrap_err();
+        assert!(
+            matches!(&err, PrismError::Parse { line: at, message }
+                if *at == line && message.contains("below 16777216")),
+            "{text}: {err}"
+        );
+    }
+    for text in ["M !16777216", "M 0\nCX rec[-1] 16777216", "CZ 0 16777216"] {
+        let err = parse_stim_circuit(text).unwrap_err();
+        assert!(format!("{err}").contains("16777216"), "{text}: {err}");
+    }
+
+    let ops = vec![
+        QecOp::Measure {
+            basis: QecBasis::Z,
+            qubit: 0,
+        },
+        QecOp::ObservableInclude {
+            observable: usize::MAX,
+            records: vec![QecRecordRef::absolute(0)],
+        },
+    ];
+    let err = QecProgram::from_ops(1, QecOptions::default(), ops).unwrap_err();
+    assert!(
+        matches!(&err, PrismError::InvalidParameter { message } if message.contains("16777216")),
+        "{err}"
+    );
+
+    let program =
+        parse_qec_program("H 16777215\nM 0\nOBSERVABLE_INCLUDE(16777215) rec[-1]").unwrap();
+    assert_eq!(program.num_qubits(), 1 << 24);
+    assert_eq!(program.num_observables(), 1 << 24);
 }
 
 #[test]

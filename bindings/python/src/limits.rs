@@ -58,6 +58,7 @@ getters! {
     max_tn_peak_qubits: usize,
     max_tn_slices: usize,
     auto_mps_bond_dim: usize,
+    max_qec_reference_qubits: usize,
 }
 
 /// Set the limits every later call in this process resolves against, below any a

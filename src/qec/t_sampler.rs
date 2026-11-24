@@ -10,7 +10,7 @@ use crate::backend::mps::MpsBackend;
 use crate::circuit::{Circuit, SmallVec};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
-use crate::limits::{LimitSource, ResolvedLimits};
+use crate::limits::{Limit, LimitKnob, LimitSource, ResolvedLimits};
 use crate::sim::compiled::PackedShots;
 use crate::sim::unified_pauli::{PauliTerm, run_spd_observable_light_cone};
 
@@ -59,29 +59,101 @@ pub fn run_qec_program_with_strategy(
     strategy: QecTStrategy,
 ) -> Result<QecSampleResult> {
     match strategy {
-        QecTStrategy::Auto => {
-            run_qec_program_auto_with(program, run_qec_program_spd, run_qec_program_camps)
-        }
+        QecTStrategy::Auto => run_qec_program_auto(program, &lower_pauli_observables(program)?),
         QecTStrategy::Reference => run_qec_program_reference(program),
         QecTStrategy::Spd => run_qec_program_spd(program),
         QecTStrategy::Camps => run_qec_program_camps(program),
     }
 }
 
+/// Run the Auto ladder, or [`run_qec_program_reference`] when the analytical lowering
+/// refuses a program no wider than [`Limits::max_qec_reference_qubits`]. Any other
+/// lowering error, and any error after lowering, is returned as is; a refusal past the
+/// width, or a failed reference run, carries the refusal in its error.
+///
+/// [`Limits::max_qec_reference_qubits`]: crate::Limits::max_qec_reference_qubits
+pub(super) fn run_qec_program_auto_or_reference(program: &QecProgram) -> Result<QecSampleResult> {
+    match lower_pauli_observables(program) {
+        Ok(lowered) => run_qec_program_auto(program, &lowered),
+        Err(refusal) if is_lowering_refusal(&refusal) => {
+            let width = ResolvedLimits::process_default().qec_reference_qubits;
+            if program.num_qubits() > width.value {
+                return Err(past_reference_width(refusal, program.num_qubits(), width));
+            }
+            run_qec_program_reference(program)
+                .map_err(|reference_error| with_lowering_refusal(reference_error, &refusal))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn past_reference_width(mut refusal: PrismError, num_qubits: usize, width: Limit) -> PrismError {
+    let knob = LimitKnob::QecReferenceQubits;
+    let raise = match width.source {
+        LimitSource::Detected | LimitSource::Env => {
+            format!("`set_default_limits` or {}", knob.env_var())
+        }
+        LimitSource::ProcessDefault | LimitSource::Request => "`set_default_limits`".to_string(),
+    };
+    if let PrismError::IncompatibleBackend { reason, .. } = &mut refusal {
+        reason.push_str(&format!(
+            "; the program has {num_qubits} qubits, past {} ({}) for the reference fallback, \
+             which {raise} raises",
+            knob.name(),
+            width.value
+        ));
+    }
+    refusal
+}
+
+/// The analytical lowering reports a program shape it cannot express (noise, detectors,
+/// `FEEDFORWARD`, reuse without reset, a gate on three or more qubits) as
+/// `IncompatibleBackend`. Every other variant is a malformed program or a resource cap.
+fn is_lowering_refusal(err: &PrismError) -> bool {
+    matches!(err, PrismError::IncompatibleBackend { .. })
+}
+
+fn with_lowering_refusal(reference_error: PrismError, refusal: &PrismError) -> PrismError {
+    let context = format!("the analytical ladder refused the program ({refusal})");
+    match reference_error {
+        PrismError::ResourceLimit(mut limit) => {
+            limit.operation = format!(
+                "{context}, and its reference fallback for {}",
+                limit.operation
+            );
+            PrismError::ResourceLimit(limit)
+        }
+        other => PrismError::IncompatibleBackend {
+            backend: "QEC EXP_VAL routing".to_string(),
+            reason: format!("{context}, and its reference fallback failed: {other}"),
+        },
+    }
+}
+
+fn run_qec_program_auto(
+    program: &QecProgram,
+    lowered: &LoweredPauliObservables,
+) -> Result<QecSampleResult> {
+    run_qec_program_auto_with(program, lowered, spd_on_lowered, camps_on_lowered)
+}
+
 fn run_qec_program_auto_with(
     program: &QecProgram,
-    spd: impl FnOnce(&QecProgram) -> Result<QecSampleResult>,
-    camps: impl FnOnce(&QecProgram) -> Result<QecSampleResult>,
+    lowered: &LoweredPauliObservables,
+    spd: impl FnOnce(&QecProgram, &LoweredPauliObservables) -> Result<QecSampleResult>,
+    camps: impl FnOnce(&QecProgram, &LoweredPauliObservables) -> Result<QecSampleResult>,
 ) -> Result<QecSampleResult> {
-    match spd(program) {
+    match spd(program, lowered) {
         Ok(result) if analytical_result_has_no_truncation(&result) => Ok(result),
         Ok(_) => run_qec_program_auto_after_camps(
             program,
+            lowered,
             camps,
             "light-cone SPD exceeded its exact truncation budget".to_string(),
         ),
         Err(spd_error) => run_qec_program_auto_after_camps(
             program,
+            lowered,
             camps,
             format!("light-cone SPD failed ({spd_error})"),
         ),
@@ -90,13 +162,15 @@ fn run_qec_program_auto_with(
 
 fn run_qec_program_auto_after_camps(
     program: &QecProgram,
-    camps: impl FnOnce(&QecProgram) -> Result<QecSampleResult>,
+    lowered: &LoweredPauliObservables,
+    camps: impl FnOnce(&QecProgram, &LoweredPauliObservables) -> Result<QecSampleResult>,
     spd_context: String,
 ) -> Result<QecSampleResult> {
-    match camps(program) {
+    match camps(program, lowered) {
         Ok(result) => Ok(result),
         Err(camps_error) => {
-            run_qec_program_tensor_network_observable(program).map_err(|tn_error| {
+            let limits = tensor_network_fallback_limits(ResolvedLimits::process_default());
+            tensor_network_on_lowered(program, lowered, &limits).map_err(|tn_error| {
                 PrismError::IncompatibleBackend {
                     backend: "QEC auto T-strategy".to_string(),
                     reason: format!(
@@ -182,6 +256,17 @@ fn lower_qec_program_for_pauli_observable(
                 return Err(PrismError::IncompatibleBackend {
                     backend: "QEC SPD / CAMPS".to_string(),
                     reason: "analytical strategies do not emit detector records yet".to_string(),
+                });
+            }
+            QecOp::Gate { gate, targets } if targets.len() > 2 => {
+                return Err(PrismError::IncompatibleBackend {
+                    backend: "QEC SPD / CAMPS".to_string(),
+                    reason: format!(
+                        "analytical strategies lower gates on at most two qubits, got `{}` on \
+                         {}; route the program through `run_qec_program_reference`",
+                        gate.name(),
+                        targets.len()
+                    ),
                 });
             }
             _ => {}
@@ -641,12 +726,18 @@ const QEC_CAMPS_MAX_BOND_DIM: usize = 256;
 /// Z-strings, and `EXP_VAL` terms may carry any X/Y/Z letters. The path
 /// shares SPD's restricted lowering.
 fn run_qec_program_camps(program: &QecProgram) -> Result<QecSampleResult> {
+    camps_on_lowered(program, &lower_pauli_observables(program)?)
+}
+
+fn camps_on_lowered(
+    program: &QecProgram,
+    lowered: &LoweredPauliObservables,
+) -> Result<QecSampleResult> {
     use super::camps_prefix::{
         SignedCliffordPrefix, apply_t_via_camps, evaluate_pauli_observable_camps,
     };
     use crate::circuit::Instruction;
 
-    let lowered = lower_pauli_observables(program)?;
     let circuit = &lowered.circuit;
 
     let mut backend = MpsBackend::new(program.options().seed, QEC_CAMPS_MAX_BOND_DIM);
@@ -683,19 +774,12 @@ fn run_qec_program_camps(program: &QecProgram) -> Result<QecSampleResult> {
     // Algorithm 1 OFD). The observable `⟨ψ|Π P_k|ψ⟩` is evaluated as
     // `⟨ϕ| C†(Π P_k) C |ϕ⟩` by composing twisted Pauli rows and calling
     // [`crate::backend::mps::MpsBackend::pauli_expectation`].
-    evaluate_observable_program(program, &lowered, |terms| {
+    evaluate_observable_program(program, lowered, |terms| {
         Ok(ConditionalEval {
             mean: evaluate_pauli_observable_camps(&prefix, &backend, terms)?,
             discarded_sq: 0.0,
         })
     })
-}
-
-// Private exact fallback for Auto. Contracts each scalar observable directly
-// as <0| U^dagger P U |0> and does not materialize a dense statevector.
-fn run_qec_program_tensor_network_observable(program: &QecProgram) -> Result<QecSampleResult> {
-    let limits = tensor_network_fallback_limits(ResolvedLimits::process_default());
-    run_qec_program_tensor_network_observable_within(program, &limits)
 }
 
 /// Turn slicing off unless the slice budget was set explicitly. The fallback runs after
@@ -708,13 +792,15 @@ fn tensor_network_fallback_limits(mut limits: ResolvedLimits) -> ResolvedLimits 
     limits
 }
 
-fn run_qec_program_tensor_network_observable_within(
+// Private exact fallback for Auto. Contracts each scalar observable directly
+// as <0| U^dagger P U |0> and does not materialize a dense statevector.
+fn tensor_network_on_lowered(
     program: &QecProgram,
+    lowered: &LoweredPauliObservables,
     limits: &ResolvedLimits,
 ) -> Result<QecSampleResult> {
-    let lowered = lower_pauli_observables(program)?;
     let circuit = &lowered.circuit;
-    evaluate_observable_program(program, &lowered, |terms| {
+    evaluate_observable_program(program, lowered, |terms| {
         Ok(ConditionalEval {
             mean: crate::backend::tensornetwork::expectation_zero_state(circuit, terms, limits)?,
             discarded_sq: 0.0,
@@ -863,9 +949,15 @@ pub fn run_qec_program_spd_rerouted(
 /// the diagonal sum on `|0^n⟩` per observable. Truncation error is
 /// reported via `QecObservableEstimate::variance = total_discarded²`.
 fn run_qec_program_spd(program: &QecProgram) -> Result<QecSampleResult> {
-    let lowered = lower_pauli_observables(program)?;
+    spd_on_lowered(program, &lower_pauli_observables(program)?)
+}
+
+fn spd_on_lowered(
+    program: &QecProgram,
+    lowered: &LoweredPauliObservables,
+) -> Result<QecSampleResult> {
     let circuit = &lowered.circuit;
-    evaluate_observable_program(program, &lowered, |terms| {
+    evaluate_observable_program(program, lowered, |terms| {
         let result =
             run_spd_observable_light_cone(circuit, terms, QEC_SPD_EPSILON, QEC_SPD_MAX_TERMS)?;
         Ok(ConditionalEval {

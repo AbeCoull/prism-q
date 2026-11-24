@@ -5,8 +5,8 @@
 use crate::qec_common;
 
 use prism_q::{
-    Gate, QecBasis, QecNoise, QecPauli, QecProgram, QecRecordRef, QecTStrategy, run_qec_program,
-    run_qec_program_reference, run_qec_program_with_strategy,
+    Gate, QecBasis, QecNoise, QecOp, QecPauli, QecProgram, QecRecordRef, QecTStrategy,
+    run_qec_program, run_qec_program_reference, run_qec_program_with_strategy,
 };
 use qec_common::ANALYTICAL_STRATEGIES;
 
@@ -286,6 +286,88 @@ fn exp_val_routing_pinned() {
     );
     assert_eq!(routed.detectors.num_measurements(), 1);
     assert_eq!(routed.detectors.num_shots(), 256);
+}
+
+#[test]
+fn exp_val_falls_back_to_the_reference_runner_when_the_ladder_cannot_lower() {
+    let feedforward = |with_detector: bool| {
+        let mut program = program_with_shots(2, 64);
+        program.push_gate(Gate::X, &[0]).unwrap();
+        let record = QecRecordRef::absolute(program.measure_z(0).unwrap());
+        let correction = vec![QecOp::Gate {
+            gate: Gate::X,
+            targets: vec![1],
+        }];
+        program.feedforward(&[record], true, correction).unwrap();
+        if with_detector {
+            program.detector(&[record]).unwrap();
+        }
+        program.expectation_value(&[QecPauli::z(1)], 1.0).unwrap();
+        program
+    };
+    let mut reuse = program_with_shots(2, 64);
+    reuse.push_gate(Gate::X, &[0]).unwrap();
+    reuse.measure_z(0).unwrap();
+    reuse.push_gate(Gate::Cx, &[0, 1]).unwrap();
+    reuse.expectation_value(&[QecPauli::z(1)], 1.0).unwrap();
+
+    for (program, label) in [(feedforward(false), "feed-forward"), (reuse, "reuse")] {
+        let err = run_qec_program_with_strategy(&program, QecTStrategy::Auto).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            !message.contains("CAMPS fallback failed"),
+            "{label}: a lowering refusal is reported once: {message}"
+        );
+        let routed = run_qec_program(&program).unwrap();
+        let mean = routed.expectation_values.expect("estimates")[0].mean;
+        assert!(
+            (mean + 1.0).abs() < 1e-12,
+            "{label}: <Z1> is -1, got {mean}"
+        );
+    }
+    let undetected = run_qec_program(&feedforward(false)).unwrap();
+    let detected = run_qec_program(&feedforward(true)).unwrap();
+    assert_eq!(
+        undetected.expectation_values.unwrap()[0].mean,
+        detected.expectation_values.unwrap()[0].mean
+    );
+}
+
+#[test]
+fn exp_val_past_the_reference_width_returns_the_lowering_refusal() {
+    let mut program = program_with_shots(21, 4);
+    program.push_gate(Gate::X, &[0]).unwrap();
+    let record = QecRecordRef::absolute(program.measure_z(0).unwrap());
+    let correction = vec![QecOp::Gate {
+        gate: Gate::X,
+        targets: vec![20],
+    }];
+    program.feedforward(&[record], true, correction).unwrap();
+    program.expectation_value(&[QecPauli::z(20)], 1.0).unwrap();
+
+    let err = run_qec_program(&program).unwrap_err();
+    assert!(
+        matches!(&err, prism_q::PrismError::IncompatibleBackend { reason, .. }
+            if reason.contains("FEEDFORWARD")
+                && reason.contains("max_qec_reference_qubits (20)")
+                && reason.contains("PRISM_MAX_QEC_REFERENCE_QUBITS")),
+        "{err}"
+    );
+}
+
+#[test]
+fn exp_val_under_leakage_names_what_to_drop() {
+    let program = QecProgram::from_text("LEAK(0.1) 0\nEXP_VAL Z0").unwrap();
+    let err = run_qec_program(&program).unwrap_err();
+    let message = err.to_string();
+    assert!(
+        matches!(err, prism_q::PrismError::IncompatibleBackend { .. }),
+        "{message}"
+    );
+    assert!(
+        message.contains("EXP_VAL") && !message.contains("only `run_qec_program` samples"),
+        "{message}"
+    );
 }
 
 #[test]

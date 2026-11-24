@@ -574,3 +574,47 @@ fn plan_reduced_density_matrix_on_the_tensor_network_answers() {
     let result = request().reduced_density_matrix(&[2, 0]).unwrap();
     assert_eq!(plan.backend, result.metadata.backend);
 }
+
+#[test]
+fn wide_gates_over_the_statevector_cap_plan_and_run() {
+    let uniform = prism_q::circuits::qft_circuit(6);
+    let mut flat = Circuit::new(6, 0);
+    for q in 0..6 {
+        flat.add_gate(Gate::H, &[q]);
+    }
+    flat.instructions.extend(uniform.instructions.clone());
+    let mut delta = vec![0.0; 64];
+    delta[0] = 1.0;
+
+    // exp(-i theta/2 X0 Y3 Z5)|0> = cos(theta/2)|0> + sin(theta/2)|q0 q3>.
+    let theta = 0.7_f64;
+    let mut rotated = Circuit::new(6, 0);
+    rotated.add_pauli_rotation(theta, &[PauliTerm::x(0), PauliTerm::y(3), PauliTerm::z(5)]);
+    let mut two_peaks = vec![0.0; 64];
+    two_peaks[0] = (theta / 2.0).cos().powi(2);
+    two_peaks[0b001001] = (theta / 2.0).sin().powi(2);
+
+    for (name, circuit, expected) in [
+        ("qft", uniform, vec![1.0 / 64.0; 64]),
+        ("qft of the flat state", flat, delta),
+        ("pauli rotation", rotated, two_peaks),
+    ] {
+        let request = || {
+            simulate(&circuit)
+                .limits(Limits::new().max_statevector_qubits(4))
+                .seed(42)
+        };
+        let plan = request().plan(Query::Run).unwrap();
+        assert!(plan.would_fail.is_none(), "{name}: {:?}", plan.would_fail);
+        let result = request().run().unwrap();
+        assert_eq!(plan.backend, result.metadata.backend, "{name}");
+        assert_eq!(plan.rule, result.metadata.reason, "{name}");
+        let probabilities = result.probabilities.unwrap().to_vec();
+        for (index, (got, want)) in probabilities.iter().zip(&expected).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "{name}: P({index}) = {got}, want {want}"
+            );
+        }
+    }
+}

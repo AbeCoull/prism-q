@@ -12,7 +12,7 @@ use fuzz_checks::{
     SimulateCase, check_fusion, check_parse, check_parse_bytes, check_parse_tokens, check_simulate,
     check_simulate_case, simulate_case_from_bytes,
 };
-use prism_q::{Gate, Instruction};
+use prism_q::Instruction;
 
 fn seeds(target: &str) -> Vec<Vec<u8>> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -122,20 +122,13 @@ fn seeded_fusion_circuits_match_unfused() {
 // the seeds in `fuzz/seeds/simulate_known_defects` pin one failure each. When a fix lands,
 // move its seed to `fuzz/seeds/simulate` and narrow or delete the shape here.
 fn inside_known_defect(case: &SimulateCase) -> bool {
-    let wide_gate = |gate: &Gate| matches!(gate, Gate::QftBlock { .. } | Gate::PauliRot(_));
     let has = |pred: &dyn Fn(&Instruction) -> bool| case.base.instructions.iter().any(pred);
 
     // A run of eight or more qubits that splits into independent blocks drops its
     // save points.
     let splits = case.padded.num_qubits >= 8 && case.padded.num_qubits > case.base.num_qubits;
     let block_sensitive = has(&|instruction| matches!(instruction, Instruction::Save { .. }));
-    // `Auto` above the statevector cap probes sparse support with a gate that has no
-    // 2x2 matrix.
-    let wide_over_cap = case.statevector_cap.is_some()
-        && has(
-            &|instruction| matches!(instruction, Instruction::Gate { gate, .. } if wide_gate(gate)),
-        );
-    (splits && block_sensitive) || wide_over_cap
+    splits && block_sensitive
 }
 
 #[test]
@@ -169,7 +162,7 @@ fn seeded_simulate_cases_match_the_reference() {
 #[test]
 fn known_defect_seeds_still_fail() {
     let corpus = seeds("simulate_known_defects");
-    assert_eq!(corpus.len(), 2, "one seed per open defect");
+    assert_eq!(corpus.len(), 1, "one seed per open defect");
     for seed in corpus {
         let case = simulate_case_from_bytes(&seed);
         assert!(

@@ -962,22 +962,32 @@ fn trajectory_plan(
         resolve_backend(kind, circuit, false, limits)
     };
     // Noise events are indexed per instruction, so trajectories apply the
-    // stream raw and the Pauli-rotation lowering pass cannot run. The
-    // statevector applies the gate natively (its device path lowers inline);
-    // any other backend without the kernel is rejected before a shot starts.
-    let has_pauli_rot = crate::circuit::any_gate(&circuit.instructions, &mut |gate| {
-        matches!(gate, crate::gates::Gate::PauliRot(_))
-    });
-    if has_pauli_rot && !matches!(plan, BackendPlan::Statevector { .. }) {
-        return Err(crate::error::PrismError::IncompatibleBackend {
-            backend: format!("{:?}", plan.resolved()),
-            reason: "noisy trajectories apply the instruction stream raw so noise events \
-                     stay aligned to it, which leaves no room for the Pauli-rotation \
-                     lowering this backend needs; run on the statevector, or expand the \
-                     rotations with circuit::expand_pauli_rotations and attach the noise \
-                     model to the expanded circuit"
-                .into(),
-        });
+    // stream raw and no lowering pass can run. The statevector applies a QFT
+    // block and a Pauli rotation natively (its device path lowers the rotation
+    // inline); any other backend is rejected before a shot starts.
+    if !matches!(plan, BackendPlan::Statevector { .. }) {
+        use crate::gates::Gate;
+        let has = |wide: fn(&Gate) -> bool| {
+            crate::circuit::any_gate(&circuit.instructions, &mut |gate| wide(gate))
+        };
+        let lowering = if has(|gate| matches!(gate, Gate::QftBlock { .. })) {
+            Some(("QFT block", "circuit::expand_qft_blocks"))
+        } else if has(|gate| matches!(gate, Gate::PauliRot(_))) {
+            Some(("Pauli rotation", "circuit::expand_pauli_rotations"))
+        } else {
+            None
+        };
+        if let Some((form, expand)) = lowering {
+            return Err(crate::error::PrismError::IncompatibleBackend {
+                backend: format!("{:?}", plan.resolved()),
+                reason: format!(
+                    "noisy trajectories apply the instruction stream raw so noise events \
+                     stay aligned to it, which leaves no room for the {form} lowering this \
+                     backend needs; run on the statevector, or expand the circuit with \
+                     {expand} and attach the noise model to the expanded circuit"
+                ),
+            });
+        }
     }
     // A correlated two-qubit Kraus branch reads a two-qubit reduced density
     // matrix. Without this the model clears every routing gate and fails part

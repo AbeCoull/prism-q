@@ -928,3 +928,57 @@ fn noise_model_validate_catches_invalid_custom_channel() {
     assert!(noise.validate().is_ok());
     assert!(noise.after_gate[0][0].channel.is_exactly_samplable());
 }
+
+fn measured(mut circuit: Circuit) -> Circuit {
+    circuit.num_classical_bits = circuit.num_qubits;
+    for q in 0..circuit.num_qubits {
+        circuit.add_measure(q, q);
+    }
+    circuit
+}
+
+// Trajectories apply the stream as the noise model indexes it, so a gate only the
+// statevector has a kernel for is declined by name on every other route, and the
+// lowering the error names is one those routes accept.
+#[test]
+fn trajectories_decline_a_gate_only_the_statevector_applies_and_name_the_lowering() {
+    let mut rotation = Circuit::new(3, 0);
+    rotation.add_gate(Gate::H, &[1]);
+    rotation.add_pauli_rotation(0.7, &[PauliTerm::x(0), PauliTerm::y(1), PauliTerm::z(2)]);
+    let cases = [
+        (measured(circuits::qft_circuit(3)), "expand_qft_blocks"),
+        (measured(rotation), "expand_pauli_rotations"),
+    ];
+    for (wide, remedy) in cases {
+        let noise = NoiseModel::uniform_depolarizing(&wide, 0.01);
+        let native = run_shots_with_noise(BackendKind::Statevector, &wide, &noise, 4, 42).unwrap();
+        assert_eq!(native.shots.len(), 4, "{remedy}");
+        let mixture =
+            run_shots_with_noise(BackendKind::DensityMatrix, &wide, &noise, 4, 42).unwrap();
+        assert_eq!(mixture.shots.len(), 4, "{remedy}");
+
+        let lowered = circuit::expand_qft_blocks(&wide);
+        let lowered = circuit::expand_pauli_rotations(&lowered).into_owned();
+        assert!(
+            lowered.instructions.len() > wide.instructions.len(),
+            "{remedy}"
+        );
+        let lowered_noise = NoiseModel::uniform_depolarizing(&lowered, 0.01);
+        for kind in [
+            BackendKind::Sparse,
+            BackendKind::Mps { max_bond_dim: 8 },
+            BackendKind::Factored,
+            BackendKind::TensorNetwork,
+        ] {
+            match run_shots_with_noise(kind.clone(), &wide, &noise, 4, 42) {
+                Err(PrismError::IncompatibleBackend { reason, .. }) => {
+                    assert!(reason.contains(remedy), "{kind:?}: {reason}")
+                }
+                other => panic!("{kind:?} under {remedy}: {other:?}"),
+            }
+            let shots = run_shots_with_noise(kind.clone(), &lowered, &lowered_noise, 4, 42)
+                .unwrap_or_else(|err| panic!("{kind:?} on the lowered circuit: {err}"));
+            assert_eq!(shots.shots.len(), 4, "{kind:?}");
+        }
+    }
+}

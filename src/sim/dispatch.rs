@@ -551,7 +551,8 @@ fn sparse_support_fits(circuit: &Circuit, cap: usize, limits: &ResolvedLimits) -
     if probe.init(circuit.num_qubits, 0).is_err() {
         return false;
     }
-    circuit.instructions.iter().all(|inst| match inst {
+    let lowered = super::expand_for_backend(&probe, circuit);
+    lowered.instructions.iter().all(|inst| match inst {
         Instruction::Gate { .. } => probe.apply(inst).is_ok() && probe.entry_count() <= cap,
         Instruction::Measure { .. } | Instruction::Barrier { .. } => true,
         _ => false,

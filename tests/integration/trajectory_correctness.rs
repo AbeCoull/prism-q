@@ -928,3 +928,100 @@ fn noise_model_validate_catches_invalid_custom_channel() {
     assert!(noise.validate().is_ok());
     assert!(noise.after_gate[0][0].channel.is_exactly_samplable());
 }
+
+fn measured(mut circuit: Circuit) -> Circuit {
+    circuit.num_classical_bits = circuit.num_qubits;
+    for q in 0..circuit.num_qubits {
+        circuit.add_measure(q, q);
+    }
+    circuit
+}
+
+// Trajectories apply the stream as the noise model indexes it, so a gate only the
+// statevector has a kernel for is declined by name on every other route, and the
+// lowering the error names is one those routes accept.
+#[test]
+fn trajectories_decline_a_gate_only_the_statevector_applies_and_name_the_lowering() {
+    let mut rotation = Circuit::new(3, 0);
+    rotation.add_gate(Gate::H, &[1]);
+    rotation.add_pauli_rotation(0.7, &[PauliTerm::x(0), PauliTerm::y(1), PauliTerm::z(2)]);
+    let cases = [
+        (measured(circuits::qft_circuit(3)), "expand_qft_blocks"),
+        (measured(rotation), "expand_pauli_rotations"),
+    ];
+    for (wide, remedy) in cases {
+        let noise = NoiseModel::uniform_depolarizing(&wide, 0.01);
+        let native = run_shots_with_noise(BackendKind::Statevector, &wide, &noise, 4, 42).unwrap();
+        assert_eq!(native.shots.len(), 4, "{remedy}");
+        let mixture =
+            run_shots_with_noise(BackendKind::DensityMatrix, &wide, &noise, 4, 42).unwrap();
+        assert_eq!(mixture.shots.len(), 4, "{remedy}");
+
+        let lowered = circuit::expand_qft_blocks(&wide);
+        let lowered = circuit::expand_pauli_rotations(&lowered).into_owned();
+        assert!(
+            lowered.instructions.len() > wide.instructions.len(),
+            "{remedy}"
+        );
+        let lowered_noise = NoiseModel::uniform_depolarizing(&lowered, 0.01);
+        for kind in [
+            BackendKind::Sparse,
+            BackendKind::Mps { max_bond_dim: 8 },
+            BackendKind::Factored,
+            BackendKind::TensorNetwork,
+        ] {
+            match run_shots_with_noise(kind.clone(), &wide, &noise, 4, 42) {
+                Err(PrismError::IncompatibleBackend { reason, .. }) => {
+                    assert!(reason.contains(remedy), "{kind:?}: {reason}")
+                }
+                other => panic!("{kind:?} under {remedy}: {other:?}"),
+            }
+            let shots = run_shots_with_noise(kind.clone(), &lowered, &lowered_noise, 4, 42)
+                .unwrap_or_else(|err| panic!("{kind:?} on the lowered circuit: {err}"));
+            assert_eq!(shots.shots.len(), 4, "{kind:?}");
+        }
+    }
+}
+
+#[test]
+fn the_named_lowering_clears_a_guarded_wide_gate_under_noise() {
+    let mut circuit = Circuit::new(5, 5);
+    circuit.add_gate(Gate::X, &[0]);
+    circuit.add_measure(0, 0);
+    circuit.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::QftBlock {
+            start: 2,
+            num: 3,
+            inverse: false,
+            swaps: true,
+            big_endian: false,
+        },
+        targets: SmallVec::from_slice(&[2, 3, 4]),
+    });
+    circuit.add_pauli_rotation(0.7, &[PauliTerm::x(1), PauliTerm::y(2), PauliTerm::z(3)]);
+    for q in 1..5 {
+        circuit.add_measure(q, q);
+    }
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    match run_shots_with_noise(BackendKind::Sparse, &circuit, &noise, 4, 42) {
+        Err(PrismError::IncompatibleBackend { reason, .. }) => {
+            assert!(reason.contains("expand_qft_blocks"), "{reason}");
+            assert!(reason.contains("expand_pauli_rotations"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let lowered = circuit::expand_qft_blocks(&circuit);
+    let lowered = circuit::expand_pauli_rotations(&lowered).into_owned();
+    let lowered_noise = NoiseModel::uniform_depolarizing(&lowered, 0.01);
+    for kind in [
+        BackendKind::Sparse,
+        BackendKind::Mps { max_bond_dim: 8 },
+        BackendKind::Factored,
+        BackendKind::TensorNetwork,
+    ] {
+        let shots = run_shots_with_noise(kind.clone(), &lowered, &lowered_noise, 4, 42)
+            .unwrap_or_else(|err| panic!("{kind:?}: {err}"));
+        assert_eq!(shots.shots.len(), 4, "{kind:?}");
+    }
+}

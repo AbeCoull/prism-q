@@ -196,19 +196,6 @@ pub(super) fn for_each_gate(instructions: &[Instruction], visit: &mut impl FnMut
     }
 }
 
-/// Short-circuiting scan over unguarded [`Instruction::Gate`] payloads only,
-/// which is the set the lowering passes rewrite.
-pub(super) fn any_bare_gate(
-    instructions: &[Instruction],
-    pred: &mut impl FnMut(&Gate) -> bool,
-) -> bool {
-    instructions.iter().any(|inst| match inst {
-        Instruction::Gate { gate, .. } => pred(gate),
-        Instruction::Region(region) => any_bare_gate(region.body(), pred),
-        _ => false,
-    })
-}
-
 /// Short-circuiting [`for_each_gate`].
 pub(crate) fn any_gate(instructions: &[Instruction], pred: &mut impl FnMut(&Gate) -> bool) -> bool {
     instructions.iter().any(|inst| match inst {

@@ -1017,10 +1017,12 @@ impl<'c> Simulate<'c, Seeded> {
     /// same gate set (`Rx`, `Ry`, `Rz`, `Rzz`, `P`, `PauliRot`) at `1 + 2 * links`
     /// circuit evaluations against the adjoint's one, so the adjoint stays the
     /// better choice where it applies. A backend with no native observable path
-    /// reports `BackendUnsupported` naming itself. Under a noise model every
-    /// evaluation reads the exact mixture, so the backend must be
-    /// [`BackendKind::DensityMatrix`] or its device sibling; the shift stays
-    /// exact because the channels do not depend on the shifted angle. See
+    /// reports `BackendUnsupported` naming itself. Under a noise model the
+    /// backend must be [`BackendKind::DensityMatrix`] or its device sibling,
+    /// where every evaluation reads the exact mixture, or
+    /// [`BackendKind::PauliPath`], which carries the channels through its
+    /// truncated Pauli sum. The shift stays exact because the channels do not
+    /// depend on the shifted angle. See
     /// [`gradient::run_expectation_gradient_shift`].
     #[inline]
     pub fn expectation_gradient_shift(

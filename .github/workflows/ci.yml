@@ -134,7 +134,7 @@ jobs:
         run: >-
           cargo nextest run --features "$CI_FEATURES"
           --lib --test integration --test backend_equivalence
-          -E '(kind(lib) & test(route_ledger)) | binary(backend_equivalence) | test(/^(degenerate_inputs|conformance_matrix|backend_matrix|measurement_matrix|golden_small_circuits|differential_wide|sampling_contract)::/)'
+          -E '(kind(lib) & test(route_ledger)) | binary(backend_equivalence) | test(/^(degenerate_inputs|conformance_matrix|backend_matrix|measurement_matrix|golden_small_circuits|differential_wide|sampling_contract|fuzz_replay)::/)'
 
   # No hosted runner guarantees AVX-512, so the AVX-512 kernels run under Intel SDE
   # emulating Sapphire Rapids. PRISM_REQUIRE_AVX512 fails a test that would otherwise

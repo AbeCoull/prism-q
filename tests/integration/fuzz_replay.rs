@@ -6,7 +6,13 @@ mod fuzz_checks;
 
 use std::path::Path;
 
-use fuzz_checks::{check_fusion, check_parse, check_parse_bytes, check_parse_tokens};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+
+use fuzz_checks::{
+    SimulateCase, check_fusion, check_parse, check_parse_bytes, check_parse_tokens, check_simulate,
+    check_simulate_case, simulate_case_from_bytes,
+};
+use prism_q::{Gate, Instruction};
 
 fn seeds(target: &str) -> Vec<Vec<u8>> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -105,9 +111,80 @@ fn seeded_fusion_circuits_match_unfused() {
     for seed in corpus {
         check_fusion(&seed);
     }
-    let mut rng = SplitMix(0xDEAD_BEEF);
+    let mut rng = SplitMix(42);
     for _ in 0..150 {
         let len = 64 + rng.below(448);
         check_fusion(&rng.bytes(len));
+    }
+}
+
+// Open defects the simulate loop runs into. A case inside one of these shapes may fail;
+// the seeds in `fuzz/seeds/simulate_known_defects` pin one failure each. When a fix lands,
+// move its seed to `fuzz/seeds/simulate` and narrow or delete the shape here.
+fn inside_known_defect(case: &SimulateCase) -> bool {
+    let wide_gate = |gate: &Gate| matches!(gate, Gate::QftBlock { .. } | Gate::PauliRot(_));
+    let has = |pred: &dyn Fn(&Instruction) -> bool| case.base.instructions.iter().any(pred);
+
+    // A run of eight or more qubits that splits into independent blocks mishandles
+    // classical bits, save points and the offset of a QFT block.
+    let splits = case.padded.num_qubits >= 8 && case.padded.num_qubits > case.base.num_qubits;
+    let block_sensitive = has(&|instruction| match instruction {
+        Instruction::Measure { .. }
+        | Instruction::Conditional { .. }
+        | Instruction::Save { .. } => true,
+        Instruction::Gate { gate, .. } => matches!(gate, Gate::QftBlock { .. }),
+        _ => false,
+    });
+    // `Auto` above the statevector cap probes sparse support with a gate that has no
+    // 2x2 matrix.
+    let wide_over_cap = case.statevector_cap.is_some()
+        && has(
+            &|instruction| matches!(instruction, Instruction::Gate { gate, .. } if wide_gate(gate)),
+        );
+    (splits && block_sensitive) || wide_over_cap
+}
+
+#[test]
+fn seeded_simulate_cases_match_the_reference() {
+    let corpus = seeds("simulate");
+    assert!(!corpus.is_empty(), "simulate seed corpus is empty");
+    for seed in corpus {
+        check_simulate(&seed);
+    }
+    let mut rng = SplitMix(42);
+    let mut tolerated = 0;
+    for _ in 0..2000 {
+        let len = 8 + rng.below(120);
+        let case = simulate_case_from_bytes(&rng.bytes(len));
+        if let Err(panic) = catch_unwind(AssertUnwindSafe(|| check_simulate_case(&case))) {
+            if !inside_known_defect(&case) {
+                resume_unwind(panic);
+            }
+            tolerated += 1;
+        }
+    }
+    assert!(
+        tolerated > 0,
+        "no case failed inside a known defect shape; delete `inside_known_defect`"
+    );
+}
+
+// Default build only: the lowered floors send some of these circuits down other routes,
+// where the same input passes.
+#[cfg(not(prism_lowered_thresholds))]
+#[test]
+fn known_defect_seeds_still_fail() {
+    let corpus = seeds("simulate_known_defects");
+    assert_eq!(corpus.len(), 5, "one seed per open defect");
+    for seed in corpus {
+        let case = simulate_case_from_bytes(&seed);
+        assert!(
+            inside_known_defect(&case),
+            "seed lies outside every known defect shape\n{case:#?}"
+        );
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| check_simulate_case(&case))).is_err(),
+            "a known defect no longer reproduces; move its seed to fuzz/seeds/simulate\n{case:#?}"
+        );
     }
 }

@@ -913,19 +913,22 @@ impl<'c> Simulate<'c, Seeded> {
                 ),
             });
         }
-        let (left_backend, left) = self.overlap_side(diagnostic)?;
-        let (right_backend, right) = other.overlap_side(diagnostic)?;
+        let (left_backend, left_reason) = self.overlap_side(diagnostic)?;
+        let (right_backend, right_reason) = other.overlap_side(diagnostic)?;
+        let fidelity = left_backend.overlap_sq(&*right_backend)?;
+        // A tensor network truncates while exporting for the inner product
+        // itself, so each side's bound is read after it.
         Ok(OverlapResult {
-            fidelity: left_backend.overlap_sq(&*right_backend)?,
-            left,
-            right,
+            fidelity,
+            left: backend_metadata(&*left_backend).with_reason(left_reason),
+            right: backend_metadata(&*right_backend).with_reason(right_reason),
         })
     }
 
     /// One side of [`Simulate::overlap`]: the guards both sides answer to,
     /// then the backend this side's kind resolves to, run and handed back with
-    /// its provenance.
-    fn overlap_side(self, diagnostic: Diagnostic) -> Result<(Box<dyn Backend>, RunMetadata)> {
+    /// the rule that chose it.
+    fn overlap_side(self, diagnostic: Diagnostic) -> Result<(Box<dyn Backend>, RouteRule)> {
         let seed = self.seed_value();
         let limits = &self.resolved_limits();
         let terminal = diagnostic.terminal();
@@ -952,9 +955,11 @@ impl<'c> Simulate<'c, Seeded> {
             0,
             limits,
         )?;
-        let metadata = backend_metadata(&*backend).with_reason(reason);
-        ensure_exact_result(self.require_exact, &metadata)?;
-        Ok((backend, metadata))
+        ensure_exact_result(
+            self.require_exact,
+            &backend_metadata(&*backend).with_reason(reason),
+        )?;
+        Ok((backend, reason))
     }
 
     /// Compute `⟨H⟩` and its exact gradient with respect to the bound

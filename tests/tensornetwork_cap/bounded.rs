@@ -9,7 +9,9 @@ use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
 use prism_q::gates::Gate;
 use prism_q::sim::Exactness;
-use prism_q::{BackendKind, Circuit, PauliTerm, PrismError, simulate};
+use prism_q::{BackendKind, Circuit, Limits, PauliTerm, PrismError, simulate};
+
+const BOUNDED: BackendKind = BackendKind::TensorNetworkBounded { tolerance: 1e-3 };
 
 /// A weakly entangling chain: small rotations ahead of each CZ ladder, so
 /// the intermediates the contraction builds are close to low rank and the
@@ -124,6 +126,91 @@ fn a_bounded_pair_density_is_hermitian_and_inside_its_bound() {
         .fidelity_lower_bound()
         .expect("the bounded route reports a bound");
     assert!(reported < 1.0, "the terminal read the bound before the cut");
+}
+
+// Below 14 so the sampler takes the per-shot sweep rather than the dense arm.
+fn sweep_limits() -> Limits {
+    Limits::new().max_probability_qubits(12)
+}
+
+fn measured_chain() -> Circuit {
+    let mut circuit = weak_chain(14, 4);
+    circuit.measure_all();
+    circuit
+}
+
+fn shots_bound(num_shots: usize) -> f64 {
+    simulate(&measured_chain())
+        .backend(BOUNDED)
+        .limits(sweep_limits())
+        .seed(SEED)
+        .shots(num_shots)
+        .unwrap()
+        .metadata
+        .fidelity_lower_bound()
+        .expect("the bounded route reports a bound")
+}
+
+// Every contraction of the sweep runs inside the sampling call, so a bound
+// read before it reports the untouched 1.0. Each shot is its own answer, so
+// the bound follows the worst shot rather than falling with the shot count.
+#[test]
+fn bounded_shots_report_the_worst_shot_the_sweep_cut() {
+    small_caps();
+    let eight = shots_bound(8);
+    assert!(eight < 1.0, "the terminal read the bound before the sweep");
+    let sixty_four = shots_bound(64);
+    assert!(
+        (eight - sixty_four).abs() < 1e-12,
+        "8 shots {eight} vs 64 shots {sixty_four}"
+    );
+}
+
+#[test]
+fn bounded_counts_report_the_cut_the_sweep_made() {
+    small_caps();
+    let counts = simulate(&measured_chain())
+        .backend(BOUNDED)
+        .limits(sweep_limits())
+        .seed(SEED)
+        .sample_counts(8)
+        .unwrap();
+    let bound = counts
+        .metadata
+        .fidelity_lower_bound()
+        .expect("the bounded route reports a bound");
+    assert!(bound < 1.0, "the terminal read the bound before the sweep");
+    assert!((bound - shots_bound(8)).abs() < 1e-12, "{bound}");
+}
+
+// Each observable truncates its own copy of the network, so listing one
+// observable eight times answers the same query eight times. Twelve qubits,
+// since the fused 14-qubit chain contracts under the cap without a cut.
+#[test]
+fn a_repeated_observable_keeps_the_bound_of_one() {
+    small_caps();
+    let circuit = weak_chain(12, 4);
+    let observable = vec![PauliTerm::z(0), PauliTerm::z(6)];
+    let bound = |observables: &[Vec<PauliTerm>]| {
+        simulate(&circuit)
+            .backend(BOUNDED)
+            .seed(SEED)
+            .expectation_values_reported(observables)
+            .unwrap()
+            .metadata
+            .fidelity_lower_bound()
+            .expect("the bounded route reports a bound")
+    };
+    let once = bound(std::slice::from_ref(&observable));
+    assert!(
+        once < 1.0,
+        "the fixture contracted without cutting anything"
+    );
+    let repeated = bound(&vec![observable; 8]);
+    assert!(
+        (once - repeated).abs() < 1e-12,
+        "once {once} vs eight {repeated}"
+    );
 }
 
 #[test]

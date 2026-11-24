@@ -285,6 +285,12 @@ impl QecTextParser {
         let qubits = parse_qubit_pairs(targets, name, line_num)?;
         for pair in qubits.as_chunks::<2>().0 {
             let (a, b) = (pair[0], pair[1]);
+            if a == b {
+                return Err(qec_parse_error(
+                    line_num,
+                    format!("`{name}` names qubit {a} twice"),
+                ));
+            }
             self.use_qubit(a);
             self.use_qubit(b);
             let ops = &mut self.ops;

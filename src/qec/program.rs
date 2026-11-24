@@ -314,6 +314,15 @@ impl QecProgram {
                     });
                 }
                 validate_qubits(targets.iter().copied(), self.num_qubits)?;
+                if let Some(qubit) = targets
+                    .iter()
+                    .enumerate()
+                    .find_map(|(at, qubit)| targets[..at].contains(qubit).then_some(qubit))
+                {
+                    return Err(PrismError::InvalidParameter {
+                        message: format!("gate `{}` names qubit {qubit} twice", gate.name()),
+                    });
+                }
             }
             QecOp::Measure { qubit, .. } | QecOp::Reset { qubit, .. } => {
                 validate_qubit(*qubit, self.num_qubits)?;

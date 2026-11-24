@@ -16,8 +16,8 @@ typed builders (`push_gate`, `measure`, `measure_pauli_product`, `reset`, `detec
 it is appended. `measure` and `measure_pauli_product` return the new record index, and
 `detector` the detector index. Validation covers gate arity, qubit bounds, finite
 coordinates, coefficients and probabilities, record-reference scope, duplicate qubits
-in a Pauli product, branch probabilities summing to at most 1, and target pairing for
-`DEPOLARIZE2` and `PAULI_CHANNEL_2`.
+in a gate's targets or a Pauli product, branch probabilities summing to at most 1, and
+target pairing for `DEPOLARIZE2` and `PAULI_CHANNEL_2`.
 
 | `QecOp` variant | Payload | Semantics |
 | --- | --- | --- |
@@ -94,7 +94,8 @@ annotations (`LEAK(p)`, `SEEP(p)`, and `LEAK_TRANSPORT(p)` on pairs), `TICK`,
 instructions below, which lower onto the same ops. `rec[-k]` resolves to an absolute
 index while parsing. A numeric argument on a basis measurement, such as `M(0.001)`,
 lowers to a Pauli flip on that record just before the measurement. Inverted (`!`)
-targets are rejected, and instruction tags such as `X_ERROR[tag](p)` are ignored.
+targets and a two-qubit gate pair naming one qubit twice (`CX 0 0`) are rejected, and
+instruction tags such as `X_ERROR[tag](p)` are ignored.
 
 | Instruction | Lowering |
 | --- | --- |

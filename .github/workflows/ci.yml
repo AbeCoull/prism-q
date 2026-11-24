@@ -237,7 +237,7 @@ jobs:
         run: cargo clippy --all-targets --features "parallel unstable-pulse" -- -D warnings -D clippy::undocumented_unsafe_blocks
 
       - name: Tests
-        run: cargo nextest run --features "parallel unstable-pulse" --test pulse_compile
+        run: cargo nextest run --features "parallel unstable-pulse" --lib --test pulse_compile -E 'not kind(lib) or test(/^pulse::/)'
 
       - name: Docs
         run: cargo doc --no-deps --features "$CI_DOC_FEATURES unstable-pulse"
@@ -550,6 +550,9 @@ jobs:
         run: bash scripts/bench_interleave_test.sh
       - name: Verify the combined tree and queue a batch writes
         run: bash scripts/bench_batch_test.sh
+      # Reads no toolchain, so this job needs no Rust setup.
+      - name: Verify which checks the local gate plans for a diff
+        run: bash scripts/pre_pr_plan_test.sh
 
   # Compares the public API against the last release, at the release type the
   # conventional commits since it imply before the pre-1.0 clamp, with the PR

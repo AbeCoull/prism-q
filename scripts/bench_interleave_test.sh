@@ -486,6 +486,38 @@ if ab_run smoke-failure 4 STUB_PANIC=a -- --interleave --ref HEAD; then
     fi
 fi
 
+# A bench-fast binary pins 10 samples, so the report names that tier on the
+# settings table and the verdict line, and says the tier came from --features.
+if ab_run passes-bench-fast 0 STUB_PANIC=none -- --passes --ref HEAD --features parallel,bench-fast \
+    --control-samples 20 --warm-samples 20; then
+    if grep -q '^| Tier | bench-fast (triage), taken from --features and not read from the prebuilt binary |$' "$AB_DIR/report.md" \
+        && grep -q '^| Samples | 10 |$' "$AB_DIR/report.md" \
+        && grep -q '^| Control filter | .*measured at 10 samples |$' "$AB_DIR/report.md" \
+        && grep -q '^| Pass order | ref, new discarded at 10 samples' "$AB_DIR/report.md" \
+        && ! grep -q '^| Slow rows |' "$AB_DIR/report.md" \
+        && grep -q '^\*\*Regression verdict\*\*: CONTROL (same code).* bench-fast tier, triage only' "$AB_DIR/report.md"; then
+        PASS=$((PASS + 1)); printf 'ok    %-34s exit 0, bench-fast tier at 10 samples\n' ab-passes-bench-fast
+    else
+        FAIL=$((FAIL + 1)); printf 'FAIL  %-34s tier or samples mislabelled\n' ab-passes-bench-fast
+        sed 's/^/      /' "$AB_DIR/report.md"
+    fi
+fi
+
+dir="$SCRATCH/interleave-bench-fast"
+mkdir -p "$dir"
+table 10 target:x/a:1000:1:0.005:0 control:c/a:800:1:0.005:0 > "$dir/raw.tsv"
+bash "$RUNNER" --from-tsv "$dir/raw.tsv" --out "$dir/report.md" --max-host-load 0 \
+    --features "parallel bench-internal bench-fast" --samples 30 > "$dir/log" 2>&1
+got=$?
+if [[ "$got" == 0 ]] && grep -q '^| Tier | bench-fast (triage) |$' "$dir/report.md" \
+    && grep -q '^| Criterion | 10 samples, 0.2s warm-up, 1s measurement, pinned by bench-fast' "$dir/report.md" \
+    && grep -q '^\*\*Regression verdict\*\*: PASS.* bench-fast tier, triage only' "$dir/report.md"; then
+    PASS=$((PASS + 1)); printf 'ok    %-34s exit 0, bench-fast tier at 10 samples\n' interleave-bench-fast
+else
+    FAIL=$((FAIL + 1)); printf 'FAIL  %-34s exit %s, tier or samples mislabelled\n' interleave-bench-fast "$got"
+    sed 's/^/      /' "$dir/report.md" "$dir/log"
+fi
+
 git init -q -b other "$SCRATCH/ab-nomain"
 git -C "$SCRATCH/ab-nomain" -c user.name=t -c user.email=t@t commit -q --allow-empty -m one
 if ab_run no-base 5 -- --interleave --project-dir "$SCRATCH/ab-nomain"; then

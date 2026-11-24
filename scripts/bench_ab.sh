@@ -103,7 +103,9 @@
 #   --passes        measure with the passes above. MEASURE_METHOD below picks
 #                   which of the two a run without either flag takes.
 #   --bench,    -b  bench target (default: circuits)
-#   --features      cargo feature list (default: parallel)
+#   --features      cargo feature list (default: parallel). With bench-fast the
+#                   report names the bench-fast tier at 10 samples, which the
+#                   binary pins whatever the tier flags say.
 #   --ref-dir       reference worktree path. Persists between runs, so the
 #                   reference build is cached. Default: a temporary directory
 #                   removed on exit.
@@ -304,6 +306,25 @@ else
     CRITERION_ARGS=(--warm-up-time 1 --measurement-time 3)
     WINDOWS="1s warm-up, 3s measurement"
     PASS_LABELS=(ref new new ref)
+fi
+# A bench-fast binary pins 10 samples and 0.2s and 1s windows on every group that
+# benches/common configures, over the command line and PRISM_BENCH_SAMPLES, so the
+# report names that tier, and the control, warmup and slow counts are 10 as well.
+# The tier is read from --features; a prebuilt binary is not inspected.
+FAST=""
+if [[ ",${FEATURES// /,}," == *",bench-fast,"* ]]; then
+    FAST=1
+    TIER="bench-fast (triage)"
+    SAMPLES=10
+    CONTROL_SAMPLES=10
+    WARM_SAMPLES=10
+    SLOW_SAMPLES=10
+    WINDOWS="0.2s warm-up, 1s measurement, pinned by bench-fast"
+    SLOW_ROW_SECONDS=0
+fi
+TIER_ROW="$TIER"
+if [[ -n "$REF_EXE" || -n "$NEW_EXE" ]]; then
+    TIER_ROW+=", taken from --features and not read from the prebuilt binary"
 fi
 PASS_COUNT="${#PASS_LABELS[@]}"
 
@@ -1023,7 +1044,7 @@ set +e
     echo "| Reference binary | $REF_PROVENANCE |"
     echo "| Working-tree binary | $NEW_PROVENANCE |"
     echo "| Features | \`$FEATURES\` |"
-    echo "| Tier | $TIER |"
+    echo "| Tier | $TIER_ROW |"
     echo "| Pass order | ref, new discarded at $WARM_SAMPLES samples, then $PASS_ORDER (adjacent, no rebuild) |"
     echo "| Criterion windows | $WINDOWS (groups that pin their own keep it) |"
     echo "| Samples | $SAMPLES |"
@@ -1048,7 +1069,7 @@ set +e
     echo ""
 
     awk -v threshold="$THRESHOLD" -v min_rows="$MIN_ROWS" \
-        -v light="${LIGHT:-0}" -v passes="$PASS_COUNT" -v slow_ids="$SLOW_IDS" \
+        -v light="${LIGHT:-0}" -v fast="${FAST:-0}" -v passes="$PASS_COUNT" -v slow_ids="$SLOW_IDS" \
         -v slow_at="$SLOW_SAMPLES" -v loaded="$LOADED_PASSES" -v same_code="${SAME_CODE:-0}" \
         -v pass_labels="${PASS_LABELS[*]}" \
         -v moved_file="$WORKDIR/moved.txt" -v regressed_file="$WORKDIR/regressed.txt" '
@@ -1244,10 +1265,12 @@ set +e
                 exit 5
             }
 
-            # The light tier names itself on the verdict line so the table cannot be
-            # pasted into a PR as a gate result.
+            # The light and bench-fast tiers name themselves on the verdict line so the
+            # table cannot be pasted into a PR as a gate result.
             tier_note = ""
-            if (light) {
+            if (fast) {
+                tier_note = " bench-fast tier, triage only: re-run the rows that moved without bench-fast before claiming a number."
+            } else if (light) {
                 tier_note = " Light tier, triage only: re-run the rows that moved on the full tier before claiming a number."
             }
             # A lane that moved as a whole shows up as a median control well off

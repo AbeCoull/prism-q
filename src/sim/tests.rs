@@ -6,7 +6,7 @@ use crate::backend::sparse::SparseBackend;
 use crate::backend::stabilizer::StabilizerBackend;
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::tensornetwork::TensorNetworkBackend;
-use crate::circuit::smallvec;
+use crate::circuit::{ClassicalCondition, smallvec};
 use crate::gates::Gate;
 use crate::sim::unified_pauli::SpdTruncation;
 
@@ -875,6 +875,241 @@ fn test_decomposed_bell_pairs_matches_monolithic() {
             (d - m).abs() < 1e-10,
             "mismatch: decomposed={d}, monolithic={m}"
         );
+    }
+}
+
+fn conditional_x(condition: ClassicalCondition, target: usize) -> Instruction {
+    Instruction::Conditional {
+        condition,
+        gate: Gate::X,
+        targets: smallvec![target],
+    }
+}
+
+// Runs `build` at 7 qubits, under the decomposition floor, and at `wide`, where the
+// idle qubits split the circuit into blocks. Both must give `expected`.
+fn assert_decomposed_bits(
+    wide: usize,
+    bits: usize,
+    build: impl Fn(&mut Circuit),
+    expected: &[bool],
+) -> RunOutcome {
+    let run_at = |n: usize| {
+        let mut c = Circuit::new(n, bits);
+        build(&mut c);
+        simulate(&c).seed(42).run().unwrap()
+    };
+    let whole = run_at(7);
+    assert_ne!(whole.metadata.backend, ResolvedBackend::Decomposed);
+    assert_eq!(whole.classical_bits, expected, "7 qubits");
+    let split = run_at(wide);
+    assert_eq!(split.metadata.backend, ResolvedBackend::Decomposed);
+    assert_eq!(split.classical_bits, expected, "{wide} qubits");
+    split
+}
+
+#[test]
+fn decomposed_register_condition_reads_a_partly_measured_register() {
+    let split = assert_decomposed_bits(
+        8,
+        2,
+        |c| {
+            c.add_gate(Gate::X, &[0]);
+            c.add_measure(0, 0);
+            c.instructions.push(conditional_x(
+                ClassicalCondition::RegisterEquals {
+                    offset: 0,
+                    size: 2,
+                    value: 1,
+                },
+                1,
+            ));
+        },
+        &[true, false],
+    );
+    assert!((split.probabilities.unwrap().get(0b11) - 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn decomposed_register_condition_reads_a_register_measured_out_of_order() {
+    assert_decomposed_bits(
+        8,
+        3,
+        |c| {
+            c.add_gate(Gate::X, &[1]);
+            c.add_measure(1, 1);
+            c.add_measure(0, 0);
+            c.instructions.push(conditional_x(
+                ClassicalCondition::RegisterEquals {
+                    offset: 0,
+                    size: 2,
+                    value: 2,
+                },
+                2,
+            ));
+            c.add_measure(2, 2);
+        },
+        &[false, true, true],
+    );
+}
+
+// An empty register reads as 0 whatever its offset, so the guard is constant.
+#[test]
+fn decomposed_zero_size_register_condition_is_constant() {
+    let build = |equals: bool| {
+        move |c: &mut Circuit| {
+            let (offset, size, value) = (2, 0, 0);
+            c.add_gate(Gate::H, &[0]);
+            c.add_gate(Gate::Cx, &[0, 1]);
+            c.add_gate(Gate::X, &[2]);
+            c.add_measure(2, 0);
+            c.instructions.push(conditional_x(
+                if equals {
+                    ClassicalCondition::RegisterEquals {
+                        offset,
+                        size,
+                        value,
+                    }
+                } else {
+                    ClassicalCondition::RegisterNotEquals {
+                        offset,
+                        size,
+                        value,
+                    }
+                },
+                3,
+            ));
+            c.add_measure(3, 1);
+        }
+    };
+    assert_decomposed_bits(12, 3, build(true), &[true, true, false]);
+    assert_decomposed_bits(12, 3, build(false), &[true, false, false]);
+}
+
+#[test]
+fn decomposed_guards_read_bits_no_measurement_writes() {
+    assert_decomposed_bits(
+        8,
+        5,
+        |c| {
+            c.instructions
+                .push(conditional_x(ClassicalCondition::BitIsZero(1), 1));
+            c.instructions
+                .push(conditional_x(ClassicalCondition::BitIsOne(0), 2));
+            c.instructions.push(conditional_x(
+                ClassicalCondition::Parity {
+                    bits: Box::new([0, 1]),
+                    expected: false,
+                },
+                3,
+            ));
+            c.add_measure(1, 2);
+            c.add_measure(2, 3);
+            c.add_measure(3, 4);
+        },
+        &[false, false, true, false, true],
+    );
+}
+
+#[test]
+fn decomposed_reused_bit_keeps_the_later_measurement() {
+    assert_decomposed_bits(
+        10,
+        1,
+        |c| {
+            c.add_gate(Gate::X, &[0]);
+            c.add_measure(c.num_qubits - 1, 0);
+            c.add_measure(0, 0);
+        },
+        &[true],
+    );
+}
+
+#[test]
+fn decomposed_reused_bit_keeps_the_later_measurement_on_every_shot() {
+    let mut c = Circuit::new(10, 1);
+    c.add_gate(Gate::X, &[0]);
+    c.add_measure(9, 0);
+    c.add_measure(0, 0);
+    c.add_gate(Gate::X, &[3]);
+    let result = simulate(&c)
+        .backend(BackendKind::Statevector)
+        .seed(42)
+        .shots(8)
+        .unwrap();
+    assert_eq!(result.metadata.backend, ResolvedBackend::Decomposed);
+    assert_eq!(result.shots, vec![vec![true]; 8]);
+}
+
+#[test]
+fn decomposed_guard_reads_the_writer_that_precedes_it() {
+    assert_decomposed_bits(
+        10,
+        2,
+        |c| {
+            c.add_gate(Gate::X, &[0]);
+            c.add_measure(0, 0);
+            c.instructions
+                .push(conditional_x(ClassicalCondition::BitIsOne(0), 4));
+            c.add_measure(2, 0);
+            c.add_measure(4, 1);
+        },
+        &[false, true],
+    );
+}
+
+// One classical bit written from both halves keeps the circuit whole, and the
+// halves still count as partial independence for the backend choice.
+#[test]
+fn blocks_sharing_a_classical_bit_still_route_to_factored() {
+    let mut c = Circuit::new(10, 1);
+    for base in [0, 5] {
+        for q in base..base + 4 {
+            c.add_gate(Gate::Rx(0.3), &[q]);
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    c.add_measure(5, 0);
+    c.add_measure(0, 0);
+    let (decompose, partial) = analyze_independence(&c);
+    assert!(decompose.is_none());
+    assert!(partial);
+    let outcome = simulate(&c).seed(42).run().unwrap();
+    assert_eq!(outcome.metadata.backend, ResolvedBackend::Factored);
+}
+
+// The QFT of the uniform superposition is |000>, so only the X on q0 shows.
+#[test]
+fn decomposed_qft_block_off_qubit_zero_acts_on_its_own_qubits() {
+    let probs_at = |n: usize| {
+        let mut c = Circuit::new(n, 0);
+        c.add_gate(Gate::X, &[0]);
+        for q in 3..6 {
+            c.add_gate(Gate::H, &[q]);
+        }
+        c.add_gate(
+            Gate::QftBlock {
+                start: 3,
+                num: 3,
+                inverse: false,
+                swaps: true,
+                big_endian: false,
+            },
+            &[3, 4, 5],
+        );
+        let outcome = simulate(&c).seed(42).run().unwrap();
+        assert_eq!(
+            outcome.metadata.backend == ResolvedBackend::Decomposed,
+            n >= MIN_DECOMPOSITION_QUBITS
+        );
+        outcome.probabilities.unwrap().to_vec()
+    };
+    for n in [7, 12] {
+        let probs = probs_at(n);
+        for (index, &p) in probs.iter().enumerate() {
+            let want = if index == 1 { 1.0 } else { 0.0 };
+            assert!((p - want).abs() < 1e-10, "{n} qubits, index {index}: {p}");
+        }
     }
 }
 

@@ -2554,3 +2554,28 @@ fn asymmetric_guarded_readout_counts_follow_stabilizer_replay() {
         assert_counts_follow_replay(&circuit, &noise);
     }
 }
+
+// The noisy sampler maps by measurement index, so two blocks measured into the
+// same classical bits still compile apart.
+#[test]
+fn noisy_blocks_sharing_classical_bits_keep_the_filtered_compile() {
+    let mut circuit = Circuit::new(4, 2);
+    for base in [0, 2] {
+        circuit.add_gate(Gate::H, &[base]);
+        circuit.add_gate(Gate::Cx, &[base, base + 1]);
+    }
+    for qubit in 0..4 {
+        circuit.add_measure(qubit, qubit % 2);
+    }
+    let blocks = vec![vec![0, 1], vec![2, 3]];
+    assert_eq!(circuit.independent_subsystems(), blocks);
+
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.05);
+    let whole = compile_validated_noisy(&circuit, &noise, 42)
+        .unwrap()
+        .sample_bulk(64);
+    let filtered = compile_noisy_filtered(&circuit, &noise, &blocks, 42)
+        .unwrap()
+        .sample_bulk(64);
+    assert_eq!(whole, filtered);
+}

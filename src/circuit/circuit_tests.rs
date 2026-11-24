@@ -226,7 +226,7 @@ fn test_subsystems_no_classical_dependency() {
 }
 
 #[test]
-fn test_subsystems_join_a_condition_to_the_last_writer_of_its_bit() {
+fn test_subsystems_join_a_condition_to_every_writer_of_its_bit() {
     let mut c = Circuit::new(5, 1);
     c.instructions.push(Instruction::Conditional {
         condition: ClassicalCondition::BitIsOne(0),
@@ -237,8 +237,120 @@ fn test_subsystems_join_a_condition_to_the_last_writer_of_its_bit() {
     c.add_measure(2, 0);
     assert_eq!(
         c.independent_subsystems(),
-        vec![vec![0], vec![1], vec![2, 4], vec![3]]
+        vec![vec![0, 2, 4], vec![1], vec![3]]
     );
+}
+
+#[test]
+fn test_subsystems_join_the_writers_of_one_bit() {
+    let mut c = Circuit::new(5, 2);
+    c.add_measure(3, 1);
+    c.add_measure(0, 0);
+    c.instructions
+        .push(Instruction::Region(Box::new(GuardedRegion::new(
+            ClassicalCondition::BitIsOne(0),
+            vec![Instruction::Measure {
+                qubit: 4,
+                classical_bit: 1,
+            }],
+        ))));
+    assert_eq!(
+        c.independent_subsystems(),
+        vec![vec![0, 3, 4], vec![1], vec![2]]
+    );
+}
+
+#[test]
+fn test_partition_subcircuits_orders_read_and_written_bits() {
+    let mut c = Circuit::new(4, 4);
+    c.add_measure(1, 3);
+    c.add_measure(0, 1);
+    c.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::RegisterEquals {
+            offset: 1,
+            size: 3,
+            value: 0b101,
+        },
+        gate: Gate::X,
+        targets: SmallVec::from_slice(&[2]),
+    });
+    c.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsZero(0),
+        gate: Gate::X,
+        targets: SmallVec::from_slice(&[3]),
+    });
+
+    let components = c.independent_subsystems();
+    assert_eq!(components, vec![vec![0, 1, 2], vec![3]]);
+    let parts = c.partition_subcircuits(&components);
+    assert_eq!(parts[0].2, vec![1, 2, 3]);
+    assert_eq!(parts[1].2, vec![0]);
+    let sub = &parts[0].0;
+    assert!(matches!(
+        sub.instructions[0],
+        Instruction::Measure {
+            qubit: 1,
+            classical_bit: 2
+        }
+    ));
+    assert!(matches!(
+        &sub.instructions[2],
+        Instruction::Conditional {
+            condition: ClassicalCondition::RegisterEquals {
+                offset: 0,
+                size: 3,
+                value: 0b101
+            },
+            ..
+        }
+    ));
+    assert!(matches!(
+        &parts[1].0.instructions[0],
+        Instruction::Conditional {
+            condition: ClassicalCondition::BitIsZero(0),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn test_partition_subcircuits_moves_a_qft_block_onto_its_component() {
+    let qft = |start| Gate::QftBlock {
+        start,
+        num: 2,
+        inverse: false,
+        swaps: true,
+        big_endian: false,
+    };
+    let mut c = Circuit::new(6, 1);
+    c.add_gate(Gate::Cx, &[0, 4]);
+    c.add_gate(qft(2), &[2, 3]);
+    c.add_measure(2, 0);
+    c.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: qft(2),
+        targets: SmallVec::from_slice(&[2, 3]),
+    });
+
+    let parts = c.partition_subcircuits(&c.independent_subsystems());
+    let (sub, q_map, _) = &parts[2];
+    assert_eq!(q_map, &[2, 3]);
+    for index in [0, 2] {
+        let (Instruction::Gate { gate, targets } | Instruction::Conditional { gate, targets, .. }) =
+            &sub.instructions[index]
+        else {
+            panic!("expected a gate at {index}");
+        };
+        assert!(matches!(
+            gate,
+            Gate::QftBlock {
+                start: 0,
+                num: 2,
+                ..
+            }
+        ));
+        assert_eq!(targets.as_slice(), &[0, 1]);
+    }
 }
 
 #[test]
@@ -309,7 +421,9 @@ fn test_partition_subcircuits_shared_classical_bit() {
     c.add_measure(1, 0);
     c.add_measure(1, 1);
 
-    let parts = c.partition_subcircuits(&c.independent_subsystems());
+    // `independent_subsystems` keeps the writers of one bit together, so the split
+    // is spelled out here.
+    let parts = c.partition_subcircuits(&[vec![0], vec![1]]);
     assert_eq!(parts[0].2, vec![1]);
     assert_eq!(parts[1].2, vec![0, 1]);
     let sub = &parts[1].0;

@@ -428,6 +428,27 @@ fn remap_condition(
     }
 }
 
+/// `gate` with the qubit range a [`Gate::QftBlock`] carries in its payload moved
+/// under `qubit`, which must keep the block's qubits consecutive and ascending.
+pub(super) fn remap_gate(gate: &Gate, qubit: &impl Fn(usize) -> usize) -> Gate {
+    match gate {
+        Gate::QftBlock {
+            start,
+            num,
+            inverse,
+            swaps,
+            big_endian,
+        } => Gate::QftBlock {
+            start: qubit(*start as usize) as u8,
+            num: *num,
+            inverse: *inverse,
+            swaps: *swaps,
+            big_endian: *big_endian,
+        },
+        other => other.clone(),
+    }
+}
+
 /// Rebuild `inst` under a qubit and classical-bit relabeling.
 ///
 /// Callers must have established that every qubit `inst` touches has an image
@@ -439,7 +460,7 @@ pub(crate) fn remap_instruction(
 ) -> Instruction {
     match inst {
         Instruction::Gate { gate, targets } => Instruction::Gate {
-            gate: gate.clone(),
+            gate: remap_gate(gate, qubit),
             targets: targets.iter().map(|&t| qubit(t)).collect(),
         },
         Instruction::Measure {
@@ -468,7 +489,7 @@ pub(crate) fn remap_instruction(
             targets,
         } => Instruction::Conditional {
             condition: remap_condition(condition, cbit),
-            gate: gate.clone(),
+            gate: remap_gate(gate, qubit),
             targets: targets.iter().map(|&t| qubit(t)).collect(),
         },
         Instruction::Region(region) => Instruction::Region(Box::new(GuardedRegion::new(

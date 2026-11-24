@@ -125,16 +125,10 @@ fn inside_known_defect(case: &SimulateCase) -> bool {
     let wide_gate = |gate: &Gate| matches!(gate, Gate::QftBlock { .. } | Gate::PauliRot(_));
     let has = |pred: &dyn Fn(&Instruction) -> bool| case.base.instructions.iter().any(pred);
 
-    // A run of eight or more qubits that splits into independent blocks mishandles
-    // classical bits, save points and the offset of a QFT block.
+    // A run of eight or more qubits that splits into independent blocks drops its
+    // save points.
     let splits = case.padded.num_qubits >= 8 && case.padded.num_qubits > case.base.num_qubits;
-    let block_sensitive = has(&|instruction| match instruction {
-        Instruction::Measure { .. }
-        | Instruction::Conditional { .. }
-        | Instruction::Save { .. } => true,
-        Instruction::Gate { gate, .. } => matches!(gate, Gate::QftBlock { .. }),
-        _ => false,
-    });
+    let block_sensitive = has(&|instruction| matches!(instruction, Instruction::Save { .. }));
     // `Auto` above the statevector cap probes sparse support with a gate that has no
     // 2x2 matrix.
     let wide_over_cap = case.statevector_cap.is_some()
@@ -175,7 +169,7 @@ fn seeded_simulate_cases_match_the_reference() {
 #[test]
 fn known_defect_seeds_still_fail() {
     let corpus = seeds("simulate_known_defects");
-    assert_eq!(corpus.len(), 5, "one seed per open defect");
+    assert_eq!(corpus.len(), 2, "one seed per open defect");
     for seed in corpus {
         let case = simulate_case_from_bytes(&seed);
         assert!(

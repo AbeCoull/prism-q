@@ -40,6 +40,7 @@ pub use prepared::PreparedCircuit;
 pub use qft_recognition::{
     QftTextbookStep, expand_qft_blocks, qft_textbook_steps, recognize_qft_blocks,
 };
+use region::remap_gate;
 pub use region::{ClassicalCondition, GuardedRegion, MAX_REGION_DEPTH, guarded};
 use region::{
     FoldState, any_instruction, collect_body_condition_bits, collect_condition_bits,
@@ -470,7 +471,8 @@ impl Circuit {
     /// Partition qubits into independent subsystems.
     ///
     /// Two qubits share a subsystem if a multi-qubit gate connects them,
-    /// transitively, or if a condition on one's measurement guards the other.
+    /// transitively, if both are measured into one classical bit, or if a
+    /// condition on one's measurement guards the other.
     /// Each group is sorted, and groups are ordered by their lowest qubit.
     pub fn independent_subsystems(&self) -> Vec<Vec<usize>> {
         self.subsystems_and_clifford().0
@@ -510,15 +512,38 @@ impl Circuit {
             }
         }
 
-        // A condition joins its targets to the last qubit measured into each bit
-        // it reads, anywhere in the circuit. Those unions wait for the loop to
-        // end, so a circuit without conditions never walks its measurements.
+        fn join_writer(
+            parent: &mut [usize],
+            rank: &mut [u8],
+            writers: &mut [Option<usize>],
+            qubit: usize,
+            classical_bit: usize,
+        ) {
+            match writers.get_mut(classical_bit) {
+                Some(Some(first)) => union(parent, rank, *first, qubit),
+                Some(slot) => *slot = Some(qubit),
+                None => {}
+            }
+        }
+
+        // A classical bit belongs to one group: every qubit measured into it
+        // joins the first, and a condition joins its targets to that group for
+        // each bit it reads. The condition unions wait for the loop to end, so a
+        // guard ahead of a bit's first measurement joins it too.
         let mut clifford_only = true;
         let mut condition_bits: Vec<usize> = Vec::new();
         let mut guarded: Vec<(usize, usize)> = Vec::new();
+        let mut writers: Vec<Option<usize>> = vec![None; self.num_classical_bits];
         for inst in &self.instructions {
             condition_bits.clear();
             let targets = match inst {
+                Instruction::Measure {
+                    qubit,
+                    classical_bit,
+                } => {
+                    join_writer(&mut parent, &mut rank, &mut writers, *qubit, *classical_bit);
+                    continue;
+                }
                 Instruction::Gate { gate, targets } => {
                     clifford_only &= gate.is_clifford();
                     targets.as_slice()
@@ -537,6 +562,9 @@ impl Circuit {
                         clifford_only && !any_gate(region.body(), &mut |gate| !gate.is_clifford());
                     collect_condition_bits(region.condition(), &mut condition_bits);
                     collect_body_condition_bits(region.body(), &mut condition_bits);
+                    for_each_measure(region.body(), &mut |qubit, classical_bit| {
+                        join_writer(&mut parent, &mut rank, &mut writers, qubit, classical_bit);
+                    });
                     region.qubits()
                 }
                 _ => continue,
@@ -550,15 +578,9 @@ impl Circuit {
             }
         }
 
-        if !guarded.is_empty() {
-            let mut cbit_to_qubit: Vec<Option<usize>> = vec![None; self.num_classical_bits.max(1)];
-            for_each_measure(&self.instructions, &mut |qubit, classical_bit| {
-                cbit_to_qubit[classical_bit] = Some(qubit);
-            });
-            for (first, bit) in guarded {
-                if let Some(mq) = cbit_to_qubit.get(bit).copied().flatten() {
-                    union(&mut parent, &mut rank, first, mq);
-                }
+        for (first, bit) in guarded {
+            if let Some(writer) = writers.get(bit).copied().flatten() {
+                union(&mut parent, &mut rank, first, writer);
             }
         }
 
@@ -583,6 +605,9 @@ impl Circuit {
     /// `components` must cover every qubit with no instruction spanning two of them,
     /// as [`Circuit::independent_subsystems`] returns. Each entry is
     /// `(sub_circuit, qubit_map, classical_map)` with `map[local] = original`.
+    /// A block's classical register holds the bits its measurements write and its
+    /// conditions read, in ascending order, so a register condition keeps its
+    /// contiguous run.
     pub(crate) fn partition_subcircuits(
         &self,
         components: &[Vec<usize>],
@@ -597,29 +622,71 @@ impl Circuit {
             }
         }
 
-        // Pass 1: discover classical bits per component. A bit measured from
+        // Pass 1: discover classical bits per component. A bit claimed by
         // several components gets a local index in each; the first claim stays
-        // in the flat map and later claims go to `shared_cbits`.
+        // in the flat map and later claims go to `shared_cbits`. Local indices
+        // are filled in once each component's bits are sorted.
         let mut classical_bits_per_comp: Vec<Vec<usize>> = vec![Vec::new(); k];
         let max_cb = self.num_classical_bits.max(1);
         let mut cbit_map: Vec<Option<(usize, usize)>> = vec![None; max_cb];
         let mut shared_cbits: HashMap<(usize, usize), usize> = HashMap::new();
 
-        for_each_measure(&self.instructions, &mut |qubit, classical_bit| {
-            let (comp_idx, _) = qubit_map[qubit];
-            let bits = &mut classical_bits_per_comp[comp_idx];
+        let mut claim = |comp_idx: usize, classical_bit: usize| {
             match cbit_map[classical_bit] {
-                None => cbit_map[classical_bit] = Some((comp_idx, bits.len())),
+                None => cbit_map[classical_bit] = Some((comp_idx, 0)),
                 Some((owner, _)) if owner == comp_idx => return,
                 Some(_) => match shared_cbits.entry((comp_idx, classical_bit)) {
                     Entry::Occupied(_) => return,
                     Entry::Vacant(slot) => {
-                        slot.insert(bits.len());
+                        slot.insert(0);
                     }
                 },
             }
-            bits.push(classical_bit);
-        });
+            classical_bits_per_comp[comp_idx].push(classical_bit);
+        };
+        let mut region_reads: Vec<usize> = Vec::new();
+        for inst in &self.instructions {
+            match inst {
+                Instruction::Measure {
+                    qubit,
+                    classical_bit,
+                } => claim(qubit_map[*qubit].0, *classical_bit),
+                Instruction::Conditional {
+                    condition, targets, ..
+                } => {
+                    let (comp_idx, _) = qubit_map[targets[0]];
+                    condition.for_each_bit(|bit| claim(comp_idx, bit));
+                }
+                Instruction::Region(region) => {
+                    let Some(&first) = region.qubits().first() else {
+                        continue;
+                    };
+                    let (comp_idx, _) = qubit_map[first];
+                    for_each_measure(region.body(), &mut |_, bit| claim(comp_idx, bit));
+                    region_reads.clear();
+                    collect_condition_bits(region.condition(), &mut region_reads);
+                    collect_body_condition_bits(region.body(), &mut region_reads);
+                    for &bit in &region_reads {
+                        claim(comp_idx, bit);
+                    }
+                }
+                Instruction::Gate { .. }
+                | Instruction::Reset { .. }
+                | Instruction::Barrier { .. }
+                | Instruction::Save { .. } => {}
+            }
+        }
+        for (comp_idx, bits) in classical_bits_per_comp.iter_mut().enumerate() {
+            bits.sort_unstable();
+            for (local, &classical_bit) in bits.iter().enumerate() {
+                match &mut cbit_map[classical_bit] {
+                    Some((owner, slot)) if *owner == comp_idx => *slot = local,
+                    _ => {
+                        shared_cbits.insert((comp_idx, classical_bit), local);
+                    }
+                }
+            }
+        }
 
         let mut subs: Vec<Circuit> = (0..k)
             .map(|i| Circuit::new(components[i].len(), classical_bits_per_comp[i].len()))
@@ -642,7 +709,7 @@ impl Circuit {
                     let new_targets: SmallVec<[usize; 4]> =
                         targets.iter().map(|&t| qubit_map[t].1).collect();
                     subs[comp_idx].instructions.push(Instruction::Gate {
-                        gate: gate.clone(),
+                        gate: remap_gate(gate, &qubit_of),
                         targets: new_targets,
                     });
                 }
@@ -683,7 +750,9 @@ impl Circuit {
                 Instruction::Save { .. } => {}
                 Instruction::Conditional { targets, .. } => {
                     let (comp_idx, _) = qubit_map[targets[0]];
-                    let cbit_of = |c: usize| local_cbit(comp_idx, c).unwrap_or(c);
+                    let cbit_of = |c: usize| {
+                        local_cbit(comp_idx, c).expect("pass 1 claims every bit a condition reads")
+                    };
                     subs[comp_idx]
                         .instructions
                         .push(remap_instruction(inst, &qubit_of, &cbit_of));
@@ -693,7 +762,9 @@ impl Circuit {
                         continue;
                     };
                     let (comp_idx, _) = qubit_map[first];
-                    let cbit_of = |c: usize| local_cbit(comp_idx, c).unwrap_or(c);
+                    let cbit_of = |c: usize| {
+                        local_cbit(comp_idx, c).expect("pass 1 claims every bit a condition reads")
+                    };
                     subs[comp_idx]
                         .instructions
                         .push(remap_instruction(inst, &qubit_of, &cbit_of));

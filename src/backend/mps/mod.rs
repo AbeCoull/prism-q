@@ -1226,17 +1226,19 @@ impl MpsBackend {
         Ok(())
     }
 
-    fn apply_reset(&mut self, qubit: usize) {
-        let weights = self.born_weights(qubit);
+    fn apply_reset(&mut self, qubit: usize) -> Result<()> {
+        let weights = self.born_weights(qubit)?;
         let outcome = self.draw_outcome(weights);
-        self.collapse_site_to_zero(qubit, outcome, weights[outcome]);
+        self.collapse_site_to_zero(qubit, outcome, weights);
+        Ok(())
     }
 
-    fn apply_measure(&mut self, qubit: usize, classical_bit: usize) {
-        let weights = self.born_weights(qubit);
+    fn apply_measure(&mut self, qubit: usize, classical_bit: usize) -> Result<()> {
+        let weights = self.born_weights(qubit)?;
         let measured = self.draw_outcome(weights);
         self.classical_bits[classical_bit] = measured == 1;
-        self.project_site_outcome(qubit, measured, weights[measured]);
+        self.project_site_outcome(qubit, measured, weights);
+        Ok(())
     }
 
     /// Draw an outcome from Born weights, which sum to the squared norm the
@@ -1259,7 +1261,10 @@ impl MpsBackend {
     /// [`Self::cuts_can_lose_weight`] rules out keeps no record past the
     /// projection: the walk is still the cheaper way to the weights, and the
     /// gauge would only tax the gates that follow.
-    fn born_weights(&mut self, site: usize) -> [f64; 2] {
+    ///
+    /// Errors when the weights sum to zero or to a value that is not finite:
+    /// the chain then holds no state a projection could rescale.
+    fn born_weights(&mut self, site: usize) -> Result<[f64; 2]> {
         match self.center {
             Some(_) => self.move_center(site),
             None => self.establish_center(site),
@@ -1277,19 +1282,26 @@ impl MpsBackend {
                     .sum::<f64>();
             }
         }
-        prob
+        require_weight(prob)?;
+        Ok(prob)
     }
 
-    /// Take the Born weight from the caller, which read it off the center in
-    /// [`Self::born_weights`], the convention [`Self::collapse_site_to_zero`]
-    /// already uses for reset, and rescale the chain to unit norm. The write
-    /// lands on the center, so the gauge comes through it intact.
-    fn project_site_outcome(&mut self, site: usize, outcome: usize, prob: f64) -> f64 {
+    /// Project onto `outcome`, rescale the chain to unit norm and return the
+    /// outcome's share of the chain's weight, zero when that share is at or
+    /// under [`NORM_CLAMP_MIN`].
+    ///
+    /// Takes both Born weights from the caller, which read them off the center
+    /// in [`Self::born_weights`]. The share rather than the weight decides,
+    /// since truncation leaves the chain's own weight anywhere under one. The
+    /// write lands on the center, so the gauge comes through it intact.
+    fn project_site_outcome(&mut self, site: usize, outcome: usize, weights: [f64; 2]) -> f64 {
         debug_assert_eq!(self.center, Some(site), "a projection off the center");
         if !self.cuts_can_lose_weight() {
             self.center = None;
         }
-        if prob <= NORM_CLAMP_MIN {
+        let prob = weights[outcome];
+        let share = prob / (weights[0] + weights[1]);
+        if share <= NORM_CLAMP_MIN {
             return 0.0;
         }
         let inv_sqrt_prob = 1.0 / prob.sqrt();
@@ -1307,21 +1319,22 @@ impl MpsBackend {
                 t.data[idx_o] = ZERO;
             }
         }
-        prob
+        share
     }
 
     /// Collapse a site onto `outcome` and return it to the zero state.
     ///
     /// Writing the surviving component straight into the zero slot folds in the
     /// X that a trajectory reset would otherwise apply after projecting onto
-    /// outcome 1, and takes the Born weight from the caller, which read it off
-    /// the center in [`Self::born_weights`].
-    fn collapse_site_to_zero(&mut self, site: usize, outcome: usize, prob: f64) {
+    /// outcome 1. Takes both Born weights and judges the outcome by its share,
+    /// as [`Self::project_site_outcome`] does.
+    fn collapse_site_to_zero(&mut self, site: usize, outcome: usize, weights: [f64; 2]) {
         debug_assert_eq!(self.center, Some(site), "a reset off the center");
         if !self.cuts_can_lose_weight() {
             self.center = None;
         }
-        if prob <= NORM_CLAMP_MIN {
+        let prob = weights[outcome];
+        if prob / (weights[0] + weights[1]) <= NORM_CLAMP_MIN {
             return;
         }
         let scale = Complex64::new(1.0 / prob.sqrt(), 0.0);
@@ -1340,17 +1353,13 @@ impl MpsBackend {
     /// Project a logical qubit onto a requested computational-basis outcome.
     ///
     /// Returns the branch-local Born probability. A zero return means the
-    /// requested branch should be discarded by the caller.
-    pub(crate) fn project_z_outcome(&mut self, qubit: usize, outcome: bool) -> f64 {
+    /// requested branch should be discarded by the caller. Errors as
+    /// [`Self::born_weights`] does.
+    pub(crate) fn project_z_outcome(&mut self, qubit: usize, outcome: bool) -> Result<f64> {
         let site = self.site_for_logical(qubit);
         let outcome = usize::from(outcome);
-        let weights = self.born_weights(site);
-        let kept = self.project_site_outcome(site, outcome, weights[outcome]);
-        if kept == 0.0 {
-            0.0
-        } else {
-            kept / (weights[0] + weights[1])
-        }
+        let weights = self.born_weights(site)?;
+        Ok(self.project_site_outcome(site, outcome, weights))
     }
 
     /// Sites left of a recorded center are left isometries and sites right of
@@ -1683,6 +1692,25 @@ fn pair_entry(instruction: &Instruction, k: usize) -> (usize, usize) {
     }
 }
 
+/// Refuse a chain whose Born weights at one site sum to zero or to a value
+/// that is not finite: no projection or sample can rescale it back to a state.
+fn require_weight(weights: [f64; 2]) -> Result<()> {
+    let total = weights[0] + weights[1];
+    if total.is_finite() && total > 0.0 {
+        return Ok(());
+    }
+    let message = if total.is_finite() {
+        "MPS truncation discarded the whole state; raise max_bond_dim or lower svd_epsilon"
+            .to_string()
+    } else {
+        format!(
+            "MPS state is not finite (squared norm {total}); check the gate parameters, and \
+             max_bond_dim and svd_epsilon if truncation ran"
+        )
+    };
+    Err(crate::error::PrismError::InvalidParameter { message })
+}
+
 impl crate::backend::sealed::Sealed for MpsBackend {
     fn limits(&self) -> crate::limits::ResolvedLimits {
         self.limits
@@ -1749,10 +1777,10 @@ impl Backend for MpsBackend {
                 qubit,
                 classical_bit,
             } => {
-                self.apply_measure(self.site_for_logical(*qubit), *classical_bit);
+                self.apply_measure(self.site_for_logical(*qubit), *classical_bit)?;
             }
             Instruction::Reset { qubit } => {
-                self.apply_reset(self.site_for_logical(*qubit));
+                self.apply_reset(self.site_for_logical(*qubit))?;
             }
             Instruction::Barrier { .. } => {}
             Instruction::Save { label, .. } => {
@@ -1780,8 +1808,7 @@ impl Backend for MpsBackend {
     }
 
     fn reset(&mut self, qubit: usize) -> Result<()> {
-        self.apply_reset(self.site_for_logical(qubit));
-        Ok(())
+        self.apply_reset(self.site_for_logical(qubit))
     }
 
     fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
@@ -1960,6 +1987,8 @@ impl Backend for MpsBackend {
         }
 
         let right = self.right_environments();
+        let mut first = vec![ZERO; 2 * self.sites[0].bond_right];
+        require_weight(self.site_conditional_weights(0, &[ONE], &right[0], &mut first))?;
         let max_bond = self
             .sites
             .iter()

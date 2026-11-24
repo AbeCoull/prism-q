@@ -982,18 +982,18 @@ fn project_mps_branches(
     branches: &[WeightedMpsBranch],
     qubit: usize,
     outcome: bool,
-) -> Vec<WeightedMpsBranch> {
+) -> Result<Vec<WeightedMpsBranch>> {
     let mut projected = Vec::with_capacity(branches.len());
     for branch in branches {
         let mut next = branch.clone();
-        let prob = next.state.project_z_outcome(qubit, outcome);
+        let prob = next.state.project_z_outcome(qubit, outcome)?;
         if prob <= crate::backend::NORM_CLAMP_MIN {
             continue;
         }
         next.weight *= prob.sqrt();
         projected.push(next);
     }
-    projected
+    Ok(projected)
 }
 
 fn normalize_mps_branches(branches: &mut [WeightedMpsBranch], norm_sq: f64) -> Result<()> {
@@ -1014,8 +1014,8 @@ fn sample_mps_measurement(
     qubit: usize,
     rng: &mut ChaCha8Rng,
 ) -> Result<bool> {
-    let mut zero = project_mps_branches(branches, qubit, false);
-    let mut one = project_mps_branches(branches, qubit, true);
+    let mut zero = project_mps_branches(branches, qubit, false)?;
+    let mut one = project_mps_branches(branches, qubit, true)?;
     let norm_zero = weighted_mps_norm_sq(&zero)?;
     let norm_one = weighted_mps_norm_sq(&one)?;
     let denom = norm_zero + norm_one;

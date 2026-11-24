@@ -164,8 +164,8 @@ fn forced_mps_projection_has_expected_probability() {
 
     let mut zero = plus.clone();
     let mut one = plus;
-    let p0 = zero.project_z_outcome(0, false);
-    let p1 = one.project_z_outcome(0, true);
+    let p0 = zero.project_z_outcome(0, false).unwrap();
+    let p1 = one.project_z_outcome(0, true).unwrap();
 
     assert!((p0 - 0.5).abs() < 1e-12);
     assert!((p1 - 0.5).abs() < 1e-12);

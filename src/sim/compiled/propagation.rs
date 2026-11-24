@@ -1544,3 +1544,51 @@ pub(super) fn colmajor_forward_sim(
 #[cfg(test)]
 #[path = "propagation_tests.rs"]
 mod tests;
+
+// For every `a != b` among up to four rows of up to two words: no panic, and the rows
+// returned are rows `a` and `b`, in bounds and disjoint.
+#[cfg(kani)]
+mod pair_proofs {
+    use super::{pair_mut, pair_rows_mut};
+
+    fn any_below(n: usize) -> usize {
+        let v: usize = kani::any();
+        kani::assume(v < n);
+        v
+    }
+
+    fn word_offset(base: *const u64, p: *const u64) -> usize {
+        (p as usize - base as usize) / size_of::<u64>()
+    }
+
+    #[kani::proof]
+    fn pair_mut_returns_disjoint_rows_in_bounds() {
+        let mut v = [0u64; 4];
+        let rows = any_below(5);
+        let (a, b) = (any_below(rows), any_below(rows));
+        kani::assume(a != b);
+        let base = v.as_ptr();
+        let (ra, rb) = pair_mut(&mut v[..rows], a, b);
+        let (oa, ob) = (word_offset(base, ra), word_offset(base, rb));
+        assert_eq!((oa, ob), (a, b));
+        assert!(oa < rows && ob < rows && oa != ob);
+    }
+
+    #[kani::proof]
+    fn pair_rows_mut_returns_disjoint_rows_in_bounds() {
+        let mut v = [0u64; 8];
+        let (rows, words) = (any_below(5), any_below(3));
+        let (a, b) = (any_below(rows), any_below(rows));
+        kani::assume(a != b);
+        let base = v.as_ptr();
+        let (ra, rb) = pair_rows_mut(&mut v[..rows * words], a, b, words);
+        let (oa, ob) = (
+            word_offset(base, ra.as_ptr()),
+            word_offset(base, rb.as_ptr()),
+        );
+        assert_eq!((oa, ra.len()), (a * words, words));
+        assert_eq!((ob, rb.len()), (b * words, words));
+        assert!(oa + words <= rows * words && ob + words <= rows * words);
+        assert!(oa + words <= ob || ob + words <= oa);
+    }
+}

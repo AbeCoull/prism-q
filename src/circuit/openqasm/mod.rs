@@ -142,6 +142,11 @@
 //! `switch` with a `default` and more case labels than the region depth bound
 //! returns `Parse` under both.
 //!
+//! A gate application that names one qubit twice, `cx q[1], q[1];` or through
+//! register broadcast `cx q, q;`, returns `Parse` naming the gate and the qubit.
+//! So does a `def` call with qubits written after it as on a gate, `f(q[0]) q[1];`
+//! or `f q;`: a subroutine takes its qubits as arguments.
+//!
 //! The reverse direction is [`qasm_export`](super::qasm_export).
 
 use num_complex::Complex64;
@@ -1561,6 +1566,28 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(broadcast_len)
+    }
+
+    /// Refuse one gate application that names a qubit twice, which no kernel
+    /// can apply. The first `controls` qubits are those a modifier consumes.
+    fn check_distinct_qubits(
+        gate_name: &str,
+        qubits: &[usize],
+        controls: usize,
+        line_num: usize,
+    ) -> Result<()> {
+        for (at, &qubit) in qubits.iter().enumerate() {
+            let Some(offset) = qubits[at + 1..].iter().position(|&other| other == qubit) else {
+                continue;
+            };
+            let message = if at < controls && at + 1 + offset >= controls {
+                format!("qubit {qubit} is both a control and a target of `{gate_name}`")
+            } else {
+                format!("`{gate_name}` names qubit {qubit} more than once")
+            };
+            return Err(parse_error(line_num, message));
+        }
+        Ok(())
     }
 
     /// Accept the OpenQASM versions this parser implements, and name the one it

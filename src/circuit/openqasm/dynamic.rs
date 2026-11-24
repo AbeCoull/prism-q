@@ -1484,6 +1484,7 @@ impl<'a> Parser<'a> {
                     got: qubits.len(),
                 });
             }
+            Self::check_distinct_qubits(name, &qubits, 0, line)?;
             self.state()
                 .builder
                 .add_rotation(kind, &qubits, angle.clone());

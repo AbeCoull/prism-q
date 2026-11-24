@@ -31,7 +31,7 @@ cnot q[0], q[1];
   Each attaches after the instruction it follows, so a pragma before every instruction is
   an error. Probabilities are checked against Braket's own bounds.
 - Inline unitaries: `#pragma braket unitary([[...]]) q[0]` on one or two targets. A wider
-  matrix has no gate variant to carry it and says so.
+  matrix has no gate variant to carry it and says so. A target named twice returns `Parse`.
 - Verbatim boxes: `#pragma braket verbatim` followed by `box { ... }`. The body runs as
   written: verbatim directs a device compiler, and a simulator has nothing to honour. A
   `box` without the pragma runs the same way; the pragma without a box is rejected.

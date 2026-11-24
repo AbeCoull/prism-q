@@ -776,7 +776,7 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `while` | Parses under `parse_dynamic` | `UnsupportedConstruct` under `parse`: a loop that exits on a measurement has no finite instruction list |
 | `break`, `continue` | Parses inside `for` and `while` | Outside a loop, or at the top level of a `def` or `gate` body: `Parse`. In a `for` under a measurement-dependent branch: `UnsupportedConstruct` under `parse`, lowered into the graph under `parse_dynamic` |
 | `end` | Stops the program; nothing after it runs | Inside a `gate` body, called or not: `Parse`. Under a measurement-dependent branch: `UnsupportedConstruct` under `parse`, lowered into the graph under `parse_dynamic` |
-| `def` | Inlines its body, with fixed-width qubit registers, bit results, and scalar results; `parse_dynamic` supports runtime numerical results, and bits a body measures into without returning, or a call drops, which no shot reports | See [Subroutines](#subroutines) for the forms that decline, all `UnsupportedConstruct`. A result or argument of the wrong width, overlapping qubit arguments, a missing result, or calls nested past 32 deep: `Parse` |
+| `def` | Inlines its body, with fixed-width qubit registers, bit results, and scalar results; `parse_dynamic` supports runtime numerical results, and bits a body measures into without returning, or a call drops, which no shot reports | See [Subroutines](#subroutines) for the forms that decline, all `UnsupportedConstruct`. A result or argument of the wrong width, overlapping qubit arguments, qubits written after the call as on a gate (`f(q[0]) q[1];`, `f q;`), a missing result, or calls nested past 32 deep: `Parse` |
 | `return` | Exits a `def`, including nested branches and loops | Outside a `def`: `UnsupportedConstruct`. Under a measurement-dependent branch: `UnsupportedConstruct` under `parse`, lowered into the graph under `parse_dynamic` |
 | `gate` blocks | Parses; an empty body is the identity | Calls nested past 32 deep: `Parse` |
 | A gate length, `x[100ns] q;` | Parses; the length is dropped | |
@@ -789,6 +789,7 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | Any other pragma, and annotations (`@ns.tag ...`) | Ignored, as the language asks of a pass that does not read them | |
 | A gate name the crate does not implement | Declines | `UnsupportedConstruct` naming it |
 | A gate call at the wrong width | Declines | `GateArity` naming the gate, the arity it wanted, and what it got |
+| A gate call naming one qubit twice, as written (`cx q[1], q[1];`) or after register broadcast (`cx q, q;`) | Declines | `Parse` naming the gate and the qubit |
 
 Modifier declines, all `UnsupportedConstruct`: `ctrl @` on a `def` call, which is a
 subroutine rather than a gate; `ctrl @` on a body that measures, resets or branches; a

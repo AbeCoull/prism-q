@@ -73,6 +73,7 @@ impl<'a> Parser<'a> {
         let (matrix_text, targets_text) = braket::split_paren_body(rest, line)?;
         let matrix = braket::parse_matrix(matrix_text, line)?;
         let targets = self.qubits_of_text(targets_text, line)?;
+        Self::check_distinct_qubits("unitary", &targets, 0, line)?;
         braket::unitary_instructions(&matrix, &targets, line)
     }
 

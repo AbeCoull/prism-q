@@ -272,13 +272,15 @@ fn unsupported_modifier_targets_are_named() {
 // controlled form and neither does this.
 #[test]
 fn a_subroutine_call_has_no_controlled_form() {
-    let source = "OPENQASM 3.0;\nqubit[2] q;\ndef g(qubit a) { h a; }\nctrl @ g(q[0]);\n";
-    let err = openqasm::parse(source).unwrap_err();
-    assert!(
-        matches!(err, PrismError::UnsupportedConstruct { .. })
-            && format!("{err}").contains("subroutine"),
-        "got {err}"
-    );
+    for call in ["ctrl @ g(q[0]);", "ctrl @ g(q[0]) q[1];"] {
+        let source = format!("OPENQASM 3.0;\nqubit[2] q;\ndef g(qubit a) {{ h a; }}\n{call}\n");
+        let err = openqasm::parse(&source).unwrap_err();
+        assert!(
+            matches!(err, PrismError::UnsupportedConstruct { .. })
+                && format!("{err}").contains("subroutine"),
+            "`{call}`: got {err}"
+        );
+    }
 }
 
 // A fractional power is the principal one, which is not what scaling the

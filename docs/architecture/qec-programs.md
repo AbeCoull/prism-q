@@ -242,8 +242,9 @@ A noiseless `EXP_VAL` program without detectors goes to the Auto ladder, which l
 once for all three strategies. When that lowering refuses the program (a `FEEDFORWARD`,
 a measured qubit reused without a reset, or a gate on three or more qubits), the program
 runs on the reference runner instead. An error after lowering, such as the 12-row
-postselection cap or a contraction over the tensor network cap, is returned. A noisy `EXP_VAL` program with leakage
-annotations is rejected, since no runner estimates under leakage.
+postselection cap or a contraction over the tensor network cap, is returned. A noisy
+`EXP_VAL` program with leakage annotations is rejected, since no runner estimates under
+leakage.
 
 The density-matrix estimator serves noisy `EXP_VAL` programs whose ensemble the mixed
 state can carry in full. There `Tr(rho P)` is the exact value the reference runner

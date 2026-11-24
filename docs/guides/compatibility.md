@@ -60,6 +60,17 @@ changed meaning:
   bond cap, where any chain wider than bond 1 was `Approximate` with a bound of 1.0.
   Python's `is_exact` follows it. `require_exact` still declines the MPS route before the
   run.
+- Unreleased: `run_qec_program_with_strategy` under `QecTStrategy::Auto` lowers the
+  program once for SPD, CAMPS and the tensor network. A program that lowering refuses
+  returns the refusal itself, an `IncompatibleBackend` from `QEC deferred lowering` or
+  `QEC SPD / CAMPS`, where it returned one from `QEC auto T-strategy` that repeated the
+  refusal for each of the three strategies.
+- Unreleased: `run_qec_program` on a noiseless `EXP_VAL` program without detectors whose
+  analytical lowering refuses it (a `FEEDFORWARD`, a measured qubit reused without a
+  reset, or a gate on three or more qubits) now returns estimates from
+  `run_qec_program_reference`, where it returned `IncompatibleBackend`. That route costs
+  shots times `2^n` and runs up to the statevector cap; past it the program returns a
+  `ResourceLimit` whose message also names why the lowering refused.
 
 ## Seeded output
 

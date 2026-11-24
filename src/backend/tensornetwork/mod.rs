@@ -210,10 +210,11 @@ impl TensorNetworkBackend {
     /// A query is one shot of the conditional sweep, one observable of
     /// `pauli_expectations` with the norm contraction it divides by, or one
     /// other terminal contraction. Each truncates its own copy of the network,
-    /// so queries do not add up, while the cuts inside one query do. The sum
-    /// takes one relative discard per cut rather than measuring the final
-    /// state, so a query that truncates heavily can carry it past 1, where the
-    /// fidelity it implies clamps to zero and certifies nothing.
+    /// so queries do not add up, while the cuts inside one query do. A shot's
+    /// cuts depend on its outcomes, so a later shot can still raise the total.
+    /// The sum takes one relative discard per cut rather than measuring the
+    /// final state, so a query that truncates heavily can carry it past 1,
+    /// where the fidelity it implies clamps to zero and certifies nothing.
     ///
     /// [`Backend::init`]: crate::backend::Backend::init
     pub fn truncation_discarded(&self) -> f64 {

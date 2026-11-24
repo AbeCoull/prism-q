@@ -180,8 +180,9 @@ squared weight allows, then slices whatever is still over the cap. It reports
 `Approximate`, with a bound of 1 minus the discarded weights summed over the cuts of the
 worst single query, and `require_exact()` rejects it by name. A query is one shot of the
 sampling sweep, one observable together with the norm it is divided by, or one other
-contraction such as an export. Each truncates its own copy of the network, so the bound
-does not fall as shots or observables are added. Cuts made drawing mid-circuit
+contraction such as an export. Each truncates its own copy of the network, so the loss
+does not accumulate across shots or observables, though a later shot whose outcomes cut
+more can still lower the bound. Cuts made drawing mid-circuit
 measurements and resets count against every query.
 
 Past the statevector cap `Auto` takes an MPS at a bounded bond dimension, unless an

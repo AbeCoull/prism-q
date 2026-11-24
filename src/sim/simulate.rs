@@ -916,8 +916,8 @@ impl<'c> Simulate<'c, Seeded> {
         let (left_backend, left_reason) = self.overlap_side(diagnostic)?;
         let (right_backend, right_reason) = other.overlap_side(diagnostic)?;
         let fidelity = left_backend.overlap_sq(&*right_backend)?;
-        // A tensor network truncates while exporting for the inner product
-        // itself, so each side's bound is read after it.
+        // Metadata is read after the work it describes. No export is known to
+        // truncate today, but a bounded tensor network books its cuts there.
         Ok(OverlapResult {
             fidelity,
             left: backend_metadata(&*left_backend).with_reason(left_reason),

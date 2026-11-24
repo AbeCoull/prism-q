@@ -8,8 +8,8 @@ use prism_q::backend::Backend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
 use prism_q::gates::Gate;
-use prism_q::sim::Exactness;
-use prism_q::{BackendKind, Circuit, Limits, PauliTerm, PrismError, simulate};
+use prism_q::sim::{Exactness, RunMetadata};
+use prism_q::{BackendKind, Circuit, Limits, PauliTerm, PrismError, ShotsResult, simulate};
 
 const BOUNDED: BackendKind = BackendKind::TensorNetworkBounded { tolerance: 1e-3 };
 
@@ -139,29 +139,45 @@ fn measured_chain() -> Circuit {
     circuit
 }
 
-fn shots_bound(num_shots: usize) -> f64 {
+fn bounded_shots(num_shots: usize) -> ShotsResult {
     simulate(&measured_chain())
         .backend(BOUNDED)
         .limits(sweep_limits())
         .seed(SEED)
         .shots(num_shots)
         .unwrap()
-        .metadata
+}
+
+fn bound_of(metadata: &RunMetadata) -> f64 {
+    metadata
         .fidelity_lower_bound()
         .expect("the bounded route reports a bound")
 }
 
 // Every contraction of the sweep runs inside the sampling call, so a bound
 // read before it reports the untouched 1.0. Each shot is its own answer, so
-// the bound follows the worst shot rather than falling with the shot count.
+// the loss does not accumulate across shots, though a later shot whose
+// outcomes cut more can still lower the bound.
 #[test]
 fn bounded_shots_report_the_worst_shot_the_sweep_cut() {
     small_caps();
-    let eight = shots_bound(8);
+    let eight = bounded_shots(8);
+    let sixty_four = bounded_shots(64);
+    assert_eq!(
+        eight.shots[..],
+        sixty_four.shots[..8],
+        "the first 8 shots of a longer run are no longer the 8-shot run"
+    );
+
+    let (eight, sixty_four) = (bound_of(&eight.metadata), bound_of(&sixty_four.metadata));
     assert!(eight < 1.0, "the terminal read the bound before the sweep");
-    let sixty_four = shots_bound(64);
     assert!(
-        (eight - sixty_four).abs() < 1e-12,
+        sixty_four <= eight,
+        "8 shots {eight} vs 64 shots {sixty_four}"
+    );
+    // A sum over shots would carry the loss to about 8 times the 8-shot loss.
+    assert!(
+        1.0 - sixty_four < 2.0 * (1.0 - eight),
         "8 shots {eight} vs 64 shots {sixty_four}"
     );
 }
@@ -175,12 +191,13 @@ fn bounded_counts_report_the_cut_the_sweep_made() {
         .seed(SEED)
         .sample_counts(8)
         .unwrap();
-    let bound = counts
-        .metadata
-        .fidelity_lower_bound()
-        .expect("the bounded route reports a bound");
+    let bound = bound_of(&counts.metadata);
     assert!(bound < 1.0, "the terminal read the bound before the sweep");
-    assert!((bound - shots_bound(8)).abs() < 1e-12, "{bound}");
+    let shots = bound_of(&bounded_shots(8).metadata);
+    assert!(
+        (bound - shots).abs() < 1e-12,
+        "counts {bound} vs shots {shots}"
+    );
 }
 
 // Each observable truncates its own copy of the network, so listing one

@@ -80,7 +80,8 @@
 #                   Read from the table under --from-tsv.
 #   --bench,    -b  bench target (default: circuits)
 #   --features      cargo feature list (default: "parallel bench-internal"; the
-#                   switch only exists under bench-internal)
+#                   switch only exists under bench-internal). With bench-fast the
+#                   report names the bench-fast tier at 10 samples.
 #   --exe           prebuilt bench executable; skips the build. The caller owns the
 #                   claim that it was built from the tree under test.
 #   --base-exe      prebuilt executable for variant a, which turns on two-binary
@@ -230,6 +231,21 @@ else
     WINDOW="${WINDOW:-1}"
 fi
 WARM_UP="$(awk -v w="$WINDOW" 'BEGIN { printf "%g", w / 2 }')"
+CRITERION_ROW="$SAMPLES samples, ${WARM_UP}s warm-up, ${WINDOW}s measurement"
+# A bench-fast binary pins 10 samples and 0.2s and 1s windows on every group that
+# benches/common configures, over the command line and PRISM_BENCH_SAMPLES. The
+# tier is read from --features; a prebuilt binary is not inspected.
+FAST=""
+if [[ ",${FEATURES// /,}," == *",bench-fast,"* ]]; then
+    FAST=1
+    TIER="bench-fast (triage)"
+    SAMPLES=10
+    CRITERION_ROW="10 samples, 0.2s warm-up, 1s measurement, pinned by bench-fast"
+fi
+TIER_ROW="$TIER"
+if [[ -n "$EXE" || -n "$BASE_EXE" ]]; then
+    TIER_ROW+=", taken from --features and not read from the prebuilt binary"
+fi
 case "$ESTIMATE" in
     mean) EST_COL=6 ;; median) EST_COL=7 ;; min) EST_COL=8 ;;
     *) echo "Error: --estimate is mean, median, or min." >&2; exit 5 ;;
@@ -476,7 +492,7 @@ disturbed_text() {
 # verdict is settled under the early-stop rule and `go` otherwise.
 analyze() {
     awk -v mode="$1" -v disturbed="$2" -v var="${3:-b}" -v threshold="$THRESHOLD" -v min_rows="$MIN_ROWS" \
-        -v loaded="$LOADED_ROUNDS" -v light="${LIGHT:-0}" -v col="$EST_COL" \
+        -v loaded="$LOADED_ROUNDS" -v light="${LIGHT:-0}" -v fast="${FAST:-0}" -v col="$EST_COL" \
         -v wide_ratio="$WIDE_CONTROL_EFFECT_RATIO" -v two_binary="${TWO_BINARY:-0}" '
 BEGIN {
     FS = "\t"; SEP = "\x1f"
@@ -640,6 +656,7 @@ END {
     print ""
 
     tier_note = light ? " Light tier, triage only: run the full tier before claiming a number." : ""
+    if (fast) tier_note = " bench-fast tier, triage only: run without bench-fast before claiming a number."
     if (rounds >= 6 && rounds - nd < 6) {
         printf "**Regression verdict**: RERUN. Only %d of %d rounds were undisturbed, too few for a 95%% interval. The host was too busy to measure.%s\n",
             rounds - nd, rounds, tier_note
@@ -840,7 +857,7 @@ set +e
         echo "| Variants | a against each of $(IFS=,; echo "${VARIANTS[*]}" | sed 's/,/, /g') of \`PRISM_BENCH_VARIANT\`, one process per invocation |"
     fi
     echo "| Features | \`$FEATURES\` |"
-    echo "| Tier | $TIER |"
+    echo "| Tier | $TIER_ROW |"
     echo "| Rounds | $ROUNDS_RUN run toward $ROUNDS undisturbed, A B B A then B A A B, after one discarded invocation per variant |"
     if [[ -n "$FROM_TSV" ]]; then
         echo "| Early stop | from tsv |"
@@ -851,7 +868,7 @@ set +e
     else
         echo "| Early stop | not taken |"
     fi
-    echo "| Criterion | $SAMPLES samples, ${WARM_UP}s warm-up, ${WINDOW}s measurement (groups that pin their own keep it) |"
+    echo "| Criterion | $CRITERION_ROW (groups that pin their own keep it) |"
     echo "| Estimate | \`$ESTIMATE\` of each invocation; median paired change across rounds, 95% interval from order statistics |"
     if (( MAX_HOST_LOAD > 0 )); then
         echo "| Host load guard | ${MAX_HOST_LOAD}% of all CPUs, read before each round |"

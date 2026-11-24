@@ -103,7 +103,9 @@
 #   --passes        measure with the passes above. MEASURE_METHOD below picks
 #                   which of the two a run without either flag takes.
 #   --bench,    -b  bench target (default: circuits)
-#   --features      cargo feature list (default: parallel)
+#   --features      cargo feature list (default: parallel). With bench-fast the
+#                   report names the bench-fast tier at 10 samples, which the
+#                   binary pins whatever the tier flags say.
 #   --ref-dir       reference worktree path. Persists between runs, so the
 #                   reference build is cached. Default: a temporary directory
 #                   removed on exit.
@@ -304,6 +306,15 @@ else
     CRITERION_ARGS=(--warm-up-time 1 --measurement-time 3)
     WINDOWS="1s warm-up, 3s measurement"
     PASS_LABELS=(ref new new ref)
+fi
+# A bench-fast binary pins 10 samples and 0.2s and 1s windows on every group that
+# benches/common configures, over the command line and PRISM_BENCH_SAMPLES, so the
+# report names that tier. No row can run at --slow-samples either.
+if [[ ",${FEATURES// /,}," == *",bench-fast,"* ]]; then
+    TIER="bench-fast (triage)"
+    SAMPLES=10
+    WINDOWS="0.2s warm-up, 1s measurement (pinned by bench-fast)"
+    SLOW_ROW_SECONDS=0
 fi
 PASS_COUNT="${#PASS_LABELS[@]}"
 

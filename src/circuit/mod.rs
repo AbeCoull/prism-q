@@ -66,6 +66,18 @@ pub struct Circuit {
     pub instructions: Vec<Instruction>,
 }
 
+/// Component views of one circuit, each group sorted and the groups ordered by
+/// their lowest qubit.
+pub(crate) struct Subsystems {
+    /// What [`Circuit::independent_subsystems`] returns.
+    pub(crate) interaction: Vec<Vec<usize>>,
+    /// `interaction` with every qubit measured into one classical bit joined, so
+    /// no bit is written or read from two groups. `None` when no bit has two
+    /// writers and the views coincide.
+    pub(crate) closed: Option<Vec<Vec<usize>>>,
+    pub(crate) clifford_only: bool,
+}
+
 impl Circuit {
     pub fn new(num_qubits: usize, num_classical_bits: usize) -> Self {
         Self {
@@ -471,19 +483,22 @@ impl Circuit {
     /// Partition qubits into independent subsystems.
     ///
     /// Two qubits share a subsystem if a multi-qubit gate connects them,
-    /// transitively, if both are measured into one classical bit, or if a
-    /// condition on one's measurement guards the other.
+    /// transitively, or if a condition on one's measurement guards the other.
     /// Each group is sorted, and groups are ordered by their lowest qubit.
     pub fn independent_subsystems(&self) -> Vec<Vec<usize>> {
-        self.subsystems_and_clifford().0
+        self.subsystems_and_clifford().interaction
     }
 
-    /// [`Circuit::independent_subsystems`] and [`Circuit::is_clifford_only`] from
-    /// one pass over the stream.
-    pub(crate) fn subsystems_and_clifford(&self) -> (Vec<Vec<usize>>, bool) {
+    /// Both component views and [`Circuit::is_clifford_only`] from one pass over
+    /// the stream.
+    pub(crate) fn subsystems_and_clifford(&self) -> Subsystems {
         let n = self.num_qubits;
         if n == 0 {
-            return (Vec::new(), self.is_clifford_only());
+            return Subsystems {
+                interaction: Vec::new(),
+                closed: None,
+                clifford_only: self.is_clifford_only(),
+            };
         }
         let mut parent: Vec<usize> = (0..n).collect();
         let mut rank = vec![0u8; n];
@@ -512,28 +527,38 @@ impl Circuit {
             }
         }
 
-        fn join_writer(
-            parent: &mut [usize],
-            rank: &mut [u8],
-            writers: &mut [Option<usize>],
-            qubit: usize,
-            classical_bit: usize,
-        ) {
-            match writers.get_mut(classical_bit) {
-                Some(Some(first)) => union(parent, rank, *first, qubit),
-                Some(slot) => *slot = Some(qubit),
-                None => {}
+        // Qubits arrive in ascending order, so each group opens at its lowest qubit
+        // and the groups come out sorted by it.
+        fn groups(parent: &mut [usize]) -> Vec<Vec<usize>> {
+            let mut group_of = vec![usize::MAX; parent.len()];
+            let mut result: Vec<Vec<usize>> = Vec::new();
+            for q in 0..parent.len() {
+                let root = find(parent, q);
+                if group_of[root] == usize::MAX {
+                    group_of[root] = result.len();
+                    result.push(Vec::new());
+                }
+                result[group_of[root]].push(q);
             }
+            result
         }
 
-        // A classical bit belongs to one group: every qubit measured into it
-        // joins the first, and a condition joins its targets to that group for
-        // each bit it reads. The condition unions wait for the loop to end, so a
-        // guard ahead of a bit's first measurement joins it too.
+        // A condition joins its targets to the last qubit measured into each bit
+        // it reads, anywhere in the circuit, so those unions wait for the loop to
+        // end. `rewrites` pairs each later writer of a bit with the one before it.
         let mut clifford_only = true;
         let mut condition_bits: Vec<usize> = Vec::new();
         let mut guarded: Vec<(usize, usize)> = Vec::new();
         let mut writers: Vec<Option<usize>> = vec![None; self.num_classical_bits];
+        let mut rewrites: Vec<(usize, usize)> = Vec::new();
+        let mut note_writer = |qubit: usize, classical_bit: usize| {
+            if let Some(slot) = writers.get_mut(classical_bit)
+                && let Some(earlier) = slot.replace(qubit)
+                && earlier != qubit
+            {
+                rewrites.push((earlier, qubit));
+            }
+        };
         for inst in &self.instructions {
             condition_bits.clear();
             let targets = match inst {
@@ -541,7 +566,7 @@ impl Circuit {
                     qubit,
                     classical_bit,
                 } => {
-                    join_writer(&mut parent, &mut rank, &mut writers, *qubit, *classical_bit);
+                    note_writer(*qubit, *classical_bit);
                     continue;
                 }
                 Instruction::Gate { gate, targets } => {
@@ -562,9 +587,7 @@ impl Circuit {
                         clifford_only && !any_gate(region.body(), &mut |gate| !gate.is_clifford());
                     collect_condition_bits(region.condition(), &mut condition_bits);
                     collect_body_condition_bits(region.body(), &mut condition_bits);
-                    for_each_measure(region.body(), &mut |qubit, classical_bit| {
-                        join_writer(&mut parent, &mut rank, &mut writers, qubit, classical_bit);
-                    });
+                    for_each_measure(region.body(), &mut note_writer);
                     region.qubits()
                 }
                 _ => continue,
@@ -584,26 +607,26 @@ impl Circuit {
             }
         }
 
-        // Qubits arrive in ascending order, so each group opens at its lowest qubit
-        // and the groups come out sorted by it.
-        let mut group_of = vec![usize::MAX; n];
-        let mut result: Vec<Vec<usize>> = Vec::new();
-        for q in 0..n {
-            let root = find(&mut parent, q);
-            if group_of[root] == usize::MAX {
-                group_of[root] = result.len();
-                result.push(Vec::new());
+        let interaction = groups(&mut parent);
+        let closed = (!rewrites.is_empty()).then(|| {
+            for (earlier, later) in rewrites {
+                union(&mut parent, &mut rank, earlier, later);
             }
-            result[group_of[root]].push(q);
+            groups(&mut parent)
+        });
+        Subsystems {
+            interaction,
+            closed,
+            clifford_only,
         }
-        (result, clifford_only)
     }
 
     /// Split the circuit into one sub-circuit per component in two passes over the
     /// instruction stream.
     ///
     /// `components` must cover every qubit with no instruction spanning two of them,
-    /// as [`Circuit::independent_subsystems`] returns. Each entry is
+    /// as [`Circuit::independent_subsystems`] returns. A caller that merges the
+    /// blocks' classical bits passes [`Subsystems::closed`]. Each entry is
     /// `(sub_circuit, qubit_map, classical_map)` with `map[local] = original`.
     /// A block's classical register holds the bits its measurements write and its
     /// conditions read, in ascending order, so a register condition keeps its

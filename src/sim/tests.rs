@@ -1058,6 +1058,26 @@ fn decomposed_guard_reads_the_writer_that_precedes_it() {
     );
 }
 
+// One classical bit written from both halves keeps the circuit whole, and the
+// halves still count as partial independence for the backend choice.
+#[test]
+fn blocks_sharing_a_classical_bit_still_route_to_factored() {
+    let mut c = Circuit::new(10, 1);
+    for base in [0, 5] {
+        for q in base..base + 4 {
+            c.add_gate(Gate::Rx(0.3), &[q]);
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    c.add_measure(5, 0);
+    c.add_measure(0, 0);
+    let (decompose, partial) = analyze_independence(&c);
+    assert!(decompose.is_none());
+    assert!(partial);
+    let outcome = simulate(&c).seed(42).run().unwrap();
+    assert_eq!(outcome.metadata.backend, ResolvedBackend::Factored);
+}
+
 // The QFT of the uniform superposition is |000>, so only the X on q0 shows.
 #[test]
 fn decomposed_qft_block_off_qubit_zero_acts_on_its_own_qubits() {

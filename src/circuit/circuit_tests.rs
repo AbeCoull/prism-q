@@ -225,6 +225,11 @@ fn test_subsystems_no_classical_dependency() {
     assert_eq!(subs.len(), 2);
 }
 
+fn closed_subsystems(c: &Circuit) -> Vec<Vec<usize>> {
+    let subsystems = c.subsystems_and_clifford();
+    subsystems.closed.unwrap_or(subsystems.interaction)
+}
+
 #[test]
 fn test_subsystems_join_a_condition_to_every_writer_of_its_bit() {
     let mut c = Circuit::new(5, 1);
@@ -237,8 +242,9 @@ fn test_subsystems_join_a_condition_to_every_writer_of_its_bit() {
     c.add_measure(2, 0);
     assert_eq!(
         c.independent_subsystems(),
-        vec![vec![0, 2, 4], vec![1], vec![3]]
+        vec![vec![0], vec![1], vec![2, 4], vec![3]]
     );
+    assert_eq!(closed_subsystems(&c), vec![vec![0, 2, 4], vec![1], vec![3]]);
 }
 
 #[test]
@@ -256,8 +262,9 @@ fn test_subsystems_join_the_writers_of_one_bit() {
         ))));
     assert_eq!(
         c.independent_subsystems(),
-        vec![vec![0, 3, 4], vec![1], vec![2]]
+        vec![vec![0, 4], vec![1], vec![2], vec![3]]
     );
+    assert_eq!(closed_subsystems(&c), vec![vec![0, 3, 4], vec![1], vec![2]]);
 }
 
 #[test]
@@ -280,7 +287,7 @@ fn test_partition_subcircuits_orders_read_and_written_bits() {
         targets: SmallVec::from_slice(&[3]),
     });
 
-    let components = c.independent_subsystems();
+    let components = closed_subsystems(&c);
     assert_eq!(components, vec![vec![0, 1, 2], vec![3]]);
     let parts = c.partition_subcircuits(&components);
     assert_eq!(parts[0].2, vec![1, 2, 3]);
@@ -389,9 +396,9 @@ fn test_subsystems_and_clifford_reads_every_gate_form() {
         c.add_measure(0, 0);
         c.instructions.extend(tail);
         assert_eq!(c.is_clifford_only(), clifford);
-        assert_eq!(c.subsystems_and_clifford().1, clifford);
+        assert_eq!(c.subsystems_and_clifford().clifford_only, clifford);
     }
-    assert!(Circuit::new(0, 0).subsystems_and_clifford().1);
+    assert!(Circuit::new(0, 0).subsystems_and_clifford().clifford_only);
 }
 
 #[test]

@@ -897,13 +897,13 @@ type Decomposition = (Vec<Vec<usize>>, bool);
 /// plus the partial-independence flag otherwise.
 fn analyze_independence(circuit: &Circuit) -> (Option<Decomposition>, bool) {
     if circuit.num_qubits >= MIN_DECOMPOSITION_QUBITS {
-        let (components, clifford_only) = circuit.subsystems_and_clifford();
-        if components.len() > 1 {
-            if should_decompose(&components, circuit.num_qubits) {
-                return (Some((components, clifford_only)), false);
-            }
-            return (None, true);
+        let subsystems = circuit.subsystems_and_clifford();
+        let partial = subsystems.interaction.len() > 1;
+        let components = subsystems.closed.unwrap_or(subsystems.interaction);
+        if components.len() > 1 && should_decompose(&components, circuit.num_qubits) {
+            return (Some((components, subsystems.clifford_only)), false);
         }
+        return (None, partial);
     }
     (None, false)
 }

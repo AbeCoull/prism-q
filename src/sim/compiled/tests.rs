@@ -2325,3 +2325,25 @@ fn dense_collapse_stays_serial_on_one_thread_and_matches_the_split() {
     assert_eq!(rows, split_rows);
     assert_eq!(ref_bits, split_ref_bits);
 }
+
+// The sampler maps by measurement index, so two blocks measured into the same
+// classical bits still compile apart.
+#[test]
+fn blocks_sharing_classical_bits_keep_the_filtered_compile() {
+    let mut c = Circuit::new(4, 2);
+    for base in [0, 2] {
+        c.add_gate(Gate::H, &[base]);
+        c.add_gate(Gate::Cx, &[base, base + 1]);
+    }
+    for qubit in 0..4 {
+        c.add_measure(qubit, qubit % 2);
+    }
+    let blocks = vec![vec![0, 1], vec![2, 3]];
+    assert_eq!(c.independent_subsystems(), blocks);
+
+    let whole = compile_measurements(&c, 42).unwrap().sample_bulk(64);
+    let filtered = compile_measurements_filtered(&c, &blocks, 42)
+        .unwrap()
+        .sample_bulk(64);
+    assert_eq!(whole, filtered);
+}

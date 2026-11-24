@@ -6,12 +6,28 @@ use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
 use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::statevector::StatevectorBackend;
-use prism_q::circuit::{Circuit, expand_qft_blocks, openqasm, qasm_export};
+use prism_q::circuit::{Circuit, SmallVec, expand_qft_blocks, openqasm, qasm_export};
 use prism_q::gates::Gate;
-use prism_q::{PauliAxis, PauliTerm, run_on, run_on_state};
+use prism_q::{
+    BackendKind, ClassicalCondition, Instruction, Limits, PauliAxis, PauliTerm, Query, SaveSpec,
+    run_on, run_on_state, simulate,
+};
 
 /// Fused and unfused amplitudes must agree to this, per amplitude.
 pub const FUSION_EPS: f64 = 1e-10;
+
+/// A `simulate` run and its reference must agree to this, per probability. Looser than
+/// [`FUSION_EPS`] because a run under a statevector cap lands on the sparse or MPS routes.
+pub const SIMULATE_EPS: f64 = 1e-8;
+
+/// A measurement or reset counts as certain when the qubit sits within this of a basis
+/// state.
+const CERTAIN_EPS: f64 = 1e-9;
+
+const MIN_SIMULATE_QUBITS: usize = 4;
+const MAX_SIMULATE_QUBITS: usize = 7;
+const MAX_IDLE_QUBITS: usize = 4;
+const MAX_SIMULATE_OPS: usize = 40;
 
 const MIN_QUBITS: usize = 10;
 const MAX_QUBITS: usize = 18;
@@ -534,4 +550,336 @@ pub fn check_fusion(data: &[u8]) {
         unfused[worst],
         if initial.is_some() { "random" } else { "zero" },
     );
+}
+
+/// One decoded input for [`check_simulate_case`]: a circuit with measurements, resets,
+/// conditionals and save points, and the request it runs under.
+#[derive(Debug)]
+pub struct SimulateCase {
+    /// The circuit on 4 to 7 qubits, under the width where a run splits into blocks.
+    pub base: Circuit,
+    /// `base` with up to four idle qubits above it, which is what carries it across that
+    /// width. Equal to `base` when the input asks for none.
+    pub padded: Circuit,
+    pub kind: BackendKind,
+    /// Statevector cap below the circuit width, which sends `Auto` to a route that holds
+    /// no dense state.
+    pub statevector_cap: Option<usize>,
+}
+
+/// Decode a [`SimulateCase`]. Half the inputs keep to gates that map basis states to
+/// basis states, so every outcome is certain and a bit-vector model is the reference.
+pub fn simulate_case_from_bytes(data: &[u8]) -> SimulateCase {
+    let mut bytes = Bytes::new(data);
+    let flags = bytes.byte();
+    let basis_only = flags & 1 == 1;
+    let kind = if flags & 2 == 0 {
+        BackendKind::Auto
+    } else {
+        BackendKind::Statevector
+    };
+    let capped = flags & 0b1110 == 0b1100;
+    let width = MIN_SIMULATE_QUBITS + bytes.below(MAX_SIMULATE_QUBITS - MIN_SIMULATE_QUBITS + 1);
+    let idle = bytes.below(MAX_IDLE_QUBITS + 1);
+    let classical_bits = 1 + bytes.below(4);
+    let statevector_cap = capped.then(|| 2 + bytes.below(2));
+
+    let mut base = Circuit::new(width, classical_bits);
+    while !bytes.exhausted() && base.instructions.len() < MAX_SIMULATE_OPS {
+        push_dynamic_op(&mut base, &mut bytes, basis_only);
+    }
+    let mut padded = Circuit::new(width + idle, classical_bits);
+    for instruction in &base.instructions {
+        match instruction {
+            // A save lists the whole register, so it is rebuilt at the padded width.
+            Instruction::Save { spec, label, .. } => padded.add_save(*spec, label.clone()),
+            other => padded.instructions.push(other.clone()),
+        }
+    }
+    SimulateCase {
+        base,
+        padded,
+        kind,
+        statevector_cap,
+    }
+}
+
+fn push_dynamic_op(c: &mut Circuit, b: &mut Bytes<'_>, basis_only: bool) {
+    let n = c.num_qubits;
+    let bits = c.num_classical_bits;
+    match b.below(10) {
+        0..=4 if basis_only => push_basis_op(c, b),
+        0..=4 => push_op(c, b),
+        5 | 6 => {
+            let qubit = b.below(n);
+            c.add_measure(qubit, b.below(bits));
+        }
+        7 => c.add_reset(b.below(n)),
+        8 => {
+            let condition = condition_from_bytes(b, bits);
+            let gate = if basis_only {
+                [Gate::X, Gate::Z][b.below(2)].clone()
+            } else {
+                [Gate::X, Gate::Z, Gate::H, Gate::S, Gate::Ry(FRAC_PI_4)][b.below(5)].clone()
+            };
+            c.instructions.push(Instruction::Conditional {
+                condition,
+                gate,
+                targets: SmallVec::from_slice(&[b.below(n)]),
+            });
+        }
+        _ => {
+            if b.below(4) == 0 {
+                let label = format!("s{}", c.instructions.len());
+                c.add_save(SaveSpec::Probabilities, label);
+            } else {
+                let qubit = b.below(n);
+                c.add_measure(qubit, b.below(bits));
+            }
+        }
+    }
+}
+
+/// A gate that maps each basis state to one basis state, up to a phase.
+fn push_basis_op(c: &mut Circuit, b: &mut Bytes<'_>) {
+    let n = c.num_qubits;
+    match b.below(8) {
+        0 | 1 => c.add_gate(Gate::X, &[b.below(n)]),
+        2 | 3 => c.add_gate(Gate::Cx, &b.distinct(n, 2)),
+        4 => c.add_gate(Gate::Swap, &b.distinct(n, 2)),
+        5 => c.add_gate(
+            [Gate::Z, Gate::S, Gate::T][b.below(3)].clone(),
+            &[b.below(n)],
+        ),
+        6 => c.add_gate(Gate::Cz, &b.distinct(n, 2)),
+        _ => {
+            let theta = b.angle();
+            c.add_gate(Gate::Rz(theta), &[b.below(n)]);
+        }
+    }
+}
+
+fn condition_from_bytes(b: &mut Bytes<'_>, bits: usize) -> ClassicalCondition {
+    match b.below(5) {
+        0 => ClassicalCondition::BitIsOne(b.below(bits)),
+        1 => ClassicalCondition::BitIsZero(b.below(bits)),
+        shape @ (2 | 3) => {
+            let offset = b.below(bits);
+            let size = 1 + b.below(bits - offset);
+            let value = b.below(1 << size) as u64;
+            if shape == 2 {
+                ClassicalCondition::RegisterEquals {
+                    offset,
+                    size,
+                    value,
+                }
+            } else {
+                ClassicalCondition::RegisterNotEquals {
+                    offset,
+                    size,
+                    value,
+                }
+            }
+        }
+        _ => {
+            let count = 1 + b.below(bits);
+            ClassicalCondition::Parity {
+                bits: b.distinct(bits, count).into_boxed_slice(),
+                expected: b.byte() % 2 == 1,
+            }
+        }
+    }
+}
+
+/// What a run must report when every outcome in the circuit is certain.
+struct Reference {
+    classical_bits: Vec<bool>,
+    probabilities: Vec<f64>,
+}
+
+/// Written apart from the crate's own condition evaluation so the reference shares no
+/// code with the routes under test.
+fn condition_holds(condition: &ClassicalCondition, bits: &[bool]) -> bool {
+    let register = |offset: usize, size: usize| {
+        (0..size).fold(0u64, |acc, i| acc | (u64::from(bits[offset + i]) << i))
+    };
+    match condition {
+        ClassicalCondition::BitIsOne(bit) => bits[*bit],
+        ClassicalCondition::BitIsZero(bit) => !bits[*bit],
+        ClassicalCondition::RegisterEquals {
+            offset,
+            size,
+            value,
+        } => register(*offset, *size) == *value,
+        ClassicalCondition::RegisterNotEquals {
+            offset,
+            size,
+            value,
+        } => register(*offset, *size) != *value,
+        ClassicalCondition::Parity {
+            bits: listed,
+            expected,
+        } => listed.iter().fold(false, |acc, &bit| acc ^ bits[bit]) == *expected,
+        other => unreachable!("condition outside the menu: {other:?}"),
+    }
+}
+
+/// Bit-vector model of a circuit built from [`push_basis_op`], measurements, resets and
+/// conditionals. Shares nothing with the simulator.
+fn basis_reference(circuit: &Circuit) -> Reference {
+    fn permute(gate: &Gate, targets: &[usize], state: &mut [bool]) {
+        if matches!(gate, Gate::X) {
+            state[targets[0]] ^= true;
+        } else if matches!(gate, Gate::Cx) {
+            state[targets[1]] ^= state[targets[0]];
+        } else if matches!(gate, Gate::Swap) {
+            state.swap(targets[0], targets[1]);
+        }
+    }
+
+    let mut state = vec![false; circuit.num_qubits];
+    let mut classical_bits = vec![false; circuit.num_classical_bits];
+    for instruction in &circuit.instructions {
+        match instruction {
+            Instruction::Gate { gate, targets } => permute(gate, targets, &mut state),
+            Instruction::Measure {
+                qubit,
+                classical_bit,
+            } => classical_bits[*classical_bit] = state[*qubit],
+            Instruction::Reset { qubit } => state[*qubit] = false,
+            Instruction::Conditional {
+                condition,
+                gate,
+                targets,
+            } => {
+                if condition_holds(condition, &classical_bits) {
+                    permute(gate, targets, &mut state);
+                }
+            }
+            Instruction::Barrier { .. } | Instruction::Save { .. } => {}
+            Instruction::Region(_) => unreachable!("the decoder emits no regions"),
+        }
+    }
+    let index = state
+        .iter()
+        .enumerate()
+        .fold(0usize, |acc, (q, &one)| acc | (usize::from(one) << q));
+    let mut probabilities = vec![0.0; 1 << circuit.num_qubits];
+    probabilities[index] = 1.0;
+    Reference {
+        classical_bits,
+        probabilities,
+    }
+}
+
+/// A plain `Backend::apply` loop, or `None` once a measurement or reset meets a qubit
+/// that is not in a basis state: its outcome is then a draw, and two routes need not
+/// draw alike.
+fn apply_reference(circuit: &Circuit) -> Option<Reference> {
+    let mut backend = StatevectorBackend::new(42);
+    backend
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .expect("reference init");
+    for instruction in &expand_qft_blocks(circuit).instructions {
+        // The simulation layer records saves between instructions; a backend declines one.
+        if matches!(instruction, Instruction::Save { .. }) {
+            continue;
+        }
+        if let Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } = instruction {
+            let one = backend.qubit_probability(*qubit).expect("reference probe");
+            if one.min(1.0 - one) > CERTAIN_EPS {
+                return None;
+            }
+        }
+        backend.apply(instruction).expect("reference apply");
+    }
+    Some(Reference {
+        classical_bits: backend.classical_results().to_vec(),
+        probabilities: backend.probabilities().expect("reference probabilities"),
+    })
+}
+
+fn is_basis_circuit(circuit: &Circuit) -> bool {
+    circuit
+        .instructions
+        .iter()
+        .all(|instruction| match instruction {
+            Instruction::Gate { gate, .. } | Instruction::Conditional { gate, .. } => matches!(
+                gate,
+                Gate::X
+                    | Gate::Cx
+                    | Gate::Swap
+                    | Gate::Z
+                    | Gate::S
+                    | Gate::T
+                    | Gate::Cz
+                    | Gate::Rz(_)
+            ),
+            _ => true,
+        })
+}
+
+/// Run both widths of a case through `simulate` and panic on a mismatch.
+///
+/// Three checks: no entry panics; `plan` predicts a failure exactly when `run` returns
+/// one; and, when every outcome is certain, the classical bits and probabilities equal
+/// the reference at both widths, the idle qubits staying in `|0>`.
+pub fn check_simulate_case(case: &SimulateCase) {
+    let reference = if is_basis_circuit(&case.base) {
+        Some(basis_reference(&case.base))
+    } else {
+        apply_reference(&case.base)
+    };
+    check_simulate_run(case, "base", &case.base, reference.as_ref());
+    if case.padded.num_qubits > case.base.num_qubits {
+        check_simulate_run(case, "padded", &case.padded, reference.as_ref());
+    }
+}
+
+fn check_simulate_run(
+    case: &SimulateCase,
+    label: &str,
+    circuit: &Circuit,
+    reference: Option<&Reference>,
+) {
+    let limits = match case.statevector_cap {
+        Some(cap) => Limits::new().max_statevector_qubits(cap),
+        None => Limits::new(),
+    };
+    let request = || simulate(circuit).backend(case.kind.clone()).limits(limits);
+    let plan = request().plan(Query::Run);
+    let run = request().seed(42).run();
+
+    let planned_failure = plan.as_ref().map_or(true, |plan| plan.would_fail.is_some());
+    assert_eq!(
+        planned_failure,
+        run.is_err(),
+        "{label}: plan and run disagree on failure\nplan: {:?}\nrun: {:?}\n{case:#?}",
+        plan.as_ref().map(|plan| &plan.would_fail),
+        run.as_ref().map(|_| ()),
+    );
+    let (Ok(outcome), Some(reference)) = (run, reference) else {
+        return;
+    };
+    assert_eq!(
+        outcome.classical_bits, reference.classical_bits,
+        "{label}: classical bits differ from the reference\n{case:#?}"
+    );
+    let Some(probabilities) = outcome.probabilities else {
+        return;
+    };
+    let probabilities = probabilities.to_vec();
+    assert_eq!(probabilities.len(), 1 << circuit.num_qubits);
+    for (index, &got) in probabilities.iter().enumerate() {
+        let want = reference.probabilities.get(index).copied().unwrap_or(0.0);
+        assert!(
+            (got - want).abs() <= SIMULATE_EPS,
+            "{label}: probability {index} is {got}, reference {want}\n{case:#?}"
+        );
+    }
+}
+
+/// Decode and check one fuzzer input.
+pub fn check_simulate(data: &[u8]) {
+    check_simulate_case(&simulate_case_from_bytes(data));
 }

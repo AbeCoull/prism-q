@@ -36,3 +36,10 @@ path = "fuzz_targets/fusion.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "simulate"
+path = "fuzz_targets/simulate.rs"
+test = false
+doc = false
+bench = false

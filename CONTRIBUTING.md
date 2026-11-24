@@ -95,8 +95,11 @@ with the MPI and libclang requirements above.
 
 `fuzz/` holds `cargo fuzz` targets for the OpenQASM front end, which must never panic
 (`qasm_parse` on raw bytes, `qasm_tokens` on programs assembled from QASM fragments),
-and for fusion (`fusion`, a fused statevector run checked against a plain apply loop to
-1e-10 per amplitude). The crate is its own workspace and needs nightly:
+for fusion (`fusion`, a fused statevector run checked against a plain apply loop to
+1e-10 per amplitude), and for the `simulate` entry point (`simulate`, a circuit with
+measurements, resets, conditionals and save points run at two widths, where `plan` must
+predict a failure exactly when `run` returns one and certain outcomes must match a
+reference). The crate is its own workspace and needs nightly:
 
 ```bash
 # requires: cargo install cargo-fuzz
@@ -110,6 +113,11 @@ MSVC `bin\Hostx64\x64` directory) must be on `PATH`.
 `tests/integration/fuzz_replay.rs` replays `fuzz/seeds/` and a seeded sweep through the
 same checks on stable on every push. The `Fuzz` workflow runs each target when dispatched
 by hand and uploads any crash input.
+
+A crash input becomes a permanent case by copying the minimized file into
+`fuzz/seeds/<target>/`. An input that fails for a defect not yet fixed goes in
+`fuzz/seeds/simulate_known_defects/` with its shape added to `inside_known_defect` in the
+replay test, which fails once the defect stops reproducing.
 
 ## Documentation site
 

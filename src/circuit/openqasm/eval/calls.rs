@@ -44,6 +44,9 @@ impl<'a> Parser<'a> {
 
         if self.def_defs.contains_key(name) {
             if !operands.is_empty() {
+                if modifiers.iter().any(|m| m.control().is_some()) {
+                    return Err(Self::ctrl_on_expansion_error(name, line));
+                }
                 return Err(parse_error(
                     line,
                     format!(

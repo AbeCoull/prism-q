@@ -91,6 +91,39 @@ fn a_gate_naming_one_qubit_twice_declines() {
 }
 
 #[test]
+fn an_inline_unitary_naming_one_qubit_twice_declines() {
+    let source = "OPENQASM 3.0;\nqubit[2] q;\nh q[1];\n#pragma braket unitary(\
+                  [[1,0,0,0],[0,1,0,0],[0,0,0,1],[0,0,1,0]]) q[0], q[0]";
+    for (entry, result) in [
+        ("braket", parse_with(source, Dialect::Braket).map(drop)),
+        ("parse_braket", parse_braket(source).map(drop)),
+    ] {
+        let err = result.err().unwrap_or_else(|| panic!("{entry}: parsed"));
+        assert!(
+            matches!(err, PrismError::Parse { line: 4, .. })
+                && err.to_string().contains("names qubit 0 more than once"),
+            "{entry}: {err}"
+        );
+    }
+    let distinct = source.replace("q[0], q[0]", "q[0], q[1]");
+    parse_braket(&distinct).unwrap_or_else(|e| panic!("`{distinct}`: {e}"));
+}
+
+#[test]
+fn a_runtime_rotation_naming_one_qubit_twice_declines() {
+    let source = "OPENQASM 3.0;\nqubit[2] q;\nbit[1] c;\nc[0] = measure q[0];\n\
+                  float[64] t = c[0];\nrzz(t) q[1], q[1];";
+    let err = parse_dynamic(source).unwrap_err();
+    assert!(
+        matches!(err, PrismError::Parse { line: 6, .. })
+            && err.to_string().contains("names qubit 1 more than once"),
+        "{err}"
+    );
+    let distinct = source.replace("q[1], q[1]", "q[0], q[1]");
+    parse_dynamic(&distinct).unwrap_or_else(|e| panic!("`{distinct}`: {e}"));
+}
+
+#[test]
 fn a_control_that_is_also_a_target_still_says_so() {
     assert_declined(
         "OPENQASM 3.0;\nqubit[2] q;\nctrl @ x q[0], q[0];",

@@ -421,6 +421,31 @@ fn test_partition_subcircuits_basic() {
     assert_eq!(c_map, &[1]); // classical bit 1 maps to local 0
 }
 
+// The filtered compiles split on the interaction view, where two components may
+// write one bit.
+#[test]
+fn test_partition_subcircuits_shared_classical_bit() {
+    let mut c = Circuit::new(2, 2);
+    c.add_measure(0, 1);
+    c.add_measure(1, 0);
+    c.add_measure(1, 1);
+
+    let components = c.independent_subsystems();
+    assert_eq!(components, vec![vec![0], vec![1]]);
+    let parts = c.partition_subcircuits(&components);
+    assert_eq!(parts[0].2, vec![1]);
+    assert_eq!(parts[1].2, vec![0, 1]);
+    let sub = &parts[1].0;
+    assert_eq!(sub.num_classical_bits, 2);
+    assert!(matches!(
+        sub.instructions[1],
+        Instruction::Measure {
+            qubit: 0,
+            classical_bit: 1
+        }
+    ));
+}
+
 #[test]
 fn test_partition_subcircuits_shares_a_bit_no_measurement_writes() {
     let guard = |condition, target| Instruction::Conditional {

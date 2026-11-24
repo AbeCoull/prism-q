@@ -72,8 +72,8 @@ pub(crate) struct Subsystems {
     /// What [`Circuit::independent_subsystems`] returns.
     pub(crate) interaction: Vec<Vec<usize>>,
     /// `interaction` with every qubit measured into one classical bit joined, so
-    /// no bit is written or read from two groups. `None` when no bit has two
-    /// writers and the views coincide.
+    /// no bit a measurement writes is written or read from two groups. `None`
+    /// when no bit has two writers and the views coincide.
     pub(crate) closed: Option<Vec<Vec<usize>>>,
     pub(crate) clifford_only: bool,
 }
@@ -549,9 +549,12 @@ impl Circuit {
         let mut clifford_only = true;
         let mut condition_bits: Vec<usize> = Vec::new();
         let mut guarded: Vec<(usize, usize)> = Vec::new();
-        let mut writers: Vec<Option<usize>> = vec![None; self.num_classical_bits];
+        let mut writers: Vec<Option<usize>> = Vec::new();
         let mut rewrites: Vec<(usize, usize)> = Vec::new();
         let mut note_writer = |qubit: usize, classical_bit: usize| {
+            if writers.is_empty() {
+                writers.resize(self.num_classical_bits, None);
+            }
             if let Some(slot) = writers.get_mut(classical_bit)
                 && let Some(earlier) = slot.replace(qubit)
                 && earlier != qubit

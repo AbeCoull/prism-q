@@ -562,7 +562,7 @@ mod rowmul_words_spec {
     #[repr(align(64))]
     struct Aligned<const N: usize>([u64; N]);
 
-    fn phase_masks(x1: u64, z1: u64, x2: u64, z2: u64) -> (u64, u64) {
+    pub(super) fn phase_masks(x1: u64, z1: u64, x2: u64, z2: u64) -> (u64, u64) {
         let nonzero = ((x1 ^ x2) | (z1 ^ z2)) & (x1 | z1) & (x2 | z2);
         let pos = (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
         (pos, nonzero)
@@ -746,7 +746,7 @@ mod rowmul_words_spec {
 mod rowmul_words_neon_spec {
     pub(super) type Kernel = unsafe fn(&mut [u64], &mut [u64], &[u64], &[u64], u64) -> u64;
 
-    fn phase_masks(x1: u64, z1: u64, x2: u64, z2: u64) -> (u64, u64) {
+    pub(super) fn phase_masks(x1: u64, z1: u64, x2: u64, z2: u64) -> (u64, u64) {
         let nonzero = ((x1 ^ x2) | (z1 ^ z2)) & (x1 | z1) & (x2 | z2);
         let pos = (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
         (pos, nonzero)
@@ -1038,6 +1038,96 @@ mod tests {
         for _ in 0..8 {
             check_unaligned::<16>(nt, rng.random(), rng.random(), rng.random());
             check_unaligned::<35>(nt, rng.random(), rng.random(), rng.random());
+        }
+    }
+}
+
+// Each single-qubit Pauli is indexed `x | z << 1` and names `i^(x z) X^x Z^z`. A row sum
+// with `src` holding `P1` and `dst` holding `P2` leaves `P1 P2 = i^k P(p1 ^ p2)` in `dst`
+// and adds `k` to the phase sum, modulo 4.
+#[cfg(test)]
+mod phase_rule_tests {
+    use crate::gates::mat_mul_2x2;
+    use crate::test_support::{pauli_matrix, phase_power};
+
+    type Kernel = unsafe fn(&mut [u64], &mut [u64], &[u64], &[u64], u64) -> u64;
+
+    fn bits(p: usize) -> (u64, u64) {
+        ((p & 1) as u64, (p >> 1) as u64)
+    }
+
+    fn product_phase(p1: usize, p2: usize) -> u64 {
+        let matrix = |p: usize| pauli_matrix(p & 1 != 0, p & 2 != 0);
+        let product = mat_mul_2x2(&matrix(p1), &matrix(p2));
+        u64::from(phase_power(&product, &matrix(p1 ^ p2)).expect("a Pauli times a Pauli"))
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn phase_masks_match_pauli_products() {
+        #[cfg(target_arch = "aarch64")]
+        use super::rowmul_words_neon_spec::phase_masks;
+        #[cfg(target_arch = "x86_64")]
+        use super::rowmul_words_spec::phase_masks;
+
+        for p1 in 0..4 {
+            for p2 in 0..4 {
+                let ((x1, z1), (x2, z2)) = (bits(p1), bits(p2));
+                let (pos, nonzero) = phase_masks(x1, z1, x2, z2);
+                let k = (2 * pos).wrapping_sub(nonzero) & 3;
+                assert_eq!(k, product_phase(p1, p2), "Paulis {p1} then {p2}");
+            }
+        }
+    }
+
+    // Every ordered pair on every bit of a row of nine words, through each kernel this host
+    // runs and the two dispatchers, so SIMD bodies and tails all see each case.
+    #[test]
+    fn rowmul_phase_matches_pauli_products_at_every_lane() {
+        const WORDS: usize = 9;
+        let mut kernels: Vec<(&str, Kernel)> = vec![
+            ("scalar", super::rowmul_words_scalar),
+            ("rowmul_words", super::rowmul_words),
+            ("rowmul_words_cached", super::rowmul_words_cached),
+        ];
+        #[cfg(target_arch = "x86_64")]
+        {
+            if crate::backend::word_ops::has_avx2() {
+                kernels.push(("avx2", super::rowmul_words_avx2));
+            } else {
+                eprintln!("SKIP: AVX2 rowmul kernel not run, CPU lacks avx2");
+            }
+            // The avx512-sde CI job runs this kernel under emulation.
+            if crate::backend::word_ops::avx512_test_host() {
+                kernels.push(("avx512", super::rowmul_words_avx512::<false>));
+            } else {
+                eprintln!(
+                    "SKIP: AVX-512 rowmul kernel not run, CPU lacks avx512f with avx512vpopcntdq"
+                );
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        kernels.push(("neon", super::rowmul_words_neon));
+
+        for (name, kernel) in kernels {
+            for p1 in 0..4 {
+                for p2 in 0..4 {
+                    let want = product_phase(p1, p2);
+                    let ((x1, z1), (x2, z2)) = (bits(p1), bits(p2));
+                    for lane in 0..WORDS * 64 {
+                        let (w, b) = (lane / 64, lane % 64);
+                        let row = |bit: u64| -> [u64; WORDS] {
+                            std::array::from_fn(|i| if i == w { bit << b } else { 0 })
+                        };
+                        let (mut dst_x, mut dst_z) = (row(x2), row(z2));
+                        // SAFETY: the kernel's CPU features were detected above; all four
+                        // rows hold `WORDS` words.
+                        let sum = unsafe { kernel(&mut dst_x, &mut dst_z, &row(x1), &row(z1), 0) };
+                        assert_eq!(sum & 3, want, "{name}: Paulis {p1} then {p2}, lane {lane}");
+                        assert_eq!((dst_x, dst_z), (row(x1 ^ x2), row(z1 ^ z2)), "{name}");
+                    }
+                }
+            }
         }
     }
 }

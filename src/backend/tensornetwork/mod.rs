@@ -152,7 +152,12 @@ pub struct TensorNetworkBackend {
     classical_bits: Vec<bool>,
     rng: ChaCha8Rng,
     tolerance: Option<f64>,
-    truncation_discarded: std::cell::Cell<f64>,
+    /// Discard from the marginals of mid-circuit measurements and resets, which
+    /// every later answer inherits.
+    run_discarded: f64,
+    /// Discard booked so far by the query still being answered.
+    query_discarded: std::cell::Cell<f64>,
+    worst_query_discarded: std::cell::Cell<f64>,
     limits: ResolvedLimits,
 }
 
@@ -191,21 +196,29 @@ impl TensorNetworkBackend {
             classical_bits: Vec::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
             tolerance,
-            truncation_discarded: std::cell::Cell::new(0.0),
+            run_discarded: 0.0,
+            query_discarded: std::cell::Cell::new(0.0),
+            worst_query_discarded: std::cell::Cell::new(0.0),
             limits: *limits,
         }
     }
 
-    /// Cumulative fraction of squared weight the contractions of this backend
-    /// have discarded since [`Backend::init`].
+    /// Fraction of squared weight behind the reported bound: the worst single
+    /// query answered since [`Backend::init`], plus what the marginals of
+    /// mid-circuit measurements and resets discarded.
     ///
-    /// The total sums one relative discard per cut rather than measuring the
-    /// final state, so a run that truncates heavily can carry it past 1,
+    /// A query is one shot of the conditional sweep, one observable of
+    /// `pauli_expectations` with the norm contraction it divides by, or one
+    /// other terminal contraction. Each truncates its own copy of the network,
+    /// so queries do not add up, while the cuts inside one query do. A shot's
+    /// cuts depend on its outcomes, so a later shot can still raise the total.
+    /// The sum takes one relative discard per cut rather than measuring the
+    /// final state, so a query that truncates heavily can carry it past 1,
     /// where the fidelity it implies clamps to zero and certifies nothing.
     ///
     /// [`Backend::init`]: crate::backend::Backend::init
     pub fn truncation_discarded(&self) -> f64 {
-        self.truncation_discarded.get()
+        self.run_discarded + self.worst_query_discarded.get()
     }
 
     /// Limits every terminal of this backend contracts under.
@@ -213,10 +226,18 @@ impl TensorNetworkBackend {
         ContractionLimits::new(&self.limits, self.tolerance)
     }
 
-    /// Add what the contraction just finished discarded to the running total.
+    /// Add what the contraction just finished discarded to the open query.
     fn book_truncation(&self) {
-        self.truncation_discarded
-            .set(self.truncation_discarded.get() + last_discarded());
+        self.query_discarded
+            .set(self.query_discarded.get() + last_discarded());
+    }
+
+    /// Close the open query, keeping its discard when it is the worst so far.
+    fn close_query(&self) {
+        let discarded = self.query_discarded.replace(0.0);
+        if discarded > self.worst_query_discarded.get() {
+            self.worst_query_discarded.set(discarded);
+        }
     }
 
     fn fresh_leg(&mut self) -> LegId {
@@ -235,7 +256,9 @@ impl TensorNetworkBackend {
         use rand::RngExt;
 
         let uniform = self.rng.random::<f64>();
-        self.collapse_qubit_with(qubit, reset, uniform, None)
+        let outcome = self.collapse_qubit_with(qubit, reset, uniform, None);
+        self.run_discarded += self.query_discarded.replace(0.0);
+        outcome
     }
 
     /// Collapse `qubit` with a caller-supplied uniform draw, so the native
@@ -325,6 +348,7 @@ impl TensorNetworkBackend {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         for shot in 0..num_shots {
             let drawn = self.sample_one_shot(&mut rng, shot, &mut samples, plans.as_deref_mut());
+            self.close_query();
             self.tensors.clone_from(&tensors);
             self.output_legs.clone_from(&output_legs);
             self.next_leg = next_leg;
@@ -510,6 +534,7 @@ impl TensorNetworkBackend {
             "contraction",
         )?;
         self.book_truncation();
+        self.close_query();
 
         // The result tensor's legs should be exactly the output_legs.
         // PRISM-Q convention: q[0] = LSB of state index. In row-major
@@ -576,21 +601,23 @@ impl Backend for TensorNetworkBackend {
     /// `Approximate` whether or not this run cut anything, since the route
     /// could have.
     ///
-    /// The bound is 1 minus the summed per-cut relative discarded weights: a
-    /// first-order truncation estimate, not a certificate. Errors compound
-    /// across cuts, and summing the weights understates the compounded error,
-    /// since the strict bound on the infidelity is the square of the summed
-    /// square roots. The two agree only when a single cut truncates. A
-    /// doubled contraction, which `pauli_expectations` and both reduced
-    /// density matrix methods run, cuts in the doubled space, so what the
-    /// bound describes there is the quadratic form rather than the state. A
-    /// truncated `reduced_density_matrix` is made Hermitian again by
-    /// averaging it with its conjugate transpose; positivity is not
-    /// restored.
+    /// The bound is 1 minus [`TensorNetworkBackend::truncation_discarded`]: the
+    /// relative discarded weights summed over the cuts of the worst single
+    /// query, one shot, one observable or one export, rather than over every
+    /// query the run answered. It is a first-order truncation estimate, not a
+    /// certificate. Errors compound across cuts, and summing the weights
+    /// understates the compounded error, since the strict bound on the
+    /// infidelity is the square of the summed square roots. The two agree only
+    /// when a single cut truncates. A doubled contraction, which
+    /// `pauli_expectations` and both reduced density matrix methods run, cuts
+    /// in the doubled space, so what the bound describes there is the
+    /// quadratic form rather than the state. A truncated
+    /// `reduced_density_matrix` is made Hermitian again by averaging it with
+    /// its conjugate transpose; positivity is not restored.
     fn exactness(&self) -> crate::sim::Exactness {
         match self.tolerance {
             Some(tolerance) if tolerance > 0.0 => crate::sim::Exactness::Approximate {
-                fidelity_lower_bound: Some((1.0 - self.truncation_discarded.get()).max(0.0)),
+                fidelity_lower_bound: Some((1.0 - self.truncation_discarded()).max(0.0)),
             },
             _ => crate::sim::Exactness::Exact,
         }
@@ -600,7 +627,9 @@ impl Backend for TensorNetworkBackend {
         self.num_qubits = num_qubits;
         self.tensors = Vec::new();
         self.next_leg = 0;
-        self.truncation_discarded.set(0.0);
+        self.run_discarded = 0.0;
+        self.query_discarded.set(0.0);
+        self.worst_query_discarded.set(0.0);
         crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
 
         self.output_legs = Vec::with_capacity(num_qubits);
@@ -727,7 +756,9 @@ impl Backend for TensorNetworkBackend {
     ///
     /// If `qubit` is outside the register.
     fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {
-        self.marginal_1q(qubit, None)
+        let rho = self.marginal_1q(qubit, None);
+        self.close_query();
+        rho
     }
 
     /// One doubled contraction with the subsystem's ket and bra legs open, so
@@ -747,6 +778,7 @@ impl Backend for TensorNetworkBackend {
             "reduced density matrix",
         )?;
         self.book_truncation();
+        self.close_query();
         debug_assert_eq!(rho.rank(), 2 * k);
 
         // Row major with the last axis lowest, so `subsystem[0]` takes the last
@@ -803,10 +835,14 @@ impl Backend for TensorNetworkBackend {
         let mut axes: Vec<Option<PauliAxis>> = vec![None; self.num_qubits];
         let mut expectations = Vec::with_capacity(observables.len());
         let norm_sq = self.contract_pauli_sandwich(&axes)?;
+        let norm_discarded = self.query_discarded.replace(0.0);
 
         for observable in observables {
             observable_axes(observable, &mut axes, "tensor-network")?;
             expectations.push(self.contract_pauli_sandwich(&axes)? / norm_sq);
+            self.query_discarded
+                .set(self.query_discarded.get() + norm_discarded);
+            self.close_query();
         }
 
         Ok(expectations)

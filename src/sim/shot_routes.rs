@@ -171,9 +171,7 @@ impl ShotSource {
                 *expected_device,
                 RouteRule::TerminalStatevector,
             )),
-            ShotSource::Native { backend, .. } => {
-                Some(backend_metadata(&**backend).with_reason(RouteRule::NativeSampling))
-            }
+            ShotSource::Native { backend, .. } => Some(native_metadata(&**backend)),
             ShotSource::TerminalProbabilities { metadata, .. } => Some(metadata.clone()),
             ShotSource::StabilizerRank => Some(
                 RunMetadata::exact(ResolvedBackend::StabilizerRank)
@@ -182,6 +180,12 @@ impl ShotSource {
             ShotSource::PerShot => None,
         }
     }
+}
+
+/// Provenance of a native sampler, read again after it samples: a tensor
+/// network defers every contraction, so its truncation lands in that call.
+fn native_metadata(backend: &dyn Backend) -> RunMetadata {
+    backend_metadata(backend).with_reason(RouteRule::NativeSampling)
 }
 
 /// Select and prepare the sampling source for `circuit`.
@@ -279,7 +283,7 @@ pub(crate) fn run_counts_with(
 
     let bits = circuit.num_classical_bits;
     let source = prepare_shot_source(&kind, circuit, num_shots, seed, limits)?;
-    let Some(metadata) = source.metadata() else {
+    let Some(mut metadata) = source.metadata() else {
         let shots = run_shots_per_shot(
             kind,
             circuit,
@@ -348,6 +352,7 @@ pub(crate) fn run_counts_with(
             meas_map,
         } => {
             let samples = backend.sample_basis_states(num_shots, seed)?;
+            metadata = native_metadata(&*backend);
             counts_from_basis_samples(&samples, &meas_map, bits)
         }
         ShotSource::TerminalProbabilities {
@@ -504,7 +509,7 @@ pub(crate) fn run_shots_with(
 
     let bits = circuit.num_classical_bits;
     let source = prepare_shot_source(&kind, circuit, num_shots, seed, limits)?;
-    let Some(metadata) = source.metadata() else {
+    let Some(mut metadata) = source.metadata() else {
         return run_shots_per_shot(
             kind,
             circuit,
@@ -565,6 +570,7 @@ pub(crate) fn run_shots_with(
             meas_map,
         } => {
             let samples = backend.sample_basis_states(num_shots, seed)?;
+            metadata = native_metadata(&*backend);
             ShotsResult::from_shots(shots_from_basis_samples(&samples, &meas_map, bits), bits)
         }
         ShotSource::TerminalProbabilities {

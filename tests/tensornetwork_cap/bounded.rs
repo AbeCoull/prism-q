@@ -8,8 +8,10 @@ use prism_q::backend::Backend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
 use prism_q::gates::Gate;
-use prism_q::sim::Exactness;
-use prism_q::{BackendKind, Circuit, PauliTerm, PrismError, simulate};
+use prism_q::sim::{Exactness, RunMetadata};
+use prism_q::{BackendKind, Circuit, Limits, PauliTerm, PrismError, ShotsResult, simulate};
+
+const BOUNDED: BackendKind = BackendKind::TensorNetworkBounded { tolerance: 1e-3 };
 
 /// A weakly entangling chain: small rotations ahead of each CZ ladder, so
 /// the intermediates the contraction builds are close to low rank and the
@@ -124,6 +126,108 @@ fn a_bounded_pair_density_is_hermitian_and_inside_its_bound() {
         .fidelity_lower_bound()
         .expect("the bounded route reports a bound");
     assert!(reported < 1.0, "the terminal read the bound before the cut");
+}
+
+// Below 14 so the sampler takes the per-shot sweep rather than the dense arm.
+fn sweep_limits() -> Limits {
+    Limits::new().max_probability_qubits(12)
+}
+
+fn measured_chain() -> Circuit {
+    let mut circuit = weak_chain(14, 4);
+    circuit.measure_all();
+    circuit
+}
+
+fn bounded_shots(num_shots: usize) -> ShotsResult {
+    simulate(&measured_chain())
+        .backend(BOUNDED)
+        .limits(sweep_limits())
+        .seed(SEED)
+        .shots(num_shots)
+        .unwrap()
+}
+
+fn bound_of(metadata: &RunMetadata) -> f64 {
+    metadata
+        .fidelity_lower_bound()
+        .expect("the bounded route reports a bound")
+}
+
+// Every contraction of the sweep runs inside the sampling call, so a bound
+// read before it reports the untouched 1.0. Each shot is its own answer, so
+// the loss does not accumulate across shots, though a later shot whose
+// outcomes cut more can still lower the bound.
+#[test]
+fn bounded_shots_report_the_worst_shot_the_sweep_cut() {
+    small_caps();
+    let eight = bounded_shots(8);
+    let sixty_four = bounded_shots(64);
+    assert_eq!(
+        eight.shots[..],
+        sixty_four.shots[..8],
+        "the first 8 shots of a longer run are no longer the 8-shot run"
+    );
+
+    let (eight, sixty_four) = (bound_of(&eight.metadata), bound_of(&sixty_four.metadata));
+    assert!(eight < 1.0, "the terminal read the bound before the sweep");
+    assert!(
+        sixty_four <= eight,
+        "8 shots {eight} vs 64 shots {sixty_four}"
+    );
+    // A sum over shots would carry the loss to about 8 times the 8-shot loss.
+    assert!(
+        1.0 - sixty_four < 2.0 * (1.0 - eight),
+        "8 shots {eight} vs 64 shots {sixty_four}"
+    );
+}
+
+#[test]
+fn bounded_counts_report_the_cut_the_sweep_made() {
+    small_caps();
+    let counts = simulate(&measured_chain())
+        .backend(BOUNDED)
+        .limits(sweep_limits())
+        .seed(SEED)
+        .sample_counts(8)
+        .unwrap();
+    let bound = bound_of(&counts.metadata);
+    assert!(bound < 1.0, "the terminal read the bound before the sweep");
+    let shots = bound_of(&bounded_shots(8).metadata);
+    assert!(
+        (bound - shots).abs() < 1e-12,
+        "counts {bound} vs shots {shots}"
+    );
+}
+
+// Each observable truncates its own copy of the network, so listing one
+// observable eight times answers the same query eight times. Twelve qubits,
+// since the fused 14-qubit chain contracts under the cap without a cut.
+#[test]
+fn a_repeated_observable_keeps_the_bound_of_one() {
+    small_caps();
+    let circuit = weak_chain(12, 4);
+    let observable = vec![PauliTerm::z(0), PauliTerm::z(6)];
+    let bound = |observables: &[Vec<PauliTerm>]| {
+        simulate(&circuit)
+            .backend(BOUNDED)
+            .seed(SEED)
+            .expectation_values_reported(observables)
+            .unwrap()
+            .metadata
+            .fidelity_lower_bound()
+            .expect("the bounded route reports a bound")
+    };
+    let once = bound(std::slice::from_ref(&observable));
+    assert!(
+        once < 1.0,
+        "the fixture contracted without cutting anything"
+    );
+    let repeated = bound(&vec![observable; 8]);
+    assert!(
+        (once - repeated).abs() < 1e-12,
+        "once {once} vs eight {repeated}"
+    );
 }
 
 #[test]

@@ -3409,7 +3409,26 @@ fn a_chain_with_no_weight_left_refuses_to_collapse() {
         assert!(fresh().apply(&measure).is_err(), "{factor}: measured");
         assert!(fresh().reset(0).is_err(), "{factor}: reset");
         assert!(fresh().project_z_outcome(0, false).is_err(), "{factor}");
+        assert!(
+            fresh().sample_basis_states(8, 42).is_err(),
+            "{factor}: sampled"
+        );
     }
+}
+
+#[test]
+fn a_low_weight_bell_pair_samples_correlated_bits() {
+    let shots = 256;
+    let samples = underweight_bell(42).sample_basis_states(shots, 42).unwrap();
+    let mut ones = 0;
+    for shot in 0..shots {
+        assert_eq!(samples.bit(shot, 0), samples.bit(shot, 1), "shot {shot}");
+        ones += usize::from(samples.bit(shot, 0));
+    }
+    assert!(
+        (64..192).contains(&ones),
+        "q0 read one in {ones} of {shots}"
+    );
 }
 
 #[test]

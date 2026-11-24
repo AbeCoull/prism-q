@@ -1282,16 +1282,7 @@ impl MpsBackend {
                     .sum::<f64>();
             }
         }
-        let total = prob[0] + prob[1];
-        if !(total.is_finite() && total > 0.0) {
-            return Err(crate::error::PrismError::IncompatibleBackend {
-                backend: "Mps".to_string(),
-                reason: format!(
-                    "the chain's weight at site {site} reads {total:e}, so no state is left \
-                     to measure or reset; raise max_bond_dim"
-                ),
-            });
-        }
+        require_weight(prob)?;
         Ok(prob)
     }
 
@@ -1701,6 +1692,25 @@ fn pair_entry(instruction: &Instruction, k: usize) -> (usize, usize) {
     }
 }
 
+/// Refuse a chain whose Born weights at one site sum to zero or to a value
+/// that is not finite: no projection or sample can rescale it back to a state.
+fn require_weight(weights: [f64; 2]) -> Result<()> {
+    let total = weights[0] + weights[1];
+    if total.is_finite() && total > 0.0 {
+        return Ok(());
+    }
+    let message = if total.is_finite() {
+        "MPS truncation discarded the whole state; raise max_bond_dim or lower svd_epsilon"
+            .to_string()
+    } else {
+        format!(
+            "MPS state is not finite (squared norm {total}); check the gate parameters, and \
+             max_bond_dim and svd_epsilon if truncation ran"
+        )
+    };
+    Err(crate::error::PrismError::InvalidParameter { message })
+}
+
 impl crate::backend::sealed::Sealed for MpsBackend {
     fn limits(&self) -> crate::limits::ResolvedLimits {
         self.limits
@@ -1977,6 +1987,8 @@ impl Backend for MpsBackend {
         }
 
         let right = self.right_environments();
+        let mut first = vec![ZERO; 2 * self.sites[0].bond_right];
+        require_weight(self.site_conditional_weights(0, &[ONE], &right[0], &mut first))?;
         let max_bond = self
             .sites
             .iter()

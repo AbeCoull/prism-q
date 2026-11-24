@@ -10,7 +10,7 @@ use crate::backend::mps::MpsBackend;
 use crate::circuit::{Circuit, SmallVec};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
-use crate::limits::{LimitSource, ResolvedLimits};
+use crate::limits::{Limit, LimitKnob, LimitSource, ResolvedLimits};
 use crate::sim::compiled::PackedShots;
 use crate::sim::unified_pauli::{PauliTerm, run_spd_observable_light_cone};
 
@@ -67,15 +67,43 @@ pub fn run_qec_program_with_strategy(
 }
 
 /// Run the Auto ladder, or [`run_qec_program_reference`] when the analytical lowering
-/// refuses the program. Any other lowering error, and any error after lowering, is
-/// returned as is; a failed reference run carries the refusal in its error.
+/// refuses a program no wider than [`Limits::max_qec_reference_qubits`]. Any other
+/// lowering error, and any error after lowering, is returned as is; a refusal past the
+/// width, or a failed reference run, carries the refusal in its error.
+///
+/// [`Limits::max_qec_reference_qubits`]: crate::Limits::max_qec_reference_qubits
 pub(super) fn run_qec_program_auto_or_reference(program: &QecProgram) -> Result<QecSampleResult> {
     match lower_pauli_observables(program) {
         Ok(lowered) => run_qec_program_auto(program, &lowered),
-        Err(refusal) if is_lowering_refusal(&refusal) => run_qec_program_reference(program)
-            .map_err(|reference_error| with_lowering_refusal(reference_error, &refusal)),
+        Err(refusal) if is_lowering_refusal(&refusal) => {
+            let width = ResolvedLimits::process_default().qec_reference_qubits;
+            if program.num_qubits() > width.value {
+                return Err(past_reference_width(refusal, program.num_qubits(), width));
+            }
+            run_qec_program_reference(program)
+                .map_err(|reference_error| with_lowering_refusal(reference_error, &refusal))
+        }
         Err(err) => Err(err),
     }
+}
+
+fn past_reference_width(mut refusal: PrismError, num_qubits: usize, width: Limit) -> PrismError {
+    let knob = LimitKnob::QecReferenceQubits;
+    let raise = match width.source {
+        LimitSource::Detected | LimitSource::Env => {
+            format!("`set_default_limits` or {}", knob.env_var())
+        }
+        LimitSource::ProcessDefault | LimitSource::Request => "`set_default_limits`".to_string(),
+    };
+    if let PrismError::IncompatibleBackend { reason, .. } = &mut refusal {
+        reason.push_str(&format!(
+            "; the program has {num_qubits} qubits, past {} ({}) for the reference fallback, \
+             which {raise} raises",
+            knob.name(),
+            width.value
+        ));
+    }
+    refusal
 }
 
 /// The analytical lowering reports a program shape it cannot express (noise, detectors,

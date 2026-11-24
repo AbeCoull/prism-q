@@ -334,26 +334,24 @@ fn exp_val_falls_back_to_the_reference_runner_when_the_ladder_cannot_lower() {
 }
 
 #[test]
-fn exp_val_fallback_failure_names_the_lowering_refusal() {
-    let mut program = program_with_shots(40, 4);
+fn exp_val_past_the_reference_width_returns_the_lowering_refusal() {
+    let mut program = program_with_shots(21, 4);
     program.push_gate(Gate::X, &[0]).unwrap();
     let record = QecRecordRef::absolute(program.measure_z(0).unwrap());
     let correction = vec![QecOp::Gate {
         gate: Gate::X,
-        targets: vec![39],
+        targets: vec![20],
     }];
     program.feedforward(&[record], true, correction).unwrap();
-    program.expectation_value(&[QecPauli::z(39)], 1.0).unwrap();
+    program.expectation_value(&[QecPauli::z(20)], 1.0).unwrap();
 
     let err = run_qec_program(&program).unwrap_err();
-    let message = err.to_string();
     assert!(
-        matches!(&err, prism_q::PrismError::ResourceLimit(limit) if limit.required == 40),
-        "{message}"
-    );
-    assert!(
-        message.contains("FEEDFORWARD") && message.contains("needs 40 qubits"),
-        "{message}"
+        matches!(&err, prism_q::PrismError::IncompatibleBackend { reason, .. }
+            if reason.contains("FEEDFORWARD")
+                && reason.contains("max_qec_reference_qubits (20)")
+                && reason.contains("PRISM_MAX_QEC_REFERENCE_QUBITS")),
+        "{err}"
     );
 }
 

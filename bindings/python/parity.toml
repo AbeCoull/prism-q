@@ -678,6 +678,7 @@ exclude = [
 "Limits::max_factored_merge_qubits" = "Limits.max_factored_merge_qubits"
 "Limits::max_mps_workspace_qubits" = "Limits.max_mps_workspace_qubits"
 "Limits::max_probability_qubits" = "Limits.max_probability_qubits"
+"Limits::max_qec_reference_qubits" = "Limits.max_qec_reference_qubits"
 "Limits::max_sparse_qubits" = "Limits.max_sparse_qubits"
 "Limits::max_stabilizer_cluster_qubits" = "Limits.max_stabilizer_cluster_qubits"
 "Limits::max_statevector_qubits" = "Limits.max_statevector_qubits"

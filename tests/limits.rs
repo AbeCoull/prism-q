@@ -3,9 +3,34 @@
 //! limits a request sets itself.
 
 use prism_q::{
-    BackendKind, Circuit, CircuitBuilder, LimitKnob, LimitSource, Limits, PrismError,
-    ResolvedBackend, ResourceLimit, circuits, default_limits, set_default_limits, simulate,
+    BackendKind, Circuit, CircuitBuilder, Gate, LimitKnob, LimitSource, Limits, PrismError, QecOp,
+    QecOptions, QecPauli, QecProgram, QecRecordRef, ResolvedBackend, ResourceLimit, circuits,
+    default_limits, set_default_limits, simulate,
 };
+
+/// A noiseless `EXP_VAL` program on `n` qubits whose feed-forward the analytical ladder
+/// cannot lower, so it reaches the reference runner only within its width limit.
+fn feedforward_exp_val(n: usize) -> QecProgram {
+    let mut program = QecProgram::with_options(
+        n,
+        QecOptions {
+            shots: 4,
+            seed: 42,
+            ..QecOptions::default()
+        },
+    );
+    program.push_gate(Gate::X, &[0]).unwrap();
+    let record = QecRecordRef::absolute(program.measure_z(0).unwrap());
+    let correction = vec![QecOp::Gate {
+        gate: Gate::X,
+        targets: vec![n - 1],
+    }];
+    program.feedforward(&[record], true, correction).unwrap();
+    program
+        .expectation_value(&[QecPauli::z(n - 1)], 1.0)
+        .unwrap();
+    program
+}
 
 /// An entangling chain of non-Clifford rotations, which auto routing sends to the
 /// statevector while it fits.
@@ -131,6 +156,28 @@ fn the_process_default_applies_without_a_restart() {
         .seed(42)
         .run();
     assert!(widened.is_ok(), "a request may raise the process default");
+
+    let estimate = |n: usize| prism_q::run_qec_program(&feedforward_exp_val(n));
+    set_default_limits(Limits::new().max_qec_reference_qubits(4));
+    let answered = estimate(4).unwrap();
+    assert_eq!(answered.expectation_values.unwrap()[0].mean, -1.0);
+    let err = estimate(5).unwrap_err();
+    assert!(
+        matches!(&err, PrismError::IncompatibleBackend { reason, .. }
+            if reason.contains("FEEDFORWARD")
+                && reason.contains("5 qubits")
+                && reason.contains("max_qec_reference_qubits (4)")),
+        "{err}"
+    );
+    set_default_limits(Limits::new().max_qec_reference_qubits(5));
+    assert!(
+        estimate(5).is_ok(),
+        "raising the limit reroutes the program"
+    );
+    set_default_limits(Limits::new().max_qec_reference_qubits(64));
+    let data = resource_limit(estimate(40).unwrap_err());
+    assert_eq!(data.knob, Some(LimitKnob::StatevectorQubits));
+    assert!(data.operation.contains("FEEDFORWARD"), "{}", data.operation);
 
     set_default_limits(Limits::new());
     assert!(

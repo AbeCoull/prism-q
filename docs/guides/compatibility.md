@@ -69,8 +69,11 @@ changed meaning:
   analytical lowering refuses it (a `FEEDFORWARD`, a measured qubit reused without a
   reset, or a gate on three or more qubits) now returns estimates from
   `run_qec_program_reference`, where it returned `IncompatibleBackend`. That route costs
-  shots times `2^n` and runs up to the statevector cap; past it the program returns a
-  `ResourceLimit` whose message also names why the lowering refused.
+  shots times `2^n`, so it takes programs up to `Limits::max_qec_reference_qubits`
+  (`PRISM_MAX_QEC_REFERENCE_QUBITS`, default 20 qubits) and within the statevector cap.
+  A wider program returns the refusal with the limit named, and one past the
+  statevector cap returns a `ResourceLimit` whose message also names why the lowering
+  refused.
 
 ## Seeded output
 

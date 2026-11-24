@@ -2915,6 +2915,7 @@ pub prism_q::LimitKnob::ExportQubits
 pub prism_q::LimitKnob::FactoredMergeQubits
 pub prism_q::LimitKnob::MpsWorkspaceQubits
 pub prism_q::LimitKnob::ProbabilityQubits
+pub prism_q::LimitKnob::QecReferenceQubits
 pub prism_q::LimitKnob::SparseQubits
 pub prism_q::LimitKnob::StabilizerClusterQubits
 pub prism_q::LimitKnob::StatevectorQubits
@@ -3701,6 +3702,7 @@ pub prism_q::Limits::max_export_qubits: core::option::Option<usize>
 pub prism_q::Limits::max_factored_merge_qubits: core::option::Option<usize>
 pub prism_q::Limits::max_mps_workspace_qubits: core::option::Option<usize>
 pub prism_q::Limits::max_probability_qubits: core::option::Option<usize>
+pub prism_q::Limits::max_qec_reference_qubits: core::option::Option<usize>
 pub prism_q::Limits::max_sparse_qubits: core::option::Option<usize>
 pub prism_q::Limits::max_stabilizer_cluster_qubits: core::option::Option<usize>
 pub prism_q::Limits::max_statevector_qubits: core::option::Option<usize>
@@ -3714,6 +3716,7 @@ pub fn prism_q::Limits::max_export_qubits(self, usize) -> Self
 pub fn prism_q::Limits::max_factored_merge_qubits(self, usize) -> Self
 pub fn prism_q::Limits::max_mps_workspace_qubits(self, usize) -> Self
 pub fn prism_q::Limits::max_probability_qubits(self, usize) -> Self
+pub fn prism_q::Limits::max_qec_reference_qubits(self, usize) -> Self
 pub fn prism_q::Limits::max_sparse_qubits(self, usize) -> Self
 pub fn prism_q::Limits::max_stabilizer_cluster_qubits(self, usize) -> Self
 pub fn prism_q::Limits::max_statevector_qubits(self, usize) -> Self

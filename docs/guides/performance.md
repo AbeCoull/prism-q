@@ -85,6 +85,7 @@ memory by default), and a layer that sets it discards the per-cap values below i
 | `max_tn_peak_qubits` | `PRISM_MAX_TN_PEAK_QUBITS` | detected | Largest planned tensor-network intermediate, `2^q` elements |
 | `max_tn_slices` | `PRISM_MAX_TN_SLICES` | `1024` | Independent slices a tensor-network contraction may sum over to fit the peak cap (minimum 1; `1` leaves slicing off) |
 | `max_stabilizer_cluster_qubits` | `PRISM_MAX_STABILIZER_CLUSTER_QUBITS` | detected | Factored stabilizer merged-cluster width |
+| `max_qec_reference_qubits` | `PRISM_MAX_QEC_REFERENCE_QUBITS` | `20` | Widest `EXP_VAL` program the analytical ladder cannot lower that `run_qec_program` runs on the reference runner, at shots times `2^n`; not a memory cap, so a budget leaves it alone |
 
 ### Tuning (environment only)
 

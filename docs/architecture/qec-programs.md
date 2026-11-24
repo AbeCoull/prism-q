@@ -241,10 +241,12 @@ packed half), the whole program falls back to the reference runner.
 A noiseless `EXP_VAL` program without detectors goes to the Auto ladder, which lowers it
 once for all three strategies. When that lowering refuses the program (a `FEEDFORWARD`,
 a measured qubit reused without a reset, or a gate on three or more qubits), the program
-runs on the reference runner instead. An error after lowering, such as the 12-row
-postselection cap or a contraction over the tensor network cap, is returned. A noisy
-`EXP_VAL` program with leakage annotations is rejected, since no runner estimates under
-leakage.
+runs on the reference runner instead, when it is no wider than
+`Limits::max_qec_reference_qubits` (default 20, since that runner costs shots times
+`2^n`) and fits the statevector cap. A wider program returns the refusal, naming the
+limit. An error after lowering, such as the 12-row postselection cap or a contraction
+over the tensor network cap, is returned. A noisy `EXP_VAL` program with leakage
+annotations is rejected, since no runner estimates under leakage.
 
 The density-matrix estimator serves noisy `EXP_VAL` programs whose ensemble the mixed
 state can carry in full. There `Tr(rho P)` is the exact value the reference runner

@@ -49,7 +49,9 @@ use rayon::prelude::*;
 ///   cannot lower.
 /// - Otherwise the analytical Auto T-strategy ladder evaluates it. A program its lowering
 ///   refuses, such as one with a `FEEDFORWARD`, a measured qubit reused without a reset,
-///   or a gate on three or more qubits, runs through [`run_qec_program_reference`].
+///   or a gate on three or more qubits, runs through [`run_qec_program_reference`] when
+///   it is no wider than [`Limits::max_qec_reference_qubits`](crate::Limits), resolved
+///   from the process default and the environment.
 ///
 /// Limitations:
 /// - Non-Clifford gates are rejected on the packed path; the `EXP_VAL` route accepts them.

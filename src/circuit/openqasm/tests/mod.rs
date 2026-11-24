@@ -10,6 +10,7 @@ mod defs;
 mod dynamic;
 mod gates;
 mod legacy_gates;
+mod operands;
 
 fn eval_expr(source: &str, line: usize, vars: Option<&HashMap<&str, f64>>) -> Result<f64> {
     let tokens = lexer::tokenize(source)?;

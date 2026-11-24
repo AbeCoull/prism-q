@@ -43,6 +43,15 @@ impl<'a> Parser<'a> {
         let modifiers = self.fold_modifiers(modifiers, line)?;
 
         if self.def_defs.contains_key(name) {
+            if !operands.is_empty() {
+                return Err(parse_error(
+                    line,
+                    format!(
+                        "def `{name}` is a function, not a gate, and takes its qubits as \
+                         arguments, `{name}(...)`"
+                    ),
+                ));
+            }
             if !modifiers.is_empty() && self.def_is_runtime(name, &self.def_defs[name].args, params)
             {
                 return Err(unsupported(
@@ -84,6 +93,7 @@ impl<'a> Parser<'a> {
                     )),
                 })
                 .collect::<Result<Vec<_>>>()?;
+            Self::check_distinct_qubits(name, &qubits, qubits.len(), line)?;
             out.extend(self.resolve_global_phase(&values, &modifiers, &qubits, line)?);
             return Ok(());
         }
@@ -93,6 +103,7 @@ impl<'a> Parser<'a> {
             .map(|operand| self.qubits_of(operand))
             .collect::<Result<_>>()?;
         let width = self.broadcast_length(&resolved, name, line)?;
+        let controls = modifiers.iter().filter(|m| m.control().is_some()).count();
 
         for at in 0..width {
             let qubits: SmallVec<[usize; 4]> = resolved
@@ -105,6 +116,7 @@ impl<'a> Parser<'a> {
                     }
                 })
                 .collect();
+            Self::check_distinct_qubits(name, &qubits, controls, line)?;
             self.resolve_gate_application_once(
                 name, &values, &modifiers, &qubits, has_input, line, out,
             )?;

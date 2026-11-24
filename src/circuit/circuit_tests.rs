@@ -415,24 +415,34 @@ fn test_partition_subcircuits_basic() {
 }
 
 #[test]
-fn test_partition_subcircuits_shared_classical_bit() {
+fn test_partition_subcircuits_shares_a_bit_no_measurement_writes() {
+    let guard = |condition, target| Instruction::Conditional {
+        condition,
+        gate: Gate::X,
+        targets: SmallVec::from_slice(&[target]),
+    };
     let mut c = Circuit::new(2, 2);
-    c.add_measure(0, 1);
+    c.instructions
+        .push(guard(ClassicalCondition::BitIsOne(1), 0));
+    c.instructions
+        .push(guard(ClassicalCondition::BitIsZero(1), 1));
     c.add_measure(1, 0);
-    c.add_measure(1, 1);
 
-    // `independent_subsystems` keeps the writers of one bit together, so the split
-    // is spelled out here.
-    let parts = c.partition_subcircuits(&[vec![0], vec![1]]);
+    let parts = c.partition_subcircuits(&c.independent_subsystems());
     assert_eq!(parts[0].2, vec![1]);
     assert_eq!(parts[1].2, vec![0, 1]);
-    let sub = &parts[1].0;
-    assert_eq!(sub.num_classical_bits, 2);
     assert!(matches!(
-        sub.instructions[1],
-        Instruction::Measure {
-            qubit: 0,
-            classical_bit: 1
+        &parts[0].0.instructions[0],
+        Instruction::Conditional {
+            condition: ClassicalCondition::BitIsOne(0),
+            ..
+        }
+    ));
+    assert!(matches!(
+        &parts[1].0.instructions[0],
+        Instruction::Conditional {
+            condition: ClassicalCondition::BitIsZero(1),
+            ..
         }
     ));
 }

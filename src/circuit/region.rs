@@ -400,6 +400,8 @@ fn remap_condition(
     condition: &ClassicalCondition,
     cbit: &impl Fn(usize) -> usize,
 ) -> ClassicalCondition {
+    // An empty register reads no bit, so its offset has no image to look up.
+    let run_start = |offset: usize, size: usize| if size == 0 { 0 } else { cbit(offset) };
     match condition {
         ClassicalCondition::BitIsOne(bit) => ClassicalCondition::BitIsOne(cbit(*bit)),
         ClassicalCondition::BitIsZero(bit) => ClassicalCondition::BitIsZero(cbit(*bit)),
@@ -408,7 +410,7 @@ fn remap_condition(
             size,
             value,
         } => ClassicalCondition::RegisterEquals {
-            offset: cbit(*offset),
+            offset: run_start(*offset, *size),
             size: *size,
             value: *value,
         },
@@ -417,7 +419,7 @@ fn remap_condition(
             size,
             value,
         } => ClassicalCondition::RegisterNotEquals {
-            offset: cbit(*offset),
+            offset: run_start(*offset, *size),
             size: *size,
             value: *value,
         },

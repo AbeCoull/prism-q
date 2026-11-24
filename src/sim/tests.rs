@@ -953,6 +953,39 @@ fn decomposed_register_condition_reads_a_register_measured_out_of_order() {
     );
 }
 
+// An empty register reads as 0 whatever its offset, so the guard is constant.
+#[test]
+fn decomposed_zero_size_register_condition_is_constant() {
+    let build = |equals: bool| {
+        move |c: &mut Circuit| {
+            let (offset, size, value) = (2, 0, 0);
+            c.add_gate(Gate::H, &[0]);
+            c.add_gate(Gate::Cx, &[0, 1]);
+            c.add_gate(Gate::X, &[2]);
+            c.add_measure(2, 0);
+            c.instructions.push(conditional_x(
+                if equals {
+                    ClassicalCondition::RegisterEquals {
+                        offset,
+                        size,
+                        value,
+                    }
+                } else {
+                    ClassicalCondition::RegisterNotEquals {
+                        offset,
+                        size,
+                        value,
+                    }
+                },
+                3,
+            ));
+            c.add_measure(3, 1);
+        }
+    };
+    assert_decomposed_bits(12, 3, build(true), &[true, true, false]);
+    assert_decomposed_bits(12, 3, build(false), &[true, false, false]);
+}
+
 #[test]
 fn decomposed_guards_read_bits_no_measurement_writes() {
     assert_decomposed_bits(

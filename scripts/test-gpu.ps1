@@ -13,8 +13,11 @@
 # integration tests skip unless PRISM_REQUIRE_GPU is set, which this script sets.
 # CI never opens a device (the gpu-check job runs the device-free kernel
 # name registry test only), so run this on a host with a card before merging a
-# change to src/gpu/, the gate set, the fusion pipeline, or a kernel table shape.
-# Any of those can break the device path while every CPU gate stays green.
+# change to device code (src/gpu/ and the gpu modules elsewhere), the gate
+# set (src/gates/mod.rs, data.rs), the fusion passes the device profile runs
+# (src/circuit/fusion.rs and its _phase, _rzz and _stage passes), or the diagonal
+# batch tables the kernels read. Any of those can break the device path while every
+# CPU gate stays green; scripts/pre_pr.sh prints this run as owed for each of them.
 
 $ErrorActionPreference = 'Stop'
 $clock = [System.Diagnostics.Stopwatch]::StartNew()

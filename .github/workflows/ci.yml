@@ -550,6 +550,7 @@ jobs:
         run: bash scripts/bench_interleave_test.sh
       - name: Verify the combined tree and queue a batch writes
         run: bash scripts/bench_batch_test.sh
+      # Reads no toolchain, so this job needs no Rust setup.
       - name: Verify which checks the local gate plans for a diff
         run: bash scripts/pre_pr_plan_test.sh
 

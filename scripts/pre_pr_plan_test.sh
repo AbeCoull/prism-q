@@ -18,6 +18,16 @@ trap 'rm -rf "$SCRATCH"' EXIT
 PASS=0
 FAIL=0
 
+# The plan must not read a toolchain, which on a runner without one makes rustup
+# install it: these stand-ins record any call.
+mkdir -p "$SCRATCH/bin"
+for tool in rustc rustup cargo; do
+    printf '#!/usr/bin/env bash\necho "%s $*" >> "%s/toolchain-calls"\nexit 1\n' "$tool" "$SCRATCH" \
+        > "$SCRATCH/bin/$tool"
+    chmod +x "$SCRATCH/bin/$tool"
+done
+export PATH="$SCRATCH/bin:$PATH"
+
 # check LABEL "PATH [PATH ...]" "CHECK=ACTION [CHECK=ACTION ...]"
 check() {
     local label="$1" paths="$2" wants="$3"
@@ -52,6 +62,18 @@ check gpu-noise-cache src/sim/noise/gpu_cache.rs \
     "check-gpu-dist=run owed-gpu=owed"
 check gpu-golden tests/golden_gpu.rs \
     "nextest=run check-gpu-dist=run owed-gpu=owed doctest=skip"
+check fusion-pipeline src/circuit/fusion.rs \
+    "check-gpu-dist=run owed-gpu=owed"
+check fusion-phase-pass src/circuit/fusion_phase.rs \
+    "check-gpu-dist=run owed-gpu=owed"
+check fusion-host-tests src/circuit/fusion_tests.rs \
+    "owed-gpu=-"
+check gate-set src/gates/mod.rs \
+    "check-gpu-dist=run owed-gpu=owed"
+check gate-matrices src/gates/matrix.rs \
+    "owed-gpu=-"
+check batch-tables src/backend/statevector/kernels/batch_tables/mod.rs \
+    "check-gpu-dist=run owed-gpu=owed"
 check dispatch src/sim/dispatch.rs \
     "fmt=run check-gpu-dist=run owed-gpu=- nextest-dist=skip"
 check distributed-comm src/distributed/comm.rs \
@@ -76,6 +98,15 @@ check gate-script scripts/pre_pr.sh \
     "test:pre_pr_plan=run sh-syntax=run clippy=skip"
 check bench-ci-script scripts/bench_ci.sh \
     "test:bench_ci=run test:pre_pr_plan=-"
+
+if [[ -s "$SCRATCH/toolchain-calls" ]]; then
+    FAIL=$((FAIL + 1))
+    printf 'FAIL  no-toolchain-read: the plan called\n'
+    sed 's/^/      /' "$SCRATCH/toolchain-calls"
+else
+    PASS=$((PASS + 1))
+    printf 'ok    no-toolchain-read\n'
+fi
 
 echo
 echo "$PASS passed, $FAIL failed"

@@ -48,9 +48,13 @@
 #   sh-syntax          a .sh file
 #   owed-gpu, owed-mpi printed, never run, since they need the card or the MSVC and
 #                      MS-MPI environment. owed-gpu: a GPU path (src/gpu/, a source
-#                      file with gpu in its name, the GPU golden and census tests), or a
-#                      changed line naming gpu or device in a file that carries
-#                      `feature = "gpu"`. owed-mpi: the MPI surface
+#                      file with gpu in its name, the GPU golden and census tests, and
+#                      what scripts/test-gpu.ps1 names: the gate set in src/gates/mod.rs
+#                      and data.rs, src/circuit/fusion.rs and its _phase, _rzz and
+#                      _stage passes, the diagonal batch tables), or a changed line
+#                      naming gpu or device
+#                      in a file that carries `feature = "gpu"`. owed-mpi: the MPI
+#                      surface
 #
 # PRE_PR_CHANGED_FILES, with --plan only, names a file of changed paths, one per line,
 # read in place of the diff. No line is read then, so triggers on line content stay
@@ -194,7 +198,7 @@ first_hit_in_context() {
 }
 
 # Manifest targets with required features, as `path<TAB>feature feature ...`.
-MANIFEST_TARGETS="$(LC_ALL=C awk '
+MANIFEST_TARGETS="$(tr -d '\r' < Cargo.toml | LC_ALL=C awk '
     function flush() {
         if (kind != "" && req != "") print (path != "" ? path : dir[kind] "/" name ".rs") "\t" req
         kind = ""; name = ""; path = ""; req = ""
@@ -207,7 +211,7 @@ MANIFEST_TARGETS="$(LC_ALL=C awk '
         value = $0; sub(/^[^=]*=[[:space:]]*/, "", value); gsub(/[]["]/, "", value); gsub(/,[[:space:]]*/, " ", value)
         if (key == "name") name = value; else if (key == "path") path = value; else req = value
     }
-    END { flush() }' Cargo.toml)"
+    END { flush() }')"
 
 # The first changed file gated on feature $1: a .rs file that carries
 # `feature = "$1"`, or a manifest target that requires it. Prints the file and why.
@@ -270,7 +274,14 @@ DOC_FEATURES="$(ci_env CI_DOC_FEATURES)"
 DOC_FEATURES="${DOC_FEATURES:-parallel,gpu,distributed}"
 API_NIGHTLY="$(ci_env API_NIGHTLY)"
 API_TOOL_VERSION="$(ci_env API_TOOL_VERSION)"
-HOST_TARGET="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
+# Under PRE_PR_CHANGED_FILES no toolchain is read: a rustc or rustup call can make
+# rustup install the pinned toolchain on a runner that has none.
+HOST_TARGET=""
+RUSTC_VERSION="not read under PRE_PR_CHANGED_FILES"
+if [[ -z "${PRE_PR_CHANGED_FILES:-}" ]]; then
+    HOST_TARGET="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
+    RUSTC_VERSION="$(rustc --version 2>/dev/null). CI takes the newest stable."
+fi
 
 # --- Checks ---
 
@@ -521,7 +532,8 @@ fi
 run_if clippy-no-default "$RS_FILE" "no .rs file changed" check_no_default
 
 CROSS_HIT="$(first_hit '^[+-]$' '\.rs$' 'target_(os|arch|feature|family|env|vendor|pointer_width)|cfg!?\((unix|windows)')"
-INSTALLED_TARGETS="$(rustup target list --installed 2>/dev/null)"
+INSTALLED_TARGETS=""
+[[ -n "$CROSS_HIT" ]] && INSTALLED_TARGETS="$(rustup target list --installed 2>/dev/null)"
 for target in x86_64-unknown-linux-gnu aarch64-apple-darwin; do
     name="clippy-${target%%-*}-${target#*-*-}"
     if [[ -z "$CROSS_HIT" ]]; then
@@ -536,7 +548,12 @@ for target in x86_64-unknown-linux-gnu aarch64-apple-darwin; do
 done
 CROSS_UNBUILT="$(first_hit '^[+-]$' '^(examples|tools|tests|benches|bindings)/' 'target_(os|arch)')"
 
+# What scripts/test-gpu.ps1 says owes a device run: device code, plus the gate set,
+# the fusion passes the device profile runs, and the diagonal batch tables the
+# device kernels read.
 GPU_PATHS='^src/gpu/|^src/(.*/)?[^/]*gpu[^/]*\.rs$|^tests/(golden_gpu[^/]*\.rs|gpu_pass_census\.rs|gpu_device/)'
+GPU_PATHS+='|^src/gates/(mod|data)\.rs$|^src/circuit/fusion(_phase|_rzz|_stage)?\.rs$'
+GPU_PATHS+='|^src/backend/statevector/kernels/batch_tables/mod\.rs$'
 DIST_PATHS='^src/(distributed|backend/distributed_statevector)/'
 GPU_DIST_HIT="$(first_file '^src/sim/dispatch\.rs$')"
 GPU_DIST_HIT="${GPU_DIST_HIT:-$(first_hit '^[+-]$' '\.rs$' 'cfg(_attr)?!?\(.*feature')}"
@@ -630,7 +647,7 @@ MPI_HIT="${MPI_HIT:-$(first_hit '^[+-]$' '\.(rs|toml)$' 'MpiComm|distributed-mpi
     "--all-features clippy and nextest after . scripts/mpi-env.ps1, then scripts/test-mpi.ps1"
 
 echo "=== pre-PR checks: $(git rev-parse --short HEAD) against $(git rev-parse --short "$BASE_SHA") ==="
-echo "  rustc: $(rustc --version 2>/dev/null). CI takes the newest stable."
+echo "  rustc: $RUSTC_VERSION"
 echo "  files: ${#CHANGED[@]} changed, ${#UNTRACKED[@]} untracked"
 for f in "${UNTRACKED[@]}"; do echo "    untracked: $f"; done
 echo ""

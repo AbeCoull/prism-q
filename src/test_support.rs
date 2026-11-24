@@ -8,6 +8,7 @@ use crate::backend::Backend;
 use crate::backend::stabilizer::StabilizerBackend;
 use crate::backend::statevector::StatevectorBackend;
 use crate::circuit::{Circuit, Instruction};
+use crate::gates::{Gate, mat_mul_2x2};
 use crate::sim::unified_pauli::PauliTerm;
 
 /// Assert equal lengths and `|actual[i] - expected[i]| < eps` at every index.
@@ -66,6 +67,36 @@ pub(crate) fn assert_mat_close<const N: usize>(
             );
         }
     }
+}
+
+/// The Hermitian Pauli `i^(x z) X^x Z^z` named by tableau bits `(x, z)`, so `(true, true)`
+/// is `Y`.
+pub(crate) fn pauli_matrix(x: bool, z: bool) -> [[Complex64; 2]; 2] {
+    let mut m = Gate::Id.matrix_2x2();
+    if x {
+        m = mat_mul_2x2(&m, &Gate::X.matrix_2x2());
+    }
+    if z {
+        m = mat_mul_2x2(&m, &Gate::Z.matrix_2x2());
+    }
+    if x && z {
+        m = m.map(|row| row.map(|e| e * Complex64::i()));
+    }
+    m
+}
+
+/// The `k` in `0..4` with `m = i^k p` at every entry within `1e-12`, or `None`.
+pub(crate) fn phase_power<const N: usize>(
+    m: &[[Complex64; N]; N],
+    p: &[[Complex64; N]; N],
+) -> Option<u32> {
+    (0..4).find(|&k| {
+        let w = Complex64::i().powu(k);
+        m.iter()
+            .flatten()
+            .zip(p.iter().flatten())
+            .all(|(a, b)| (a - w * b).norm() < 1e-12)
+    })
 }
 
 /// Probabilities after the circuit's gates on a statevector, skipping every other

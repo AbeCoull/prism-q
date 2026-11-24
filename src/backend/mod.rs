@@ -1103,3 +1103,38 @@ pub trait Backend: sealed::Sealed {
         })
     }
 }
+
+// Inputs whose image keeps every bit: the top bit of `val` is clear and `bit_pos + 1` is
+// still a valid shift.
+#[cfg(kani)]
+mod insert_zero_bit_proofs {
+    use super::insert_zero_bit;
+
+    const BITS: usize = usize::BITS as usize;
+
+    fn any_in_range() -> (usize, usize) {
+        let val: usize = kani::any();
+        let bit_pos: usize = kani::any();
+        kani::assume(bit_pos < BITS - 1);
+        kani::assume(val >> (BITS - 1) == 0);
+        (val, bit_pos)
+    }
+
+    #[kani::proof]
+    fn insert_zero_bit_clears_the_bit_and_removes_back() {
+        let (val, bit_pos) = any_in_range();
+        let out = insert_zero_bit(val, bit_pos);
+        assert_eq!((out >> bit_pos) & 1, 0);
+        let low = (1usize << bit_pos) - 1;
+        assert_eq!((out & low) | ((out >> (bit_pos + 1)) << bit_pos), val);
+    }
+
+    #[kani::proof]
+    fn insert_zero_bit_is_strictly_monotone() {
+        let (a, bit_pos) = any_in_range();
+        let b: usize = kani::any();
+        kani::assume(b >> (BITS - 1) == 0);
+        kani::assume(a < b);
+        assert!(insert_zero_bit(a, bit_pos) < insert_zero_bit(b, bit_pos));
+    }
+}

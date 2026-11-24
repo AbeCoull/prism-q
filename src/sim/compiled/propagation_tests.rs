@@ -1,6 +1,8 @@
 use super::*;
 use crate::CircuitBuilder;
 use crate::sim::compiled::PauliVec;
+use crate::test_support::{pauli_matrix, phase_power};
+use num_complex::Complex64;
 
 fn pauli(n: usize, x_bits: &[usize], z_bits: &[usize]) -> PauliVec {
     let mut p = PauliVec::new(n.div_ceil(64));
@@ -515,6 +517,412 @@ fn avx512_propagation_kernels_match_avx2() {
                 apply(&mut wide, kernel, true, m);
             }
             assert_eq!(wide, narrow, "kernel {kernel}, {m} words");
+        }
+    }
+}
+
+// Tableau bits `(x, z)` name the Hermitian Pauli `i^(x z) X^x Z^z`, so `(1, 1)` is `Y`.
+// Indices pack them as `x | z << 1` per qubit, `targets[0]` in the low pair. Every rule is
+// a backward step: an observable `P` after the gate becomes `U† P U` before it, so
+// `Gate::S` sends `X` to `-Y` and `Gate::Sdg` sends it to `+Y`.
+fn pauli_1q(p: usize) -> [[Complex64; 2]; 2] {
+    pauli_matrix(p & 1 != 0, p & 2 != 0)
+}
+
+fn pauli_2q(p: usize) -> [[Complex64; 4]; 4] {
+    crate::gates::kron_2x2(&pauli_1q(p & 3), &pauli_1q(p >> 2))
+}
+
+fn backward_conjugate<const N: usize>(
+    u: &[[Complex64; N]; N],
+    p: &[[Complex64; N]; N],
+) -> [[Complex64; N]; N] {
+    std::array::from_fn(|r| {
+        std::array::from_fn(|c| {
+            (0..N)
+                .flat_map(|a| (0..N).map(move |b| (a, b)))
+                .map(|(a, b)| u[a][r].conj() * p[a][b] * u[b][c])
+                .sum()
+        })
+    })
+}
+
+// For each Pauli index, the index `U† P U` lands on and whether it picks up a minus sign.
+fn signed_images<const N: usize, const P: usize>(
+    u: &[[Complex64; N]; N],
+    pauli: fn(usize) -> [[Complex64; N]; N],
+) -> [(usize, bool); P] {
+    std::array::from_fn(|p| {
+        let image = backward_conjugate(u, &pauli(p));
+        (0..P)
+            .find_map(|q| match phase_power(&image, &pauli(q)) {
+                Some(0) => Some((q, false)),
+                Some(2) => Some((q, true)),
+                Some(k) => panic!("Pauli {p} maps to i^{k} times Pauli {q}"),
+                None => None,
+            })
+            .unwrap_or_else(|| panic!("Pauli {p} has no Pauli image"))
+    })
+}
+
+fn signed_name(p: usize, negative: bool, qubits: usize) -> String {
+    let letters: String = (0..qubits)
+        .map(|q| ['I', 'X', 'Z', 'Y'][(p >> (2 * q)) & 3])
+        .collect();
+    format!("{}{letters}", if negative { '-' } else { '+' })
+}
+
+// The SIMD kernel `propagate_rows_1q` dispatches each gate to; `WordOps` gates touch only
+// the sign through `xor_words`, or nothing.
+#[derive(Clone, Copy)]
+enum Kernel1q {
+    WordOps,
+    H,
+    S { negate_z: bool },
+    SignXor2,
+    Sx { negate_x: bool },
+}
+
+fn gates_1q() -> [(Gate, Kernel1q); 9] {
+    [
+        (Gate::Id, Kernel1q::WordOps),
+        (Gate::X, Kernel1q::WordOps),
+        (Gate::Y, Kernel1q::SignXor2),
+        (Gate::Z, Kernel1q::WordOps),
+        (Gate::H, Kernel1q::H),
+        (Gate::S, Kernel1q::S { negate_z: true }),
+        (Gate::Sdg, Kernel1q::S { negate_z: false }),
+        (Gate::SX, Kernel1q::Sx { negate_x: false }),
+        (Gate::SXdg, Kernel1q::Sx { negate_x: true }),
+    ]
+}
+
+#[derive(Clone, Copy)]
+enum Kernel2q {
+    Cx,
+    Cz,
+    Swap,
+}
+
+fn gates_2q() -> [(Gate, Kernel2q); 3] {
+    [
+        (Gate::Cx, Kernel2q::Cx),
+        (Gate::Cz, Kernel2q::Cz),
+        (Gate::Swap, Kernel2q::Swap),
+    ]
+}
+
+// `Scalar` runs one word at a time, below every SIMD threshold. `Rows` and `Flat` enter
+// through the two public batch entry points and take whatever tier this host dispatches
+// to; the rest call one tier's kernels directly.
+#[derive(Clone, Copy, Debug)]
+enum Tier {
+    Scalar,
+    Rows,
+    Flat,
+    #[cfg(target_arch = "x86_64")]
+    Avx2,
+    #[cfg(target_arch = "x86_64")]
+    Avx512,
+    #[cfg(target_arch = "aarch64")]
+    Neon,
+}
+
+// A tier this CPU lacks prints a skip line rather than passing quietly. The avx512-sde
+// CI job runs the AVX-512 tier under emulation.
+fn live_tiers() -> Vec<Tier> {
+    let mut tiers = vec![Tier::Scalar, Tier::Rows, Tier::Flat];
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::backend::word_ops::has_avx2() {
+            tiers.push(Tier::Avx2);
+        } else {
+            eprintln!("SKIP: AVX2 propagation tier not run, CPU lacks avx2");
+        }
+        if crate::backend::word_ops::avx512_test_host() {
+            tiers.push(Tier::Avx512);
+        } else {
+            eprintln!(
+                "SKIP: AVX-512 propagation tier not run, CPU lacks avx512f with avx512vpopcntdq"
+            );
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    tiers.push(Tier::Neon);
+    tiers
+}
+
+const LANE_WORDS: usize = 11;
+
+fn apply_1q(tier: Tier, gate: &Gate, kernel: Kernel1q, rows: &mut [Vec<u64>]) {
+    let [x, z, s] = rows else {
+        panic!("one-qubit rows are [x, z, sign]")
+    };
+    let m = x.len();
+    match tier {
+        Tier::Scalar => {
+            for w in 0..m {
+                propagate_rows_1q(gate, &mut x[w..=w], &mut z[w..=w], &mut s[w..=w], 1);
+            }
+        }
+        Tier::Rows => {
+            let mut xs = vec![vec![0u64; m], x.clone()];
+            let mut zs = vec![vec![0u64; m], z.clone()];
+            batch_propagate_backward(&mut xs, &mut zs, s, gate, &[1], m);
+            assert!(xs[0].iter().chain(&zs[0]).all(|&w| w == 0));
+            x.copy_from_slice(&xs[1]);
+            z.copy_from_slice(&zs[1]);
+        }
+        Tier::Flat => {
+            let mut xs = [vec![0u64; m], x.clone()].concat();
+            let mut zs = [vec![0u64; m], z.clone()].concat();
+            batch_propagate_backward_flat(&mut xs, &mut zs, s, m, gate, &[1]);
+            assert!(xs[..m].iter().chain(&zs[..m]).all(|&w| w == 0));
+            x.copy_from_slice(&xs[m..]);
+            z.copy_from_slice(&zs[m..]);
+        }
+        #[cfg(target_arch = "x86_64")]
+        Tier::Avx2 => {
+            // SAFETY: AVX2 detected; every row holds `m` words.
+            unsafe {
+                match kernel {
+                    Kernel1q::WordOps => propagate_rows_1q(gate, x, z, s, m),
+                    Kernel1q::H => batch_propagate_h_avx2(x, z, s, m),
+                    Kernel1q::S { negate_z } => batch_propagate_s_avx2(x, z, s, m, negate_z),
+                    Kernel1q::SignXor2 => batch_propagate_sign_xor2_avx2(s, x, z, m),
+                    Kernel1q::Sx { negate_x } => batch_propagate_sx_avx2(x, z, s, m, negate_x),
+                }
+            }
+        }
+        #[cfg(target_arch = "x86_64")]
+        Tier::Avx512 => {
+            // SAFETY: AVX-512F detected; every row holds `m` words.
+            unsafe {
+                match kernel {
+                    Kernel1q::WordOps => propagate_rows_1q(gate, x, z, s, m),
+                    Kernel1q::H => batch_propagate_h_avx512(x, z, s, m),
+                    Kernel1q::S { negate_z } => batch_propagate_s_avx512(x, z, s, m, negate_z),
+                    Kernel1q::SignXor2 => batch_propagate_sign_xor2_avx512(s, x, z, m),
+                    Kernel1q::Sx { negate_x } => batch_propagate_sx_avx512(x, z, s, m, negate_x),
+                }
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        Tier::Neon => {
+            // SAFETY: NEON is baseline on aarch64; every row holds `m` words.
+            unsafe {
+                match kernel {
+                    Kernel1q::WordOps => propagate_rows_1q(gate, x, z, s, m),
+                    Kernel1q::H => batch_propagate_h_neon(x, z, s, m),
+                    Kernel1q::S { negate_z } => batch_propagate_s_neon(x, z, s, m, negate_z),
+                    Kernel1q::SignXor2 => batch_propagate_sign_xor2_neon(s, x, z, m),
+                    Kernel1q::Sx { negate_x } => batch_propagate_sx_neon(x, z, s, m, negate_x),
+                }
+            }
+        }
+    }
+}
+
+fn apply_2q(tier: Tier, gate: &Gate, kernel: Kernel2q, rows: &mut [Vec<u64>]) {
+    let [x0, z0, x1, z1, s] = rows else {
+        panic!("two-qubit rows are [x0, z0, x1, z1, sign]")
+    };
+    let m = x0.len();
+    match tier {
+        Tier::Scalar => {
+            for w in 0..m {
+                propagate_rows_2q(
+                    gate,
+                    &mut x0[w..=w],
+                    &mut z0[w..=w],
+                    &mut x1[w..=w],
+                    &mut z1[w..=w],
+                    &mut s[w..=w],
+                    1,
+                );
+            }
+        }
+        Tier::Rows => {
+            let mut xs = vec![x1.clone(), vec![0u64; m], x0.clone()];
+            let mut zs = vec![z1.clone(), vec![0u64; m], z0.clone()];
+            batch_propagate_backward(&mut xs, &mut zs, s, gate, &[2, 0], m);
+            assert!(xs[1].iter().chain(&zs[1]).all(|&w| w == 0));
+            x0.clone_from(&xs[2]);
+            z0.clone_from(&zs[2]);
+            x1.clone_from(&xs[0]);
+            z1.clone_from(&zs[0]);
+        }
+        Tier::Flat => {
+            let mut xs = [x0.clone(), vec![0u64; m], x1.clone()].concat();
+            let mut zs = [z0.clone(), vec![0u64; m], z1.clone()].concat();
+            batch_propagate_backward_flat(&mut xs, &mut zs, s, m, gate, &[0, 2]);
+            assert!(xs[m..2 * m].iter().chain(&zs[m..2 * m]).all(|&w| w == 0));
+            x0.copy_from_slice(&xs[..m]);
+            z0.copy_from_slice(&zs[..m]);
+            x1.copy_from_slice(&xs[2 * m..]);
+            z1.copy_from_slice(&zs[2 * m..]);
+        }
+        #[cfg(target_arch = "x86_64")]
+        Tier::Avx2 => {
+            // SAFETY: AVX2 detected; every row holds `m` words.
+            unsafe {
+                match kernel {
+                    Kernel2q::Cx => batch_propagate_cx_avx2(x0, z0, x1, z1, s, m),
+                    Kernel2q::Cz => batch_propagate_cz_avx2(x0, z0, x1, z1, s, m),
+                    Kernel2q::Swap => batch_propagate_swap_avx2(x0, z0, x1, z1, m),
+                }
+            }
+        }
+        #[cfg(target_arch = "x86_64")]
+        Tier::Avx512 => {
+            // SAFETY: AVX-512F detected; every row holds `m` words.
+            unsafe {
+                match kernel {
+                    Kernel2q::Cx => batch_propagate_cx_avx512(x0, z0, x1, z1, s, m),
+                    Kernel2q::Cz => batch_propagate_cz_avx512(x0, z0, x1, z1, s, m),
+                    Kernel2q::Swap => batch_propagate_swap_avx512(x0, z0, x1, z1, m),
+                }
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        Tier::Neon => {
+            // SAFETY: NEON is baseline on aarch64; every row holds `m` words.
+            unsafe {
+                match kernel {
+                    Kernel2q::Cx => batch_propagate_cx_neon(x0, z0, x1, z1, s, m),
+                    Kernel2q::Cz => batch_propagate_cz_neon(x0, z0, x1, z1, s, m),
+                    Kernel2q::Swap => batch_propagate_swap_neon(x0, z0, x1, z1, m),
+                }
+            }
+        }
+    }
+}
+
+// Rows are `[x0, z0, (x1, z1,) sign]`, one measurement per bit lane across `LANE_WORDS`
+// words. Over `2 * images.len()` rounds every lane meets every signed input once, so each
+// case lands on every bit of every word, SIMD body and tail alike.
+fn check_lanes(
+    label: &str,
+    qubits: usize,
+    images: &[(usize, bool)],
+    mut step: impl FnMut(&mut [Vec<u64>]),
+) {
+    let paulis = images.len();
+    for round in 0..2 * paulis {
+        let case = |lane: usize| {
+            let c = (lane + round) % (2 * paulis);
+            (c % paulis, c >= paulis)
+        };
+        let mut rows = vec![vec![0u64; LANE_WORDS]; 2 * qubits + 1];
+        for lane in 0..LANE_WORDS * 64 {
+            let (p, negative) = case(lane);
+            for (bit, row) in rows[..2 * qubits].iter_mut().enumerate() {
+                set_bit(row, lane, (p >> bit) & 1 != 0);
+            }
+            set_bit(&mut rows[2 * qubits], lane, negative);
+        }
+        step(&mut rows);
+        for lane in 0..LANE_WORDS * 64 {
+            let (p, negative) = case(lane);
+            let got_p = rows[..2 * qubits]
+                .iter()
+                .enumerate()
+                .fold(0, |acc, (bit, row)| {
+                    acc | usize::from(get_bit(row, lane)) << bit
+                });
+            let got = (got_p, get_bit(&rows[2 * qubits], lane));
+            let want = (images[p].0, negative ^ images[p].1);
+            assert!(
+                got == want,
+                "{label}: {} became {}, want {} (lane {lane})",
+                signed_name(p, negative, qubits),
+                signed_name(got.0, got.1, qubits),
+                signed_name(want.0, want.1, qubits),
+            );
+        }
+    }
+}
+
+#[test]
+fn batch_propagation_signs_match_matrix_conjugation_1q() {
+    let tiers = live_tiers();
+    for (gate, kernel) in gates_1q() {
+        let images: [(usize, bool); 4] = signed_images(&gate.matrix_2x2(), pauli_1q);
+        for &tier in &tiers {
+            check_lanes(&format!("{gate:?} on {tier:?}"), 1, &images, |rows| {
+                apply_1q(tier, &gate, kernel, rows)
+            });
+        }
+    }
+}
+
+#[test]
+fn batch_propagation_signs_match_matrix_conjugation_2q() {
+    let tiers = live_tiers();
+    for (gate, kernel) in gates_2q() {
+        let images: [(usize, bool); 16] = signed_images(&gate.matrix_4x4(), pauli_2q);
+        for &tier in &tiers {
+            check_lanes(&format!("{gate:?} on {tier:?}"), 2, &images, |rows| {
+                apply_2q(tier, &gate, kernel, rows)
+            });
+        }
+    }
+}
+
+// The unsigned rule for one Pauli against the same matrix images, with each case placed
+// on qubits at word edges and every other bit of a background of three words unchanged.
+// Qubit 0 alone on one word is left to `sign_truth_table_tests`.
+#[test]
+fn single_row_propagation_matches_matrix_conjugation() {
+    fn check(gate: &Gate, targets: &[usize], images: &[(usize, bool)]) {
+        let background_x = [
+            0xA5A5_A5A5_A5A5_A5A5u64,
+            0x0123_4567_89AB_CDEF,
+            0x3C3C_3C3C_3C3C_3C3C,
+        ];
+        let background_z = [
+            0x5A5A_5A5A_5A5A_5A5Au64,
+            0xFEDC_BA98_7654_3210,
+            0x0FF0_0FF0_0FF0_0FF0,
+        ];
+        let mut untouched = [!0u64; 3];
+        for &q in targets {
+            untouched[q / 64] &= !(1u64 << (q % 64));
+        }
+        for (p, &(want, _)) in images.iter().enumerate() {
+            let (mut x, mut z) = (background_x, background_z);
+            for (i, &q) in targets.iter().enumerate() {
+                set_bit(&mut x, q, (p >> (2 * i)) & 1 != 0);
+                set_bit(&mut z, q, (p >> (2 * i + 1)) & 1 != 0);
+            }
+            propagate_backward_words(&mut x, &mut z, gate, targets);
+            let got = targets.iter().enumerate().fold(0, |acc, (i, &q)| {
+                acc | usize::from(get_bit(&x, q)) << (2 * i)
+                    | usize::from(get_bit(&z, q)) << (2 * i + 1)
+            });
+            assert_eq!(
+                signed_name(got, false, targets.len()),
+                signed_name(want, false, targets.len()),
+                "{gate:?} on {targets:?} from {}",
+                signed_name(p, false, targets.len()),
+            );
+            for w in 0..3 {
+                assert_eq!(x[w] & untouched[w], background_x[w] & untouched[w]);
+                assert_eq!(z[w] & untouched[w], background_z[w] & untouched[w]);
+            }
+        }
+    }
+
+    for (gate, _) in gates_1q() {
+        let images: [(usize, bool); 4] = signed_images(&gate.matrix_2x2(), pauli_1q);
+        for q in [1, 63, 64, 127, 128, 191] {
+            check(&gate, &[q], &images);
+        }
+    }
+    for (gate, _) in gates_2q() {
+        let images: [(usize, bool); 16] = signed_images(&gate.matrix_4x4(), pauli_2q);
+        for pair in [[0, 1], [1, 0], [63, 64], [64, 63], [5, 130], [130, 5]] {
+            check(&gate, &pair, &images);
         }
     }
 }

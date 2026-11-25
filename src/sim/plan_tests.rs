@@ -120,7 +120,7 @@ fn save_points_fail_every_terminal_but_run() {
         let Some(PrismError::IncompatibleBackend { reason, .. }) = plan.would_fail else {
             panic!("{query:?}: a save point must fail the plan");
         };
-        assert!(reason.contains("save points"), "{query:?}: {reason}");
+        assert!(reason.contains("save point `mid`"), "{query:?}: {reason}");
     }
 }
 

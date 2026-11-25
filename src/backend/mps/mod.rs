@@ -111,6 +111,31 @@ const MIN_BOND_FOR_PAR: usize = 32;
 #[cfg(feature = "parallel")]
 const MIN_SHOTS_FOR_PAR: usize = 32;
 
+pub(crate) fn check_density_workspace(k: usize, chi: usize, limits: &ResolvedLimits) -> Result<()> {
+    check_contraction_workspace(
+        k,
+        chi,
+        limits,
+        "a reduced density matrix over the span these qubits occupy",
+    )
+}
+
+fn check_contraction_workspace(
+    k: usize,
+    chi: usize,
+    limits: &ResolvedLimits,
+    operation: &str,
+) -> Result<()> {
+    // Transfer object, half-contracted form and successor over 4^k open index pairs.
+    let workspace = (7 * (chi as u128).pow(2)) << (2 * k);
+    if workspace > limits.mps_workspace_elements() {
+        return Err(crate::backend::workspace_allocation_error(
+            "mps", operation, workspace, limits,
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct SiteTensor {
     bond_left: usize,
@@ -1469,17 +1494,7 @@ impl MpsBackend {
         let chi = self.sites[first..=last]
             .iter()
             .fold(1usize, |chi, t| chi.max(t.bond_left).max(t.bond_right));
-        // The transfer object, its half-contracted form, and its successor at
-        // the widest bond of the span, each over `4^k` open index pairs.
-        let workspace = (7u128 * (chi as u128) * (chi as u128)) << (2 * k);
-        if workspace > self.workspace_cap {
-            return Err(crate::backend::workspace_allocation_error(
-                self.name(),
-                what,
-                workspace,
-                &self.limits,
-            ));
-        }
+        check_contraction_workspace(k, chi, &self.limits, what)?;
         let end = self.sites.len() - 1;
         match self.center {
             Some(at) => self.move_center(at.clamp(first, last)),
@@ -1849,15 +1864,7 @@ impl Backend for MpsBackend {
         let chi = self.sites[first..=last]
             .iter()
             .fold(1usize, |chi, t| chi.max(t.bond_left).max(t.bond_right));
-        let workspace = (7u128 * (chi as u128) * (chi as u128)) << (2 * k);
-        if workspace > self.workspace_cap {
-            return Err(crate::backend::workspace_allocation_error(
-                self.name(),
-                "a reduced density matrix over the span these qubits occupy",
-                workspace,
-                &self.limits,
-            ));
-        }
+        check_density_workspace(k, chi, &self.limits)?;
 
         let end = self.sites.len() - 1;
         match self.center {

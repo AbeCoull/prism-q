@@ -218,6 +218,7 @@ impl<'c> Simulate<'c, Seeded> {
             self.reject_planned_approximation(Query::Run)?;
         }
         if let Some(noise_model) = self.noise_model {
+            self.reject_saves("a noisy run")?;
             require_exact_mixture(&self.kind, "a single run")?;
             reject_readout_at(self.circuit, noise_model, "a single run")?;
             let probabilities = exact_noisy_probabilities(
@@ -231,14 +232,12 @@ impl<'c> Simulate<'c, Seeded> {
             let classical_bits =
                 sample_exact_noisy_shots(&probabilities, self.circuit, noise_model, 1, seed)
                     .swap_remove(0);
-            let outcome = RunOutcome {
+            return Ok(RunOutcome {
                 classical_bits,
                 probabilities: Some(probabilities),
                 metadata: exact_mixture_metadata(&self.kind),
                 saves: Vec::new(),
-            };
-            ensure_saves_recorded(self.circuit, &outcome)?;
-            return Ok(outcome);
+            });
         }
         if let Some(state) = self.initial_state {
             return run_from_initial_state(
@@ -259,17 +258,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// Refuse a circuit carrying save points on a terminal that cannot return
     /// them. Only [`Simulate::run`] has a place to put the records.
     fn reject_saves(&self, terminal: &str) -> Result<()> {
-        if self.circuit.save_count() == 0 {
-            return Ok(());
-        }
-        Err(PrismError::IncompatibleBackend {
-            backend: format!("{:?}", self.kind),
-            reason: format!(
-                "the circuit carries {} save point(s), which only `run` returns, so \
-                 `{terminal}` declines it",
-                self.circuit.save_count()
-            ),
-        })
+        decline_saves(self.circuit, format_args!("{:?}", self.kind), terminal)
     }
 
     fn reject_planned_approximation(&self, query: Query<'_>) -> Result<()> {
@@ -902,6 +891,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// inner product.
     pub fn overlap(self, other: Simulate<'_, Seeded>) -> Result<OverlapResult> {
         self.reject_saves("overlap")?;
+        other.reject_saves("overlap")?;
         let diagnostic = Diagnostic::Overlap;
         if self.circuit.num_qubits != other.circuit.num_qubits {
             return Err(PrismError::InvalidParameter {

@@ -1256,6 +1256,7 @@ pub prism_q::circuit::ClassicalCondition::RegisterNotEquals::value: u64
 impl prism_q::ClassicalCondition
 pub fn prism_q::ClassicalCondition::evaluate(&self, &[bool]) -> bool
 pub fn prism_q::ClassicalCondition::negate(&self) -> prism_q::ClassicalCondition
+pub fn prism_q::ClassicalCondition::validate_bits(&self, usize) -> prism_q::error::Result<()>
 pub enum prism_q::circuit::Instruction
 pub prism_q::circuit::Instruction::Barrier
 pub prism_q::circuit::Instruction::Barrier::qubits: smallvec::SmallVec<[usize; 4]>
@@ -1657,6 +1658,7 @@ pub fn prism_q::gates::Gate::name(&self) -> &'static str
 pub fn prism_q::gates::Gate::num_qubits(&self) -> usize
 pub fn prism_q::gates::Gate::pauli_generator(&self) -> core::option::Option<prism_q::gates::GeneratorKind<'_>>
 pub fn prism_q::gates::Gate::unitary(alloc::vec::Vec<num_complex::Complex64>, usize) -> prism_q::error::Result<prism_q::gates::Gate>
+pub fn prism_q::gates::Gate::validate_targets(&self, &[usize], usize) -> prism_q::error::Result<()>
 impl core::fmt::Display for prism_q::gates::Gate
 pub fn prism_q::gates::Gate::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub enum prism_q::gates::GeneratorKind<'a>
@@ -2820,6 +2822,7 @@ pub prism_q::ClassicalCondition::RegisterNotEquals::value: u64
 impl prism_q::ClassicalCondition
 pub fn prism_q::ClassicalCondition::evaluate(&self, &[bool]) -> bool
 pub fn prism_q::ClassicalCondition::negate(&self) -> prism_q::ClassicalCondition
+pub fn prism_q::ClassicalCondition::validate_bits(&self, usize) -> prism_q::error::Result<()>
 #[non_exhaustive] pub enum prism_q::Engine
 pub prism_q::Engine::CompiledSampler
 pub prism_q::Engine::FrameSampler
@@ -2880,6 +2883,7 @@ pub fn prism_q::gates::Gate::name(&self) -> &'static str
 pub fn prism_q::gates::Gate::num_qubits(&self) -> usize
 pub fn prism_q::gates::Gate::pauli_generator(&self) -> core::option::Option<prism_q::gates::GeneratorKind<'_>>
 pub fn prism_q::gates::Gate::unitary(alloc::vec::Vec<num_complex::Complex64>, usize) -> prism_q::error::Result<prism_q::gates::Gate>
+pub fn prism_q::gates::Gate::validate_targets(&self, &[usize], usize) -> prism_q::error::Result<()>
 impl core::fmt::Display for prism_q::gates::Gate
 pub fn prism_q::gates::Gate::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub enum prism_q::GeneratorKind<'a>

@@ -90,27 +90,12 @@ impl Circuit {
     /// Append a gate operation.
     ///
     /// # Panics
-    /// Panics if any target is out of bounds or the gate's arity does not match
-    /// `targets.len()`. The checks run in release builds too, because a bad index
-    /// reaches kernel pointer math.
+    /// Panics if targets repeat, fall outside the circuit, or disagree with the gate's
+    /// arity or embedded qubits.
     #[inline]
     pub fn add_gate(&mut self, gate: Gate, targets: &[usize]) {
-        assert_eq!(
-            gate.num_qubits(),
-            targets.len(),
-            "gate `{}` expects {} qubits, got {}",
-            gate.name(),
-            gate.num_qubits(),
-            targets.len()
-        );
-        for &t in targets {
-            assert!(
-                t < self.num_qubits,
-                "qubit index {} out of bounds (circuit has {} qubits)",
-                t,
-                self.num_qubits
-            );
-        }
+        gate.validate_targets(targets, self.num_qubits)
+            .unwrap_or_else(|err| panic!("{err}"));
         self.instructions.push(Instruction::Gate {
             gate,
             targets: SmallVec::from_slice(targets),

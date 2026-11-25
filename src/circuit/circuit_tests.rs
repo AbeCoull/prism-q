@@ -494,24 +494,120 @@ fn test_partition_subcircuits_remaps_indices() {
 }
 
 #[test]
-#[should_panic(expected = "qubit index 5 out of bounds (circuit has 3 qubits)")]
+#[should_panic(expected = "invalid qubit index 5 (register size: 3)")]
 fn add_gate_panics_on_out_of_bounds_target_in_release() {
     let mut c = Circuit::new(3, 0);
     c.add_gate(Gate::H, &[5]);
 }
 
 #[test]
-#[should_panic(expected = "qubit index 4 out of bounds (circuit has 3 qubits)")]
+#[should_panic(expected = "invalid qubit index 4 (register size: 3)")]
 fn add_gate_panics_on_second_target_out_of_bounds() {
     let mut c = Circuit::new(3, 0);
     c.add_gate(Gate::Cx, &[0, 4]);
 }
 
 #[test]
-#[should_panic(expected = "expects 2 qubits, got 1")]
+#[should_panic(expected = "expected 2 qubit(s), got 1")]
 fn add_gate_panics_on_arity_mismatch() {
     let mut c = Circuit::new(3, 0);
     c.add_gate(Gate::Cx, &[0]);
+}
+
+#[test]
+#[should_panic(expected = "qubit 1 named twice")]
+fn add_gate_rejects_repeated_targets() {
+    Circuit::new(2, 0).add_gate(Gate::Cx, &[1, 1]);
+}
+
+#[test]
+#[should_panic(expected = "invalid qubit index 5")]
+fn mcu_checks_its_target_at_construction() {
+    builder::CircuitBuilder::new(3).mcu(Gate::X.matrix_2x2(), &[0, 1], 5);
+}
+
+#[test]
+#[should_panic(expected = "invalid classical bit index")]
+fn conditional_rejects_a_register_range_that_overflows() {
+    let condition = ClassicalCondition::RegisterEquals {
+        offset: usize::MAX,
+        size: 2,
+        value: 0,
+    };
+    builder::CircuitBuilder::new(1).conditional(condition, Gate::H, &[0]);
+}
+
+#[test]
+fn batch_payloads_must_agree_with_instruction_targets() {
+    use crate::gates::{BatchPhaseData, Multi2qData};
+
+    let phase = Complex64::new(0.0, 1.0);
+    let repeated = Gate::BatchPhase(Box::new(BatchPhaseData::new([(1, phase), (1, phase)])));
+    assert!(repeated.validate_targets(&[0, 1, 2], 3).is_err());
+    let pair = Gate::Multi2q(Box::new(Multi2qData::new(vec![(
+        2,
+        3,
+        Gate::Cx.matrix_4x4(),
+    )])));
+    assert!(pair.validate_targets(&[3, 2], 4).is_ok());
+    assert!(pair.validate_targets(&[0, 1], 4).is_err());
+    let qft = Gate::QftBlock {
+        start: 1,
+        num: 2,
+        swaps: true,
+        inverse: false,
+        big_endian: false,
+    };
+    assert!(qft.validate_targets(&[1, 2], 3).is_ok());
+    assert!(qft.validate_targets(&[0, 1], 3).is_err());
+}
+
+#[test]
+#[should_panic(expected = "has no targets")]
+fn add_gate_rejects_an_empty_batch() {
+    let data = crate::gates::Multi2qData::new(vec![]);
+    Circuit::new(8, 0).add_gate(Gate::Multi2q(Box::new(data)), &[]);
+}
+
+#[test]
+fn partition_subcircuits_relabels_embedded_gate_targets() {
+    use crate::gates::{
+        BatchPhaseData, BatchRzzData, DiagEntry, DiagonalBatchData, Multi2qData, MultiFusedData,
+        MultiPauliRotData,
+    };
+
+    let phase = Complex64::new(0.0, 1.0);
+    let cx = Gate::Cx.matrix_4x4();
+    let x = Gate::X.matrix_2x2();
+    let batches = [
+        Gate::BatchPhase(Box::new(BatchPhaseData::new([(7, phase)]))),
+        Gate::BatchRzz(Box::new(BatchRzzData::new(vec![(3, 7, 0.1)]))),
+        Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(vec![DiagEntry::Phase2q {
+            q0: 3,
+            q1: 7,
+            phase,
+        }]))),
+        Gate::Multi2q(Box::new(Multi2qData::new(vec![(7, 3, cx)]))),
+        Gate::MultiFused(Box::new(MultiFusedData::new(vec![(7, x), (3, x)]))),
+        Gate::MultiPauliRot(Box::new(MultiPauliRotData {
+            rotations: vec![(1 << 3, 1 << 7, 0.3)],
+        })),
+    ];
+    let mut circuit = Circuit::new(8, 0);
+    assert!(batches[0].validate_targets(&[3], 8).is_err());
+    for gate in batches {
+        circuit.add_gate(gate, &[3, 7]);
+    }
+    let parts = circuit.partition_subcircuits(&circuit.independent_subsystems());
+    let sub = &parts[3].0;
+    assert_eq!(sub.instructions.len(), circuit.instructions.len());
+    for inst in &sub.instructions {
+        let Instruction::Gate { gate, targets } = inst else {
+            panic!("expected gate");
+        };
+        assert_eq!(targets.as_slice(), &[0, 1]);
+        gate.validate_targets(targets, sub.num_qubits).unwrap();
+    }
 }
 
 #[test]

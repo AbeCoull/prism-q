@@ -34,7 +34,7 @@ use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 /// [`build_parametric`](Self::build_parametric).
 ///
 /// Gate and measurement methods panic when a qubit or classical bit index is
-/// out of bounds.
+/// out of bounds or a gate names the same qubit twice.
 ///
 /// # Examples
 ///
@@ -267,10 +267,12 @@ impl CircuitBuilder {
             u8::try_from(controls.len()).expect("mcu supports at most u8::MAX control qubits");
         let mut targets: SmallVec<[usize; 4]> = controls.into();
         targets.push(target);
-        self.circuit.instructions.push(Instruction::Gate {
-            gate: Gate::mcu(mat, num_controls),
-            targets,
-        });
+        let gate = Gate::mcu(mat, num_controls);
+        gate.validate_targets(&targets, self.circuit.num_qubits)
+            .unwrap_or_else(|err| panic!("{err}"));
+        self.circuit
+            .instructions
+            .push(Instruction::Gate { gate, targets });
         self
     }
 
@@ -364,6 +366,11 @@ impl CircuitBuilder {
         gate: Gate,
         targets: &[usize],
     ) -> &mut Self {
+        condition
+            .validate_bits(self.circuit.num_classical_bits)
+            .unwrap_or_else(|err| panic!("{err}"));
+        gate.validate_targets(targets, self.circuit.num_qubits)
+            .unwrap_or_else(|err| panic!("{err}"));
         self.circuit.instructions.push(Instruction::Conditional {
             condition,
             gate,
@@ -385,6 +392,9 @@ impl CircuitBuilder {
         condition: ClassicalCondition,
         body: impl FnOnce(&mut CircuitBuilder),
     ) -> &mut Self {
+        condition
+            .validate_bits(self.circuit.num_classical_bits)
+            .unwrap_or_else(|err| panic!("{err}"));
         let mut inner = CircuitBuilder::new(self.circuit.num_qubits);
         inner.circuit.num_classical_bits = self.circuit.num_classical_bits;
         body(&mut inner);
@@ -401,13 +411,15 @@ impl CircuitBuilder {
         self
     }
 
-    fn push_expansion(&mut self, expansion: impl IntoIterator<Item = Instruction>) -> &mut Self {
-        for instruction in expansion {
+    fn push_expansion<const N: usize>(&mut self, expansion: [Instruction; N]) -> &mut Self {
+        for instruction in &expansion {
             let Instruction::Gate { gate, targets } = instruction else {
                 unreachable!("a gate expansion holds gates only");
             };
-            self.circuit.add_gate(gate, &targets);
+            gate.validate_targets(targets, self.circuit.num_qubits)
+                .unwrap_or_else(|err| panic!("{err}"));
         }
+        self.circuit.instructions.extend(expansion);
         self
     }
 

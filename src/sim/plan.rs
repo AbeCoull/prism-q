@@ -211,11 +211,17 @@ impl<SeedState> Simulate<'_, SeedState> {
                 plan
             }
         };
-        if !matches!(query, Query::Run) && self.circuit.save_count() != 0 {
-            plan.would_fail = Some(PrismError::IncompatibleBackend {
-                backend: format!("{:?}", self.kind),
-                reason: "save points are only returned by run".into(),
-            });
+        let saves = if matches!(query, Query::Run) {
+            check_run_saves(self.circuit, &plan, self.noise_model.is_some(), &limits)
+        } else {
+            decline_saves(
+                self.circuit,
+                format_args!("{:?}", self.kind),
+                "this terminal",
+            )
+        };
+        if let Err(error) = saves {
+            plan.would_fail = Some(error);
         }
         if self.require_exact && (plan.exactness != PlannedExactness::Exact) {
             plan.would_fail = Some(PrismError::IncompatibleBackend {
@@ -268,34 +274,92 @@ impl<SeedState> Simulate<'_, SeedState> {
             }
         }
         if matches!(query, Query::Run) && plan.would_fail.is_none() {
-            plan.would_fail = match plan.backend {
-                ResolvedBackend::Statevector if plan.placement == Placement::Host => {
-                    crate::backend::statevector_probability_len(
-                        "statevector",
-                        self.circuit.num_qubits,
-                        &limits,
-                    )
-                    .err()
-                }
-                ResolvedBackend::TensorNetwork => crate::backend::tensor_probability_len(
-                    "tensor_network",
-                    self.circuit.num_qubits,
-                    &limits,
-                )
-                .err(),
-                #[cfg(feature = "distributed")]
-                ResolvedBackend::Distributed => crate::backend::dense_probability_len(
-                    "distributed_statevector",
-                    self.circuit.num_qubits,
-                    &limits,
-                )
-                .err(),
-                _ => None,
-            };
+            plan.would_fail =
+                check_probability_width(&plan, self.circuit.num_qubits, &limits, false).err();
         }
         plan.peak_memory = estimate_buffers(&plan, self.circuit, query, self.noise_model.is_some());
         Ok(plan)
     }
+}
+
+fn check_probability_width(
+    plan: &Plan,
+    n: usize,
+    limits: &ResolvedLimits,
+    saving: bool,
+) -> Result<()> {
+    use crate::backend::{
+        dense_probability_len, statevector_probability_len, tensor_probability_len,
+    };
+    match plan.backend {
+        ResolvedBackend::Statevector if plan.placement == Placement::Host => {
+            statevector_probability_len("statevector", n, limits)
+        }
+        ResolvedBackend::TensorNetwork => {
+            tensor_probability_len("tensor_network", n, limits)?;
+            crate::backend::dense_statevector_len("tensor_network", "contraction", n, limits)
+        }
+        ResolvedBackend::Distributed => dense_probability_len("distributed_statevector", n, limits),
+        ResolvedBackend::Statevector | ResolvedBackend::DensityMatrix => return Ok(()),
+        _ if saving => dense_probability_len(&format!("{:?}", plan.backend), n, limits),
+        _ => return Ok(()),
+    }
+    .map(drop)
+}
+
+fn check_run_saves(
+    circuit: &Circuit,
+    plan: &Plan,
+    noisy: bool,
+    limits: &ResolvedLimits,
+) -> Result<()> {
+    use ResolvedBackend::*;
+    if noisy
+        || matches!(
+            plan.backend,
+            StabilizerRank | StochasticPauli | DeterministicPauli | PauliPath
+        )
+    {
+        let terminal = if noisy {
+            "a noisy run"
+        } else {
+            "a probability-only run"
+        };
+        return decline_saves(circuit, format_args!("{:?}", plan.backend), terminal);
+    }
+    let n = circuit.num_qubits;
+    for (spec, label) in circuit.save_points() {
+        let backend = format!("{:?}", plan.backend);
+        let result = match spec {
+            SaveSpec::StateVector if plan.backend == DensityMatrix => {
+                Err(PrismError::BackendUnsupported {
+                    backend,
+                    operation: "statevector export".into(),
+                })
+            }
+            SaveSpec::StateVector
+                if plan.backend == Statevector && plan.placement == Placement::Device =>
+            {
+                Ok(())
+            }
+            SaveSpec::StateVector => {
+                check_diagnostic_width(&backend, Diagnostic::StateVector, n, limits)
+            }
+            SaveSpec::DensityMatrix if n == 0 => {
+                crate::backend::schmidt::validate_qubit_set(&[], n)
+            }
+            SaveSpec::DensityMatrix if plan.backend == Mps => {
+                check_diagnostic_width(&backend, Diagnostic::ReducedDensityMatrix, n, limits)
+                    .and_then(|()| crate::backend::mps::check_density_workspace(n, 1, limits))
+            }
+            SaveSpec::DensityMatrix => {
+                check_diagnostic_width(&backend, Diagnostic::ReducedDensityMatrix, n, limits)
+            }
+            SaveSpec::Probabilities => check_probability_width(plan, n, limits, true),
+        };
+        result.map_err(|err| name_save_error(err, label))?;
+    }
+    Ok(())
 }
 
 fn estimate_buffers(

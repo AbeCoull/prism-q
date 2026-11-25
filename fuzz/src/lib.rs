@@ -858,7 +858,15 @@ fn check_simulate_run(
         plan.as_ref().map(|plan| &plan.would_fail),
         run.as_ref().map(|_| ()),
     );
-    let (Ok(outcome), Some(reference)) = (run, reference) else {
+    let Ok(outcome) = run else {
+        return;
+    };
+    assert_eq!(
+        outcome.saves.len(),
+        circuit.save_count(),
+        "{label}: {case:#?}"
+    );
+    let Some(reference) = reference else {
         return;
     };
     assert_eq!(

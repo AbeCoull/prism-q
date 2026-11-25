@@ -22,7 +22,13 @@ pub(super) fn plan_probability_route(
     limits: &ResolvedLimits,
 ) -> ProbabilityRoute {
     let (decompose, has_partial_independence) = analyze_independence(circuit);
+    let direct = ProbabilityRoute::Direct {
+        has_partial_independence,
+    };
     if let Some((components, clifford_only)) = decompose {
+        if circuit.save_points().next().is_some() {
+            return direct;
+        }
         let max_block = components.iter().map(|c| c.len()).max().unwrap_or(0);
         let auto_takes_it = kind.is_auto()
             && circuit.num_qubits >= MIN_FACTORED_STABILIZER_QUBITS
@@ -32,14 +38,14 @@ pub(super) fn plan_probability_route(
         }
         return ProbabilityRoute::Decomposed(components);
     }
-    if has_temporal_clifford_opportunity(kind, circuit, limits) {
+    if has_temporal_clifford_opportunity(kind, circuit, limits)
+        && circuit.save_points().next().is_none()
+    {
         return ProbabilityRoute::TemporalClifford {
             has_partial_independence,
         };
     }
-    ProbabilityRoute::Direct {
-        has_partial_independence,
-    }
+    direct
 }
 
 /// True when the auto probability route falls through to direct family

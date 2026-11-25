@@ -1254,6 +1254,7 @@ pub fn compile_noisy(
     noise: &NoiseModel,
     seed: u64,
 ) -> Result<NoisyCompiledSampler> {
+    crate::sim::decline_saves(circuit, "NoisyCompiledSampler", "compiled noisy sampling")?;
     noise.validate_for(circuit)?;
     compile_validated_noisy(circuit, noise, seed)
 }

@@ -252,10 +252,14 @@ impl Circuit {
     }
 
     pub fn save_count(&self) -> usize {
-        self.instructions
-            .iter()
-            .filter(|i| matches!(i, Instruction::Save { .. }))
-            .count()
+        self.save_points().count()
+    }
+
+    pub(crate) fn save_points(&self) -> impl Iterator<Item = (SaveSpec, &str)> {
+        self.instructions.iter().filter_map(|inst| match inst {
+            Instruction::Save { spec, label, .. } => Some((*spec, label.as_str())),
+            _ => None,
+        })
     }
 
     /// Count of gate instructions (excludes measurements and barriers).

@@ -16,11 +16,12 @@ pub(crate) fn supports_compiled_measurement_sampling(circuit: &Circuit) -> bool 
             }
             Instruction::Measure { .. } => measured = true,
             Instruction::Reset { .. }
+            | Instruction::Save { .. }
             | Instruction::Conditional { .. }
             | Instruction::Region(_) => {
                 return false;
             }
-            Instruction::Barrier { .. } | Instruction::Save { .. } => {}
+            Instruction::Barrier { .. } => {}
         }
     }
     measured

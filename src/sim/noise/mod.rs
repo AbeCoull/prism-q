@@ -47,6 +47,7 @@ pub fn run_shots_noisy(
     num_shots: usize,
     seed: u64,
 ) -> Result<ShotsResult> {
+    super::decline_saves(circuit, "NoisyCompiledSampler", "noisy sampling")?;
     noise.validate_for(circuit)?;
     run_validated_shots_noisy(circuit, noise, num_shots, seed)
 }

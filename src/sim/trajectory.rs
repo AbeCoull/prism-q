@@ -405,7 +405,10 @@ fn damping_host_decided(
     jump_moves_population: bool,
     r: f64,
 ) -> Result<()> {
-    let p1 = backend.qubit_probability(qubit)?;
+    let p1 = match backend.damping_probability(qubit) {
+        Some(p1) => p1?,
+        None => backend.qubit_probability(qubit)?,
+    };
     let p_jump = gamma * p1;
 
     if r < p_jump && p_jump > JUMP_EPSILON {

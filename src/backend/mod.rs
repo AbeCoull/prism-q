@@ -616,6 +616,11 @@ pub(crate) mod sealed {
             None
         }
 
+        /// Read P(1) while preparing the site for the damping branch's matrix.
+        fn damping_probability(&mut self, _qubit: usize) -> Option<crate::error::Result<f64>> {
+            None
+        }
+
         /// Apply amplitude damping (`jump_moves_population`) or phase damping from the
         /// draw `r` with the branch chosen on the device, bit for bit as the trajectory
         /// chooses it on the host from the same reduction, so nothing is read back.

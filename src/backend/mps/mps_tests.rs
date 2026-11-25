@@ -3321,6 +3321,40 @@ fn a_truncated_chain_resets_and_reads_normalized_weights() {
     }
 }
 
+#[test]
+fn damping_keeps_the_center_through_a_sweep() {
+    use crate::backend::sealed::Sealed;
+
+    let keep = 0.99_f64.sqrt();
+    for n in [12, 16, 24] {
+        let mut centered = mps_after(&crate::circuits::brickwork_circuit(n, 6, 42), 4);
+        centered.establish_center(0);
+        let mut reference = centered.clone();
+        let start = centered.center_steps;
+        for q in 0..n - 1 {
+            centered.dispatch_gate(&Gate::Cx, &[q, q + 1]).unwrap();
+            reference.dispatch_gate(&Gate::Cx, &[q, q + 1]).unwrap();
+            for target in [q, q + 1] {
+                let p1 = centered.damping_probability(target).unwrap().unwrap();
+                let old = reference.qubit_probability(target).unwrap();
+                for (b, p1) in [(&mut centered, p1), (&mut reference, old)] {
+                    let inv = 1.0 / (1.0 - 0.01 * p1).sqrt();
+                    b.apply_1q_matrix(target, &[[ONE * inv, ZERO], [ZERO, ONE * (keep * inv)]])
+                        .unwrap();
+                }
+            }
+        }
+        let walked = centered.center_steps - start;
+        let rebuilt = reference.center_steps - start;
+        eprintln!(
+            "{n} qubits, {} damping events: {rebuilt} center steps before, {walked} after",
+            2 * (n - 1)
+        );
+        assert!(walked <= 3 * (n - 1));
+        assert!(walked < rebuilt);
+    }
+}
+
 /// A Bell pair whose first site is scaled by 1e-16, so the chain carries a
 /// squared norm of 1e-32, under `NORM_CLAMP_MIN`, with half of it on each
 /// outcome.

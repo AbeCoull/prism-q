@@ -1380,6 +1380,44 @@ fn damping_states() -> [StatevectorBackend; 2] {
 }
 
 #[test]
+fn damping_uses_the_normalized_weight_of_the_target_site() {
+    use crate::backend::mps::MpsBackend;
+
+    let mut circuit = Circuit::new(3, 0);
+    circuit.add_gate(Gate::X, &[0]);
+    circuit.add_gate(Gate::H, &[1]);
+    circuit.add_gate(Gate::Cx, &[1, 2]);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Swap, &[0, 2]);
+    let mut base = MpsBackend::new(42, 1);
+    base.init(3, 0).unwrap();
+    base.apply_instructions(&circuit.instructions).unwrap();
+    assert!(base.truncation_discarded() > 0.1);
+    let before = base.export_statevector().unwrap();
+    let gamma = 0.5_f64;
+    for moves in [false, true] {
+        for (draw, jump) in [(0.2, true), (0.3, false), (0.9, false)] {
+            let mut actual = base.clone();
+            apply_diagonal_kraus_2op(&mut actual, 2, Damping::new(gamma), moves, draw).unwrap();
+            let after = actual.export_statevector().unwrap();
+            for (index, amp) in after.into_iter().enumerate() {
+                let expected = match (jump, moves, index & 4 != 0) {
+                    (true, true, false) => before[index | 4] * 2.0_f64.sqrt(),
+                    (true, false, true) => before[index] * 2.0_f64.sqrt(),
+                    (true, _, _) => Complex64::default(),
+                    (false, _, true) => before[index] * (0.5_f64 / 0.75).sqrt(),
+                    (false, _, false) => before[index] / 0.75_f64.sqrt(),
+                };
+                assert!(
+                    (amp - expected).norm() < 1e-10,
+                    "amplitude {index} at draw {draw}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn one_pass_damping_matches_the_two_step_branch() {
     use crate::backend::sealed::Sealed;
     for (index, state) in damping_states().iter().enumerate() {

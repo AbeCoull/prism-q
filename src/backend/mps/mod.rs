@@ -1715,6 +1715,11 @@ impl crate::backend::sealed::Sealed for MpsBackend {
     fn limits(&self) -> crate::limits::ResolvedLimits {
         self.limits
     }
+
+    fn damping_probability(&mut self, qubit: usize) -> Option<Result<f64>> {
+        let site = self.site_for_logical(qubit);
+        Some(self.born_weights(site).map(|[w0, w1]| w1 / (w0 + w1)))
+    }
 }
 
 impl Backend for MpsBackend {

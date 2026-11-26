@@ -163,16 +163,6 @@ unsafe fn apply_fused_2q_loop_fma(
     }
 }
 
-#[cfg(target_arch = "x86_64")]
-#[inline]
-#[target_feature(enable = "fma")]
-unsafe fn apply_fused_2q_group_fma(state: *mut f64, i: [usize; 4], mat: &Mat4x4Broadcast) {
-    // SAFETY: same contract as the enclosing unsafe fn.
-    unsafe {
-        apply_fused_2q_group_fma_inner(state, i, mat);
-    }
-}
-
 /// Apply two consecutive 4-element groups (k and k+1) of a 2q gate using AVX2.
 ///
 /// Precondition: `iA[r]` and `iA[r] + 1` must be the indices of group A's row r
@@ -217,9 +207,82 @@ unsafe fn apply_fused_2q_pair_avx2_inner(state: *mut f64, i: [usize; 4], mat: &M
     }
 }
 
-/// Pair-batched 2q kernel main loop. Requires `lo > 0` so that paired k/k+1
-/// values map to adjacent state positions; falls back to the 128-bit FMA
-/// kernel when `lo == 0`.
+/// Apply two groups (A and B) of a 2q gate when `lo == 0` using AVX2.
+///
+/// With `lo == 0`, `(bit0=0, bit0=1)` of one group at fixed `hi` is contiguous
+/// in memory. Loading `va_lo = [A(0,0), A(1,0)]` and `vb_lo = [B(0,0), B(1,0)]`
+/// (and similarly `va_hi, vb_hi` for `bit(hi) = 1`) and transposing via
+/// `_mm256_permute2f128_pd` (`0x20` / `0x31`) packs `[A(row), B(row)]` into
+/// one 256-bit register for the standard two-chain multiply-addsub.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn apply_fused_2q_pair_lo0_avx2_inner<const Q0_IS_LO: bool>(
+    pa_lo: *mut f64,
+    pb_lo: *mut f64,
+    pa_hi: *mut f64,
+    pb_hi: *mut f64,
+    mat: &Mat4x4Broadcast256,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let va_lo = _mm256_loadu_pd(pa_lo);
+        let vb_lo = _mm256_loadu_pd(pb_lo);
+        let va_hi = _mm256_loadu_pd(pa_hi);
+        let vb_hi = _mm256_loadu_pd(pb_hi);
+
+        let p_00 = _mm256_permute2f128_pd(va_lo, vb_lo, 0x20);
+        let p_10 = _mm256_permute2f128_pd(va_lo, vb_lo, 0x31);
+        let p_01 = _mm256_permute2f128_pd(va_hi, vb_hi, 0x20);
+        let p_11 = _mm256_permute2f128_pd(va_hi, vb_hi, 0x31);
+
+        let (s0, s1, s2, s3) = if Q0_IS_LO {
+            (p_00, p_01, p_10, p_11)
+        } else {
+            (p_00, p_10, p_01, p_11)
+        };
+
+        let sf0 = _mm256_shuffle_pd(s0, s0, 0b0101);
+        let sf1 = _mm256_shuffle_pd(s1, s1, 0b0101);
+        let sf2 = _mm256_shuffle_pd(s2, s2, 0b0101);
+        let sf3 = _mm256_shuffle_pd(s3, s3, 0b0101);
+
+        macro_rules! row {
+            ($r:expr) => {{
+                let off = $r * 4;
+                let mut re = _mm256_mul_pd(mat.rr[off], s0);
+                let mut im = _mm256_mul_pd(mat.ii[off], sf0);
+                re = _mm256_fmadd_pd(mat.rr[off + 1], s1, re);
+                im = _mm256_fmadd_pd(mat.ii[off + 1], sf1, im);
+                re = _mm256_fmadd_pd(mat.rr[off + 2], s2, re);
+                im = _mm256_fmadd_pd(mat.ii[off + 2], sf2, im);
+                re = _mm256_fmadd_pd(mat.rr[off + 3], s3, re);
+                im = _mm256_fmadd_pd(mat.ii[off + 3], sf3, im);
+                _mm256_addsub_pd(re, im)
+            }};
+        }
+
+        let (o_00, o_10) = if Q0_IS_LO {
+            (row!(0), row!(2))
+        } else {
+            (row!(0), row!(1))
+        };
+        _mm256_storeu_pd(pa_lo, _mm256_permute2f128_pd(o_00, o_10, 0x20));
+        _mm256_storeu_pd(pb_lo, _mm256_permute2f128_pd(o_00, o_10, 0x31));
+
+        let (o_01, o_11) = if Q0_IS_LO {
+            (row!(1), row!(3))
+        } else {
+            (row!(2), row!(3))
+        };
+        _mm256_storeu_pd(pa_hi, _mm256_permute2f128_pd(o_01, o_11, 0x20));
+        _mm256_storeu_pd(pb_hi, _mm256_permute2f128_pd(o_01, o_11, 0x31));
+    }
+}
+
+/// Pair-batched 2q kernel main loop. Pairs adjacent k/k+1 groups when `lo > 0`,
+/// or transposes `(bit0=0, bit0=1)` pairs via `_mm256_permute2f128_pd` when
+/// `lo == 0` and `n_iter >= 2`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[allow(clippy::too_many_arguments)]
@@ -236,10 +299,66 @@ unsafe fn apply_fused_2q_loop_avx2(
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
         if lo == 0 {
-            for_each_2q_base(n_iter, lo, hi, 1, |base| {
-                let i = [base, base + mask1, base + mask0, base + mask0 + mask1];
-                apply_fused_2q_group_fma_inner(state, i, mat128);
-            });
+            if n_iter < 2 {
+                for_each_2q_base(n_iter, lo, hi, 1, |base| {
+                    let i = [base, base + mask1, base + mask0, base + mask0 + mask1];
+                    apply_fused_2q_group_fma_inner(state, i, mat128);
+                });
+                return;
+            }
+            let q0_is_lo = mask0 < mask1;
+            let mask_hi = mask0.max(mask1);
+            if hi == 1 {
+                let mut k = 0;
+                while k < n_iter {
+                    let p = state.add(k * 8);
+                    let pa_lo = p;
+                    let pa_hi = p.add(4);
+                    let pb_lo = p.add(8);
+                    let pb_hi = p.add(12);
+                    if q0_is_lo {
+                        apply_fused_2q_pair_lo0_avx2_inner::<true>(
+                            pa_lo, pb_lo, pa_hi, pb_hi, mat256,
+                        );
+                    } else {
+                        apply_fused_2q_pair_lo0_avx2_inner::<false>(
+                            pa_lo, pb_lo, pa_hi, pb_hi, mat256,
+                        );
+                    }
+                    k += 2;
+                }
+            } else {
+                let b_len = 1usize << (hi - 1);
+                let c_len = n_iter / b_len;
+                let hi_off = mask_hi * 2;
+                for c in 0..c_len {
+                    let cbase = c << (hi + 1);
+                    let mut b = 0;
+                    while b < b_len {
+                        let base_a = cbase + (b << 1);
+                        let p_lo = state.add(base_a * 2);
+                        let p_hi = p_lo.add(hi_off);
+                        if q0_is_lo {
+                            apply_fused_2q_pair_lo0_avx2_inner::<true>(
+                                p_lo,
+                                p_lo.add(4),
+                                p_hi,
+                                p_hi.add(4),
+                                mat256,
+                            );
+                        } else {
+                            apply_fused_2q_pair_lo0_avx2_inner::<false>(
+                                p_lo,
+                                p_lo.add(4),
+                                p_hi,
+                                p_hi.add(4),
+                                mat256,
+                            );
+                        }
+                        b += 2;
+                    }
+                }
+            }
             return;
         }
         // `lo > 0` makes the lowest segment at least two long, so every
@@ -651,8 +770,8 @@ impl PreparedGate2q {
 
     /// Apply the 2q gate to a slice that is known to be cache-resident.
     ///
-    /// Prefers the AVX2 paired-group kernel when available and `lo > 0`,
-    /// falling back to 128-bit FMA per-group otherwise. Use from `Multi2q`
+    /// Prefers the AVX-512 / AVX2 paired-group kernels when available, falling back
+    /// to 128-bit FMA only on 2-qubit slices (`n_iter < 2`). Use from `Multi2q`
     /// tile loops where the slice fits in L2/L3 and the kernel is
     /// compute-bound; the AVX2 throttle is justified by ~2× FMA throughput.
     pub(crate) fn apply_tiled(
@@ -813,49 +932,21 @@ impl PreparedGate2q {
             apply_fused_2q_loop_neon(base, n_iter, run_lo, run_hi, mask0, mask1, &self.broadcast);
             #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
             for_each_2q_base(n_iter, run_lo, run_hi, 1, |b| {
-                self.apply_group_ptr(base, [b, b + mask1, b + mask0, b + mask0 + mask1]);
-            });
-        }
-    }
-
-    /// Apply one group at scattered indices. Safe to call from Rayon closures
-    /// when callers partition indices across threads.
-    ///
-    /// # Safety
-    /// Caller must ensure `i[0..4]` are valid indices into the state array
-    /// and that no other thread is accessing the same indices.
-    #[inline(always)]
-    pub(crate) unsafe fn apply_group_ptr(&self, state: *mut f64, i: [usize; 4]) {
-        // SAFETY: same contract as the enclosing unsafe fn.
-        unsafe {
-            #[cfg(target_arch = "x86_64")]
-            {
-                if !matches!(self.tier, SimdTier::Sse2) {
-                    apply_fused_2q_group_fma(state, i, &self.broadcast);
-                } else {
-                    apply_fused_2q_group_sse2(state, i, &self.broadcast);
-                }
-            }
-            #[cfg(target_arch = "aarch64")]
-            {
-                apply_fused_2q_group_neon(state, i, &self.broadcast);
-            }
-            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-            {
+                let i = [b, b + mask1, b + mask0, b + mask0 + mask1];
                 let a: [Complex64; 4] = [
-                    *(state.add(i[0] * 2) as *const Complex64),
-                    *(state.add(i[1] * 2) as *const Complex64),
-                    *(state.add(i[2] * 2) as *const Complex64),
-                    *(state.add(i[3] * 2) as *const Complex64),
+                    *(base.add(i[0] * 2) as *const Complex64),
+                    *(base.add(i[1] * 2) as *const Complex64),
+                    *(base.add(i[2] * 2) as *const Complex64),
+                    *(base.add(i[3] * 2) as *const Complex64),
                 ];
                 for (r, &idx) in i.iter().enumerate() {
                     let result = self.mat[r][0] * a[0]
                         + self.mat[r][1] * a[1]
                         + self.mat[r][2] * a[2]
                         + self.mat[r][3] * a[3];
-                    *(state.add(idx * 2) as *mut Complex64) = result;
+                    *(base.add(idx * 2) as *mut Complex64) = result;
                 }
-            }
+            });
         }
     }
 }

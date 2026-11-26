@@ -18,6 +18,8 @@ pub(crate) use tiling::*;
 use num_complex::Complex64;
 use rand::RngExt;
 use smallvec::SmallVec;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -42,25 +44,6 @@ use rayon::prelude::*;
 use crate::backend::cache;
 #[cfg(feature = "parallel")]
 use crate::backend::{MIN_PAR_ITERS, chunk_min_len};
-
-#[inline(always)]
-fn adjacent_2q_indices(offset: usize, stride: usize, q0_is_lo: bool) -> [usize; 4] {
-    if q0_is_lo {
-        [
-            offset,
-            offset + (stride << 1),
-            offset + stride,
-            offset + (stride * 3),
-        ]
-    } else {
-        [
-            offset,
-            offset + stride,
-            offset + (stride << 1),
-            offset + (stride * 3),
-        ]
-    }
-}
 
 /// Run `f` on the high half of every `2 * half` block of `state`.
 ///
@@ -567,40 +550,382 @@ pub(crate) fn apply_parity2q(
     same: Complex64,
     diff: Complex64,
 ) {
-    #[cfg(feature = "parallel")]
-    if num_qubits >= kernel_parallel_qubits() {
-        apply_parity2q_par(state, q0, q1, same, diff);
+    if q0 == q1 {
+        #[cfg(feature = "parallel")]
+        if num_qubits >= kernel_parallel_qubits() {
+            state
+                .par_chunks_mut(MIN_PAR_ELEMS)
+                .for_each(|chunk| simd::scale_complex_slice(chunk, same));
+            return;
+        }
+        simd::scale_complex_slice(state, same);
         return;
     }
 
+    let (lo, hi) = (q0.min(q1), q0.max(q1));
+
+    #[cfg(feature = "parallel")]
+    if num_qubits >= kernel_parallel_qubits() {
+        state
+            .par_chunks_mut(MIN_PAR_ELEMS)
+            .enumerate()
+            .for_each(|(chunk_idx, chunk)| {
+                apply_parity2q_slice(chunk, chunk_idx * MIN_PAR_ELEMS, lo, hi, same, diff);
+            });
+        return;
+    }
+
+    apply_parity2q_slice(state, 0, lo, hi, same, diff);
+}
+
+#[inline(always)]
+fn apply_parity2q_slice(
+    slice: &mut [Complex64],
+    base: usize,
+    lo: usize,
+    hi: usize,
+    same: Complex64,
+    diff: Complex64,
+) {
+    debug_assert!(lo < hi && slice.len().is_power_of_two() && base.is_multiple_of(slice.len()));
+
+    if slice.len() < 4 {
+        let phases = [same, diff];
+        for (j, amp) in slice.iter_mut().enumerate() {
+            let i = base + j;
+            let parity = ((i >> lo) ^ (i >> hi)) & 1;
+            *amp *= phases[parity];
+        }
+        return;
+    }
+
+    let slice_bits = slice.len().trailing_zeros() as usize;
+    if lo >= slice_bits {
+        let parity = ((base >> lo) ^ (base >> hi)) & 1;
+        simd::scale_complex_slice(slice, if parity == 0 { same } else { diff });
+        return;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    match simd::simd_tier() {
+        simd::SimdTier::Avx512 => {
+            // SAFETY: AVX-512F detected, and `slice` is a power-of-two length >= 4
+            // with `lo < slice_bits` and `base` a multiple of `slice.len()`.
+            unsafe {
+                apply_parity2q_avx512(slice, base, slice_bits, lo, hi, same, diff);
+            }
+            return;
+        }
+        simd::SimdTier::Avx2Fma => {
+            // SAFETY: AVX2 detected, and `slice` is a power-of-two length >= 4
+            // with `lo < slice_bits` and `base` a multiple of `slice.len()`.
+            unsafe {
+                apply_parity2q_avx2fma(slice, base, slice_bits, lo, hi, same, diff);
+            }
+            return;
+        }
+        simd::SimdTier::Fma | simd::SimdTier::Sse2 => {}
+    }
+
     let phases = [same, diff];
-    for (i, amp) in state.iter_mut().enumerate() {
-        let parity = ((i >> q0) ^ (i >> q1)) & 1;
+    for (j, amp) in slice.iter_mut().enumerate() {
+        let i = base + j;
+        let parity = ((i >> lo) ^ (i >> hi)) & 1;
         *amp *= phases[parity];
     }
 }
 
-#[cfg(feature = "parallel")]
-#[inline(always)]
-fn apply_parity2q_par(
-    state: &mut [Complex64],
-    q0: usize,
-    q1: usize,
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn apply_parity2q_avx512(
+    slice: &mut [Complex64],
+    base: usize,
+    slice_bits: usize,
+    lo: usize,
+    hi: usize,
     same: Complex64,
     diff: Complex64,
 ) {
-    let phases = [same, diff];
-    state
-        .par_chunks_mut(MIN_PAR_ELEMS)
-        .enumerate()
-        .for_each(|(chunk_idx, chunk)| {
-            let base = chunk_idx * MIN_PAR_ELEMS;
-            for (j, amp) in chunk.iter_mut().enumerate() {
-                let i = base + j;
-                let parity = ((i >> q0) ^ (i >> q1)) & 1;
-                *amp *= phases[parity];
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let len = slice.len();
+        let ptr = slice.as_mut_ptr() as *mut f64;
+        macro_rules! mul_range {
+            ($start:expr, $end:expr, $rr:expr, $ii:expr) => {{
+                let mut k = $start;
+                while k < $end {
+                    let off = k * 2;
+                    let v = _mm512_loadu_pd(ptr.add(off));
+                    _mm512_storeu_pd(ptr.add(off), simd::complex_mul_avx512($rr, $ii, v));
+                    k += 4;
+                }
+            }};
+        }
+
+        if lo >= 2 {
+            let lo_half = 1usize << lo;
+            let lo_block = lo_half << 1;
+            let same_rr = _mm512_set1_pd(same.re);
+            let same_ii = _mm512_set1_pd(same.im);
+            let diff_rr = _mm512_set1_pd(diff.re);
+            let diff_ii = _mm512_set1_pd(diff.im);
+
+            if hi >= slice_bits {
+                let (r0, i0, r1, i1) = if ((base >> hi) & 1) == 0 {
+                    (same_rr, same_ii, diff_rr, diff_ii)
+                } else {
+                    (diff_rr, diff_ii, same_rr, same_ii)
+                };
+                let mut off_lo = 0;
+                while off_lo < len {
+                    mul_range!(off_lo, off_lo + lo_half, r0, i0);
+                    mul_range!(off_lo + lo_half, off_lo + lo_block, r1, i1);
+                    off_lo += lo_block;
+                }
+            } else {
+                let hi_half = 1usize << hi;
+                let hi_block = hi_half << 1;
+                let mut off_hi = 0;
+                while off_hi < len {
+                    let mut off_lo = off_hi;
+                    while off_lo < off_hi + hi_half {
+                        mul_range!(off_lo, off_lo + lo_half, same_rr, same_ii);
+                        mul_range!(off_lo + lo_half, off_lo + lo_block, diff_rr, diff_ii);
+                        off_lo += lo_block;
+                    }
+                    let mut off_lo = off_hi + hi_half;
+                    while off_lo < off_hi + hi_block {
+                        mul_range!(off_lo, off_lo + lo_half, diff_rr, diff_ii);
+                        mul_range!(off_lo + lo_half, off_lo + lo_block, same_rr, same_ii);
+                        off_lo += lo_block;
+                    }
+                    off_hi += hi_block;
+                }
             }
-        });
+        } else if lo == 1 {
+            if hi >= slice_bits {
+                let (p0, p1) = if ((base >> hi) & 1) == 0 {
+                    (same, diff)
+                } else {
+                    (diff, same)
+                };
+                let rr = _mm512_setr_pd(p0.re, p0.re, p0.re, p0.re, p1.re, p1.re, p1.re, p1.re);
+                let ii = _mm512_setr_pd(p0.im, p0.im, p0.im, p0.im, p1.im, p1.im, p1.im, p1.im);
+                mul_range!(0, len, rr, ii);
+            } else {
+                let rr_sd = _mm512_setr_pd(
+                    same.re, same.re, same.re, same.re, diff.re, diff.re, diff.re, diff.re,
+                );
+                let ii_sd = _mm512_setr_pd(
+                    same.im, same.im, same.im, same.im, diff.im, diff.im, diff.im, diff.im,
+                );
+                let rr_ds = _mm512_setr_pd(
+                    diff.re, diff.re, diff.re, diff.re, same.re, same.re, same.re, same.re,
+                );
+                let ii_ds = _mm512_setr_pd(
+                    diff.im, diff.im, diff.im, diff.im, same.im, same.im, same.im, same.im,
+                );
+                let hi_half = 1usize << hi;
+                let hi_block = hi_half << 1;
+                let mut off_hi = 0;
+                while off_hi < len {
+                    mul_range!(off_hi, off_hi + hi_half, rr_sd, ii_sd);
+                    mul_range!(off_hi + hi_half, off_hi + hi_block, rr_ds, ii_ds);
+                    off_hi += hi_block;
+                }
+            }
+        } else if hi >= slice_bits {
+            let (p0, p1) = if ((base >> hi) & 1) == 0 {
+                (same, diff)
+            } else {
+                (diff, same)
+            };
+            let rr = _mm512_setr_pd(p0.re, p0.re, p1.re, p1.re, p0.re, p0.re, p1.re, p1.re);
+            let ii = _mm512_setr_pd(p0.im, p0.im, p1.im, p1.im, p0.im, p0.im, p1.im, p1.im);
+            mul_range!(0, len, rr, ii);
+        } else if hi == 1 {
+            let rr = _mm512_setr_pd(
+                same.re, same.re, diff.re, diff.re, diff.re, diff.re, same.re, same.re,
+            );
+            let ii = _mm512_setr_pd(
+                same.im, same.im, diff.im, diff.im, diff.im, diff.im, same.im, same.im,
+            );
+            mul_range!(0, len, rr, ii);
+        } else {
+            let rr_sd = _mm512_setr_pd(
+                same.re, same.re, diff.re, diff.re, same.re, same.re, diff.re, diff.re,
+            );
+            let ii_sd = _mm512_setr_pd(
+                same.im, same.im, diff.im, diff.im, same.im, same.im, diff.im, diff.im,
+            );
+            let rr_ds = _mm512_setr_pd(
+                diff.re, diff.re, same.re, same.re, diff.re, diff.re, same.re, same.re,
+            );
+            let ii_ds = _mm512_setr_pd(
+                diff.im, diff.im, same.im, same.im, diff.im, diff.im, same.im, same.im,
+            );
+            let hi_half = 1usize << hi;
+            let hi_block = hi_half << 1;
+            let mut off_hi = 0;
+            while off_hi < len {
+                mul_range!(off_hi, off_hi + hi_half, rr_sd, ii_sd);
+                mul_range!(off_hi + hi_half, off_hi + hi_block, rr_ds, ii_ds);
+                off_hi += hi_block;
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn apply_parity2q_avx2fma(
+    slice: &mut [Complex64],
+    base: usize,
+    slice_bits: usize,
+    lo: usize,
+    hi: usize,
+    same: Complex64,
+    diff: Complex64,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let len = slice.len();
+        let ptr = slice.as_mut_ptr() as *mut f64;
+        macro_rules! mul_range {
+            ($start:expr, $end:expr, $rr0:expr, $ii0:expr, $rr1:expr, $ii1:expr) => {{
+                let mut k = $start;
+                while k < $end {
+                    let off = k * 2;
+                    let v0 = _mm256_loadu_pd(ptr.add(off));
+                    let v1 = _mm256_loadu_pd(ptr.add(off + 4));
+                    _mm256_storeu_pd(ptr.add(off), simd::complex_mul_avx2fma($rr0, $ii0, v0));
+                    _mm256_storeu_pd(ptr.add(off + 4), simd::complex_mul_avx2fma($rr1, $ii1, v1));
+                    k += 4;
+                }
+            }};
+        }
+
+        if lo >= 2 {
+            let lo_half = 1usize << lo;
+            let lo_block = lo_half << 1;
+            let same_rr = _mm256_set1_pd(same.re);
+            let same_ii = _mm256_set1_pd(same.im);
+            let diff_rr = _mm256_set1_pd(diff.re);
+            let diff_ii = _mm256_set1_pd(diff.im);
+
+            if hi >= slice_bits {
+                let (r0, i0, r1, i1) = if ((base >> hi) & 1) == 0 {
+                    (same_rr, same_ii, diff_rr, diff_ii)
+                } else {
+                    (diff_rr, diff_ii, same_rr, same_ii)
+                };
+                let mut off_lo = 0;
+                while off_lo < len {
+                    mul_range!(off_lo, off_lo + lo_half, r0, i0, r0, i0);
+                    mul_range!(off_lo + lo_half, off_lo + lo_block, r1, i1, r1, i1);
+                    off_lo += lo_block;
+                }
+            } else {
+                let hi_half = 1usize << hi;
+                let hi_block = hi_half << 1;
+                let mut off_hi = 0;
+                while off_hi < len {
+                    let mut off_lo = off_hi;
+                    while off_lo < off_hi + hi_half {
+                        mul_range!(off_lo, off_lo + lo_half, same_rr, same_ii, same_rr, same_ii);
+                        mul_range!(
+                            off_lo + lo_half,
+                            off_lo + lo_block,
+                            diff_rr,
+                            diff_ii,
+                            diff_rr,
+                            diff_ii
+                        );
+                        off_lo += lo_block;
+                    }
+                    let mut off_lo = off_hi + hi_half;
+                    while off_lo < off_hi + hi_block {
+                        mul_range!(off_lo, off_lo + lo_half, diff_rr, diff_ii, diff_rr, diff_ii);
+                        mul_range!(
+                            off_lo + lo_half,
+                            off_lo + lo_block,
+                            same_rr,
+                            same_ii,
+                            same_rr,
+                            same_ii
+                        );
+                        off_lo += lo_block;
+                    }
+                    off_hi += hi_block;
+                }
+            }
+        } else if lo == 1 {
+            let same_rr = _mm256_set1_pd(same.re);
+            let same_ii = _mm256_set1_pd(same.im);
+            let diff_rr = _mm256_set1_pd(diff.re);
+            let diff_ii = _mm256_set1_pd(diff.im);
+
+            if hi >= slice_bits {
+                let (r0, i0, r1, i1) = if ((base >> hi) & 1) == 0 {
+                    (same_rr, same_ii, diff_rr, diff_ii)
+                } else {
+                    (diff_rr, diff_ii, same_rr, same_ii)
+                };
+                mul_range!(0, len, r0, i0, r1, i1);
+            } else {
+                let hi_half = 1usize << hi;
+                let hi_block = hi_half << 1;
+                let mut off_hi = 0;
+                while off_hi < len {
+                    mul_range!(off_hi, off_hi + hi_half, same_rr, same_ii, diff_rr, diff_ii);
+                    mul_range!(
+                        off_hi + hi_half,
+                        off_hi + hi_block,
+                        diff_rr,
+                        diff_ii,
+                        same_rr,
+                        same_ii
+                    );
+                    off_hi += hi_block;
+                }
+            }
+        } else if hi >= slice_bits {
+            let (p0, p1) = if ((base >> hi) & 1) == 0 {
+                (same, diff)
+            } else {
+                (diff, same)
+            };
+            let rr = _mm256_setr_pd(p0.re, p0.re, p1.re, p1.re);
+            let ii = _mm256_setr_pd(p0.im, p0.im, p1.im, p1.im);
+            mul_range!(0, len, rr, ii, rr, ii);
+        } else if hi == 1 {
+            let rr_sd = _mm256_setr_pd(same.re, same.re, diff.re, diff.re);
+            let ii_sd = _mm256_setr_pd(same.im, same.im, diff.im, diff.im);
+            let rr_ds = _mm256_setr_pd(diff.re, diff.re, same.re, same.re);
+            let ii_ds = _mm256_setr_pd(diff.im, diff.im, same.im, same.im);
+            mul_range!(0, len, rr_sd, ii_sd, rr_ds, ii_ds);
+        } else {
+            let rr_sd = _mm256_setr_pd(same.re, same.re, diff.re, diff.re);
+            let ii_sd = _mm256_setr_pd(same.im, same.im, diff.im, diff.im);
+            let rr_ds = _mm256_setr_pd(diff.re, diff.re, same.re, same.re);
+            let ii_ds = _mm256_setr_pd(diff.im, diff.im, same.im, same.im);
+            let hi_half = 1usize << hi;
+            let hi_block = hi_half << 1;
+            let mut off_hi = 0;
+            while off_hi < len {
+                mul_range!(off_hi, off_hi + hi_half, rr_sd, ii_sd, rr_sd, ii_sd);
+                mul_range!(
+                    off_hi + hi_half,
+                    off_hi + hi_block,
+                    rr_ds,
+                    ii_ds,
+                    rr_ds,
+                    ii_ds
+                );
+                off_hi += hi_block;
+            }
+        }
+    }
 }
 
 #[inline(always)]
@@ -825,6 +1150,7 @@ pub(crate) fn apply_swap(state: &mut [Complex64], num_qubits: usize, q0: usize, 
     );
 }
 
+#[cfg_attr(not(feature = "parallel"), allow(unused_variables))]
 #[inline(always)]
 pub(crate) fn apply_fused_2q(
     state: &mut [Complex64],
@@ -833,17 +1159,6 @@ pub(crate) fn apply_fused_2q(
     q1: usize,
     mat: &[[Complex64; 4]; 4],
 ) {
-    if q0.max(q1) - q0.min(q1) == 1 {
-        #[cfg(feature = "parallel")]
-        if num_qubits >= kernel_parallel_qubits() {
-            apply_fused_2q_adjacent_par(state, q0, q1, mat);
-            return;
-        }
-
-        apply_fused_2q_adjacent(state, q0, q1, mat);
-        return;
-    }
-
     #[cfg(feature = "parallel")]
     if num_qubits >= kernel_parallel_qubits() {
         apply_fused_2q_par(state, num_qubits, q0, q1, mat);
@@ -852,60 +1167,6 @@ pub(crate) fn apply_fused_2q(
 
     let prepared = simd::PreparedGate2q::new(mat);
     prepared.apply_full(state, num_qubits, q0, q1);
-}
-
-#[inline(always)]
-fn apply_fused_2q_adjacent(
-    state: &mut [Complex64],
-    q0: usize,
-    q1: usize,
-    mat: &[[Complex64; 4]; 4],
-) {
-    let lo = q0.min(q1);
-    let stride = 1usize << lo;
-    let block_size = stride << 2;
-    let q0_is_lo = q0 == lo;
-    let prepared = simd::PreparedGate2q::new(mat);
-
-    for chunk in state.chunks_mut(block_size) {
-        let ptr = chunk.as_mut_ptr() as *mut f64;
-        for offset in 0..stride {
-            let i = adjacent_2q_indices(offset, stride, q0_is_lo);
-            // SAFETY: each offset maps to one disjoint 4-amplitude group in
-            // this chunk, and all indices are below block_size.
-            unsafe {
-                prepared.apply_group_ptr(ptr, i);
-            }
-        }
-    }
-}
-
-#[cfg(feature = "parallel")]
-#[inline(always)]
-fn apply_fused_2q_adjacent_group(
-    ptr: SendPtr,
-    group: usize,
-    lo: usize,
-    stride: usize,
-    block_size: usize,
-    q0_is_lo: bool,
-    prepared: &simd::PreparedGate2q,
-) {
-    let block = group >> lo;
-    let offset = group & (stride - 1);
-    let base = block * block_size;
-    let local = adjacent_2q_indices(offset, stride, q0_is_lo);
-    let i = [
-        base + local[0],
-        base + local[1],
-        base + local[2],
-        base + local[3],
-    ];
-    // SAFETY: adjacent group mapping partitions the state into disjoint
-    // 4-amplitude groups, and group < state.len() / 4.
-    unsafe {
-        prepared.apply_group_ptr(ptr.as_f64_ptr(), i);
-    }
 }
 
 #[cfg(feature = "parallel")]
@@ -929,30 +1190,6 @@ fn apply_fused_2q_par(
             prepared.apply_groups_ptr(ptr.as_f64_ptr(), t * tile, tile, q0, q1);
         }
     });
-}
-
-#[cfg(feature = "parallel")]
-#[inline(always)]
-fn apply_fused_2q_adjacent_par(
-    state: &mut [Complex64],
-    q0: usize,
-    q1: usize,
-    mat: &[[Complex64; 4]; 4],
-) {
-    let lo = q0.min(q1);
-    let stride = 1usize << lo;
-    let block_size = stride << 2;
-    let q0_is_lo = q0 == lo;
-    let n_groups = state.len() >> 2;
-    let ptr = SendPtr(state.as_mut_ptr());
-    let prepared = simd::PreparedGate2q::new(mat);
-
-    (0..n_groups)
-        .into_par_iter()
-        .with_min_len(MIN_PAR_ITERS)
-        .for_each(move |group| {
-            apply_fused_2q_adjacent_group(ptr, group, lo, stride, block_size, q0_is_lo, &prepared);
-        });
 }
 
 impl StatevectorBackend {

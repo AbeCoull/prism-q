@@ -378,3 +378,298 @@ fn parsed_rxx_and_ryy_agree_with_the_ladder_they_replaced() {
         assert_probs_close(&native_probs, &ladder_probs, SV_EPS, label);
     }
 }
+
+fn entangled_pauli_circuit(n: usize) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::Ry(0.23 + 0.11 * q as f64), &[q]);
+        c.add_gate(Gate::Rz(0.67 - 0.07 * q as f64), &[q]);
+    }
+    for q in 0..n.saturating_sub(1) {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    c
+}
+
+#[test]
+fn pauli_rot_run_lt4_and_pivot0_match_ladder() {
+    for n in [6usize, 16] {
+        let mut c = entangled_pauli_circuit(n);
+        let terms_list: Vec<(f64, Vec<PauliTerm>)> = vec![
+            // pivot == 0 (xmask == 1), X0=true, Z0=false/true
+            (0.41, vec![PauliTerm::x(0)]),
+            (0.37, vec![PauliTerm::y(0)]),
+            (0.29, vec![PauliTerm::x(0), PauliTerm::z(1)]),
+            (
+                0.53,
+                vec![PauliTerm::y(0), PauliTerm::z(1), PauliTerm::z(2)],
+            ),
+            (0.19, vec![PauliTerm::x(0), PauliTerm::z(n - 1)]),
+            (
+                0.31,
+                vec![PauliTerm::y(0), PauliTerm::z(1), PauliTerm::z(n - 1)],
+            ),
+            // run == 1 with pivot > 0 across all (X0, Z0, num_y % 4)
+            (0.23, vec![PauliTerm::x(0), PauliTerm::x(2)]),
+            (0.43, vec![PauliTerm::x(0), PauliTerm::y(2)]),
+            (0.47, vec![PauliTerm::y(0), PauliTerm::x(2)]),
+            (0.59, vec![PauliTerm::y(0), PauliTerm::y(2)]),
+            (0.61, vec![PauliTerm::z(0), PauliTerm::x(2)]),
+            (0.17, vec![PauliTerm::z(0), PauliTerm::y(2)]),
+            (
+                0.27,
+                vec![
+                    PauliTerm::y(0),
+                    PauliTerm::y(1),
+                    PauliTerm::y(2),
+                    PauliTerm::x(3),
+                ],
+            ),
+            (
+                0.33,
+                vec![
+                    PauliTerm::x(0),
+                    PauliTerm::y(1),
+                    PauliTerm::y(2),
+                    PauliTerm::y(3),
+                    PauliTerm::x(4),
+                ],
+            ),
+            // run == 2 (!X0 && !Z0) across num_y % 4 in 0..4
+            (0.21, vec![PauliTerm::x(1), PauliTerm::x(3)]),
+            (0.35, vec![PauliTerm::x(1), PauliTerm::y(3)]),
+            (0.49, vec![PauliTerm::y(1), PauliTerm::y(3)]),
+            (
+                0.55,
+                vec![PauliTerm::y(1), PauliTerm::y(3), PauliTerm::y(4)],
+            ),
+            (
+                0.63,
+                vec![
+                    PauliTerm::x(1),
+                    PauliTerm::y(2),
+                    PauliTerm::y(3),
+                    PauliTerm::y(4),
+                    PauliTerm::y(5),
+                ],
+            ),
+            // num_blocks < 4 at n == 16 (pivot = n - 1)
+            (0.13, vec![PauliTerm::x(0), PauliTerm::x(n - 1)]),
+            (0.25, vec![PauliTerm::y(0), PauliTerm::y(n - 1)]),
+            (0.39, vec![PauliTerm::z(0), PauliTerm::x(n - 1)]),
+            (0.45, vec![PauliTerm::z(0), PauliTerm::y(n - 1)]),
+        ];
+        for (theta, factors) in terms_list {
+            c.add_pauli_rotation(theta, &factors);
+        }
+
+        let expanded = expand_pauli_rotations(&c);
+        let lowered = state_of(&mut StatevectorBackend::new(SEED), &expanded);
+
+        let mut per_gate = StatevectorBackend::new(SEED);
+        per_gate.init(n, 0).unwrap();
+        per_gate.apply_instructions(&c.instructions).unwrap();
+        for (i, (a, e)) in per_gate.state_vector().iter().zip(&lowered).enumerate() {
+            let diff = (a - e).norm();
+            assert!(
+                diff < 1e-12,
+                "{n}q per-gate amplitude {i}: |diff| = {diff:e}"
+            );
+        }
+
+        let fused_native = state_of(&mut StatevectorBackend::new(SEED), &c);
+        for (i, (a, e)) in fused_native.iter().zip(&lowered).enumerate() {
+            let diff = (a - e).norm();
+            assert!(
+                diff < 1e-12,
+                "{n}q fused-native amplitude {i}: |diff| = {diff:e}"
+            );
+        }
+    }
+}
+
+#[test]
+fn z_only_pauli_rot_and_multi_parity_match_ladder() {
+    for n in [6usize, 16] {
+        let mut c = entangled_pauli_circuit(n);
+        c.add_pauli_rotation(0.41, &[PauliTerm::z(0), PauliTerm::z(2)]);
+        c.add_pauli_rotation(0.33, &[PauliTerm::z(1), PauliTerm::z(3)]);
+        c.add_pauli_rotation(0.27, &[PauliTerm::z(2), PauliTerm::z(4)]);
+        c.add_pauli_rotation(0.51, &[PauliTerm::z(3), PauliTerm::z(5)]);
+        if n >= 16 {
+            c.add_pauli_rotation(0.19, &[PauliTerm::z(12), PauliTerm::z(14)]);
+            c.add_pauli_rotation(0.29, &[PauliTerm::z(13), PauliTerm::z(15)]);
+        }
+
+        let expanded = expand_pauli_rotations(&c);
+        let lowered = state_of(&mut StatevectorBackend::new(SEED), &expanded);
+
+        let mut per_gate = StatevectorBackend::new(SEED);
+        per_gate.init(n, 0).unwrap();
+        per_gate.apply_instructions(&c.instructions).unwrap();
+        for (i, (a, e)) in per_gate.state_vector().iter().zip(&lowered).enumerate() {
+            let diff = (a - e).norm();
+            assert!(diff < 1e-12, "{n}q z-only amplitude {i}: |diff| = {diff:e}");
+        }
+    }
+
+    // Back-to-back MultiPauliRot at 16q mixing low X/Y rotations with Z-only strings
+    // whose Z letters sit solely outside the tile (`tile_z == 0 && zrest != 0`).
+    let n = 16;
+    let mut c = entangled_pauli_circuit(n);
+    c.add_pauli_rotation(0.31, &[PauliTerm::x(0), PauliTerm::y(1), PauliTerm::z(2)]);
+    c.add_pauli_rotation(0.47, &[PauliTerm::z(13), PauliTerm::z(15)]);
+    c.add_pauli_rotation(0.23, &[PauliTerm::z(0), PauliTerm::z(1), PauliTerm::z(14)]);
+    c.add_pauli_rotation(0.19, &[PauliTerm::x(1), PauliTerm::y(2), PauliTerm::z(15)]);
+
+    let fused = prism_q::circuit::fusion::fuse_circuit(&c, true);
+    assert!(
+        fused.instructions.iter().any(|inst| matches!(
+            inst,
+            Instruction::Gate {
+                gate: Gate::MultiPauliRot(_),
+                ..
+            }
+        )),
+        "expected MultiPauliRot batch in 16q tiled Z-parity test"
+    );
+
+    let expanded = expand_pauli_rotations(&c);
+    let lowered = state_of(&mut StatevectorBackend::new(SEED), &expanded);
+    let native = state_of(&mut StatevectorBackend::new(SEED), &c);
+    for (i, (a, e)) in native.iter().zip(&lowered).enumerate() {
+        let diff = (a - e).norm();
+        assert!(
+            diff < 1e-12,
+            "16q multi-parity amplitude {i}: |diff| = {diff:e}"
+        );
+    }
+}
+
+#[test]
+fn unfused_rzz_and_parity2q_match_reference() {
+    use prism_q::backend::factored::FactoredBackend;
+    use prism_q::gates::{DiagEntry, DiagonalBatchData};
+
+    let cases: &[(usize, &[(usize, usize)])] = &[
+        (
+            6,
+            &[
+                (0, 1),
+                (1, 0),
+                (0, 3),
+                (3, 0),
+                (1, 2),
+                (2, 1),
+                (2, 5),
+                (5, 2),
+            ],
+        ),
+        (
+            16,
+            &[
+                (0, 1),
+                (1, 0),
+                (0, 3),
+                (0, 14),
+                (14, 0),
+                (1, 2),
+                (1, 13),
+                (13, 1),
+                (2, 5),
+                (3, 14),
+                (13, 15),
+                (15, 13),
+            ],
+        ),
+    ];
+
+    for &(n, pairs) in cases {
+        let base_circuit = entangled_pauli_circuit(n);
+        let mut base_sv = StatevectorBackend::new(SEED);
+        base_sv.init(n, 0).unwrap();
+        base_sv
+            .apply_instructions(&base_circuit.instructions)
+            .unwrap();
+        let start = base_sv.state_vector().to_vec();
+
+        let theta = 0.63;
+        let same_rzz = Complex64::from_polar(1.0, -theta / 2.0);
+        let diff_rzz = Complex64::from_polar(1.0, theta / 2.0);
+
+        let mut c_rzz = Circuit::new(n, 0);
+        let mut expected_rzz = start.clone();
+        for &(q0, q1) in pairs {
+            c_rzz.add_gate(Gate::Rzz(theta), &[q0, q1]);
+            for (i, amp) in expected_rzz.iter_mut().enumerate() {
+                let parity = ((i >> q0) ^ (i >> q1)) & 1;
+                *amp *= if parity == 0 { same_rzz } else { diff_rzz };
+            }
+        }
+
+        let mut sv = StatevectorBackend::new(SEED);
+        sv.init_from_amplitudes(start.clone(), 0).unwrap();
+        sv.apply_instructions(&c_rzz.instructions).unwrap();
+        for (i, (a, e)) in sv.state_vector().iter().zip(&expected_rzz).enumerate() {
+            let diff = (a - e).norm();
+            assert!(
+                diff < 1e-12,
+                "{n}q unfused Rzz sv amplitude {i}: |diff| = {diff:e}"
+            );
+        }
+
+        let mut fb = FactoredBackend::new(SEED);
+        fb.init(n, 0).unwrap();
+        fb.apply_instructions(&base_circuit.instructions).unwrap();
+        fb.apply_instructions(&c_rzz.instructions).unwrap();
+        let fb_state = fb.export_statevector().unwrap();
+        for (i, (a, e)) in fb_state.iter().zip(&expected_rzz).enumerate() {
+            let diff = (a - e).norm();
+            assert!(
+                diff < 1e-12,
+                "{n}q unfused Rzz factored amplitude {i}: |diff| = {diff:e}"
+            );
+        }
+
+        // Non-conjugate arbitrary `(same, diff)` via DiagEntry::Parity2q on FactoredBackend.
+        let same_arb = Complex64::new(0.8, 0.35);
+        let diff_arb = Complex64::new(-0.4, 0.7);
+        let mut expected_arb = start.clone();
+        let mut c_diag = Circuit::new(n, 0);
+        for &(q0, q1) in pairs {
+            for (i, amp) in expected_arb.iter_mut().enumerate() {
+                let parity = ((i >> q0) ^ (i >> q1)) & 1;
+                *amp *= if parity == 0 { same_arb } else { diff_arb };
+            }
+
+            let mut targets = [q0, q1];
+            targets.sort_unstable();
+            c_diag.add_gate(
+                Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(vec![
+                    DiagEntry::Parity2q {
+                        q0,
+                        q1,
+                        same: same_arb,
+                        diff: diff_arb,
+                    },
+                ]))),
+                &targets,
+            );
+        }
+
+        let mut fb_diag = FactoredBackend::new(SEED);
+        fb_diag.init(n, 0).unwrap();
+        fb_diag
+            .apply_instructions(&base_circuit.instructions)
+            .unwrap();
+        fb_diag.apply_instructions(&c_diag.instructions).unwrap();
+        let got_diag = fb_diag.export_statevector().unwrap();
+        for (i, (a, e)) in got_diag.iter().zip(&expected_arb).enumerate() {
+            let diff = (a - e).norm();
+            assert!(
+                diff < 1e-12,
+                "{n}q Parity2q factored amplitude {i}: |diff| = {diff:e}"
+            );
+        }
+    }
+}

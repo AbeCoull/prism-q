@@ -57,7 +57,7 @@ pub(crate) fn build_batch_rzz_tables(
             group.q1s[k] = q1;
         }
 
-        for bits in 0..BATCH_RZZ_TABLE_SIZE {
+        for (bits, entry) in group.table.iter_mut().enumerate() {
             let mut angle = 0.0f64;
             for k in 0..group_len {
                 let theta = edges[start + k].2;
@@ -68,7 +68,7 @@ pub(crate) fn build_batch_rzz_tables(
                     theta / 2.0
                 };
             }
-            group.table[bits] = Complex64::from_polar(1.0, angle);
+            *entry = Complex64::from_polar(1.0, angle);
         }
     }
     num_groups
@@ -163,22 +163,71 @@ fn build_batch_rzz_bmi2_tables(
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "bmi2,fma")]
+#[target_feature(enable = "avx2,bmi2,fma")]
 unsafe fn batch_rzz_tile_bmi2(
     tile: &mut [Complex64],
     base_idx: usize,
     groups: &[BatchRzzBmi2Group; BATCH_RZZ_BMI2_MAX_GROUPS],
     num_groups: usize,
 ) {
-    use std::arch::x86_64::_pext_u64;
-    for (j, amp) in tile.iter_mut().enumerate() {
-        let i = base_idx + j;
-        let mut combined = ONE;
-        for group in groups.iter().take(num_groups) {
-            let bits = _pext_u64(i as u64, group.pext_mask) as usize;
-            combined *= group.table[bits];
+    let Some((first, rest)) = groups[..num_groups].split_first() else {
+        return;
+    };
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::{
+            _mm_loadu_pd, _mm256_castpd128_pd256, _mm256_insertf128_pd, _mm256_loadu_pd,
+            _mm256_movedup_pd, _mm256_permute_pd, _mm256_storeu_pd, _pext_u64,
+        };
+        let len = tile.len();
+        let ptr = tile.as_mut_ptr() as *mut f64;
+        let mut j = 0usize;
+        while j + 1 < len {
+            let i0 = (base_idx + j) as u64;
+            let i1 = i0 + 1;
+            let t0 = _mm_loadu_pd(
+                std::ptr::from_ref(&first.table[_pext_u64(i0, first.pext_mask) as usize])
+                    .cast::<f64>(),
+            );
+            let t1 = _mm_loadu_pd(
+                std::ptr::from_ref(&first.table[_pext_u64(i1, first.pext_mask) as usize])
+                    .cast::<f64>(),
+            );
+            let mut combined = _mm256_insertf128_pd(_mm256_castpd128_pd256(t0), t1, 1);
+            for group in rest {
+                let g0 = _mm_loadu_pd(
+                    std::ptr::from_ref(&group.table[_pext_u64(i0, group.pext_mask) as usize])
+                        .cast::<f64>(),
+                );
+                let g1 = _mm_loadu_pd(
+                    std::ptr::from_ref(&group.table[_pext_u64(i1, group.pext_mask) as usize])
+                        .cast::<f64>(),
+                );
+                let phase = _mm256_insertf128_pd(_mm256_castpd128_pd256(g0), g1, 1);
+                combined = simd::complex_mul_avx2fma(
+                    _mm256_movedup_pd(combined),
+                    _mm256_permute_pd(combined, 0b1111),
+                    phase,
+                );
+            }
+            let p = ptr.add(j * 2);
+            let amp = _mm256_loadu_pd(p);
+            let res = simd::complex_mul_avx2fma(
+                _mm256_movedup_pd(combined),
+                _mm256_permute_pd(combined, 0b1111),
+                amp,
+            );
+            _mm256_storeu_pd(p, res);
+            j += 2;
         }
-        *amp *= combined;
+        if j < len {
+            let i = (base_idx + j) as u64;
+            let mut combined = first.table[_pext_u64(i, first.pext_mask) as usize];
+            for group in rest {
+                combined *= group.table[_pext_u64(i, group.pext_mask) as usize];
+            }
+            tile[j] *= combined;
+        }
     }
 }
 
@@ -530,33 +579,23 @@ pub(super) fn fill_diagonal_batch_tables(entries: &[DiagEntry], out: &mut DiagBa
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "bmi2,fma")]
+#[target_feature(enable = "avx2,bmi2,fma")]
 unsafe fn apply_batch_phase_bmi2(
     state: &mut [Complex64],
     ctrl_bit: usize,
     groups: &[BatchPhaseGroup; MAX_BATCH_PHASE_GROUPS],
     num_groups: usize,
 ) {
+    debug_assert!(
+        state.len().is_power_of_two() && ctrl_bit < state.len().trailing_zeros() as usize
+    );
     // SAFETY: same contract as the enclosing unsafe fn.
-    unsafe {
-        use std::arch::x86_64::_pext_u64;
-        let ctrl_mask = 1usize << ctrl_bit;
-        let half = state.len() >> 1;
-        for k in 0..half {
-            let i = insert_zero_bit(k, ctrl_bit) | ctrl_mask;
-            let mut combined = ONE;
-            for group in groups.iter().take(num_groups) {
-                let bits = _pext_u64(i as u64, group.pext_mask) as usize;
-                combined *= group.table[bits];
-            }
-            // SAFETY: insert_zero_bit(k, ctrl_bit) | ctrl_mask < state.len() for k < half
-            *state.get_unchecked_mut(i) *= combined;
-        }
-    }
+    unsafe { batch_phase_tile_bmi2(state, 0, ctrl_bit, groups, num_groups) };
 }
 
-#[cfg(all(target_arch = "x86_64", feature = "parallel"))]
-#[target_feature(enable = "bmi2,fma")]
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx2,bmi2,fma")]
 unsafe fn batch_phase_tile_bmi2(
     tile: &mut [Complex64],
     base_idx: usize,
@@ -564,36 +603,181 @@ unsafe fn batch_phase_tile_bmi2(
     groups: &[BatchPhaseGroup; MAX_BATCH_PHASE_GROUPS],
     num_groups: usize,
 ) {
+    let Some((first, rest)) = groups[..num_groups].split_first() else {
+        return;
+    };
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
-        use std::arch::x86_64::_pext_u64;
+        use std::arch::x86_64::{
+            _mm_loadu_pd, _mm_storeu_pd, _mm256_castpd128_pd256, _mm256_castpd256_pd128,
+            _mm256_extractf128_pd, _mm256_insertf128_pd, _mm256_loadu_pd, _mm256_movedup_pd,
+            _mm256_permute_pd, _mm256_storeu_pd, _pext_u64,
+        };
         let ctrl_mask = 1usize << ctrl_bit;
         let tile_bits = tile.len().trailing_zeros() as usize;
+        let ptr = tile.as_mut_ptr() as *mut f64;
 
         if ctrl_bit >= tile_bits {
             if (base_idx & ctrl_mask) == 0 {
                 return;
             }
-            for (j, amp) in tile.iter_mut().enumerate() {
-                let i = base_idx + j;
-                let mut combined = ONE;
-                for group in groups.iter().take(num_groups) {
-                    let bits = _pext_u64(i as u64, group.pext_mask) as usize;
-                    combined *= group.table[bits];
+            let len = tile.len();
+            let mut j = 0usize;
+            while j + 1 < len {
+                let i0 = (base_idx + j) as u64;
+                let i1 = i0 + 1;
+                let t0 = _mm_loadu_pd(
+                    std::ptr::from_ref(&first.table[_pext_u64(i0, first.pext_mask) as usize])
+                        .cast::<f64>(),
+                );
+                let t1 = _mm_loadu_pd(
+                    std::ptr::from_ref(&first.table[_pext_u64(i1, first.pext_mask) as usize])
+                        .cast::<f64>(),
+                );
+                let mut combined = _mm256_insertf128_pd(_mm256_castpd128_pd256(t0), t1, 1);
+                for group in rest {
+                    let g0 = _mm_loadu_pd(
+                        std::ptr::from_ref(&group.table[_pext_u64(i0, group.pext_mask) as usize])
+                            .cast::<f64>(),
+                    );
+                    let g1 = _mm_loadu_pd(
+                        std::ptr::from_ref(&group.table[_pext_u64(i1, group.pext_mask) as usize])
+                            .cast::<f64>(),
+                    );
+                    let phase = _mm256_insertf128_pd(_mm256_castpd128_pd256(g0), g1, 1);
+                    combined = simd::complex_mul_avx2fma(
+                        _mm256_movedup_pd(combined),
+                        _mm256_permute_pd(combined, 0b1111),
+                        phase,
+                    );
                 }
-                *amp *= combined;
+                let p = ptr.add(j * 2);
+                let amp = _mm256_loadu_pd(p);
+                let res = simd::complex_mul_avx2fma(
+                    _mm256_movedup_pd(combined),
+                    _mm256_permute_pd(combined, 0b1111),
+                    amp,
+                );
+                _mm256_storeu_pd(p, res);
+                j += 2;
+            }
+            if j < len {
+                let i = (base_idx + j) as u64;
+                let mut combined = first.table[_pext_u64(i, first.pext_mask) as usize];
+                for group in rest {
+                    combined *= group.table[_pext_u64(i, group.pext_mask) as usize];
+                }
+                tile[j] *= combined;
+            }
+        } else if ctrl_bit >= 1 {
+            let half = tile.len() >> 1;
+            let mut k = 0usize;
+            while k + 1 < half {
+                let j0 = insert_zero_bit(k, ctrl_bit) | ctrl_mask;
+                let i0 = (base_idx + j0) as u64;
+                let i1 = i0 + 1;
+                let t0 = _mm_loadu_pd(
+                    std::ptr::from_ref(&first.table[_pext_u64(i0, first.pext_mask) as usize])
+                        .cast::<f64>(),
+                );
+                let t1 = _mm_loadu_pd(
+                    std::ptr::from_ref(&first.table[_pext_u64(i1, first.pext_mask) as usize])
+                        .cast::<f64>(),
+                );
+                let mut combined = _mm256_insertf128_pd(_mm256_castpd128_pd256(t0), t1, 1);
+                for group in rest {
+                    let g0 = _mm_loadu_pd(
+                        std::ptr::from_ref(&group.table[_pext_u64(i0, group.pext_mask) as usize])
+                            .cast::<f64>(),
+                    );
+                    let g1 = _mm_loadu_pd(
+                        std::ptr::from_ref(&group.table[_pext_u64(i1, group.pext_mask) as usize])
+                            .cast::<f64>(),
+                    );
+                    let phase = _mm256_insertf128_pd(_mm256_castpd128_pd256(g0), g1, 1);
+                    combined = simd::complex_mul_avx2fma(
+                        _mm256_movedup_pd(combined),
+                        _mm256_permute_pd(combined, 0b1111),
+                        phase,
+                    );
+                }
+                let p = ptr.add(j0 * 2);
+                let amp = _mm256_loadu_pd(p);
+                let res = simd::complex_mul_avx2fma(
+                    _mm256_movedup_pd(combined),
+                    _mm256_permute_pd(combined, 0b1111),
+                    amp,
+                );
+                _mm256_storeu_pd(p, res);
+                k += 2;
+            }
+            if k < half {
+                let j = insert_zero_bit(k, ctrl_bit) | ctrl_mask;
+                let i = (base_idx + j) as u64;
+                let mut combined = first.table[_pext_u64(i, first.pext_mask) as usize];
+                for group in rest {
+                    combined *= group.table[_pext_u64(i, group.pext_mask) as usize];
+                }
+                // SAFETY: j < tile.len() guaranteed by insert_zero_bit mapping
+                *tile.get_unchecked_mut(j) *= combined;
             }
         } else {
             let half = tile.len() >> 1;
-            for k in 0..half {
-                let j = insert_zero_bit(k, ctrl_bit) | ctrl_mask;
-                let i = base_idx + j;
-                let mut combined = ONE;
-                for group in groups.iter().take(num_groups) {
-                    let bits = _pext_u64(i as u64, group.pext_mask) as usize;
-                    combined *= group.table[bits];
+            let mut k = 0usize;
+            while k + 1 < half {
+                let j0 = (k << 1) | 1;
+                let j1 = j0 + 2;
+                let i0 = (base_idx + j0) as u64;
+                let i1 = (base_idx + j1) as u64;
+                let t0 = _mm_loadu_pd(
+                    std::ptr::from_ref(&first.table[_pext_u64(i0, first.pext_mask) as usize])
+                        .cast::<f64>(),
+                );
+                let t1 = _mm_loadu_pd(
+                    std::ptr::from_ref(&first.table[_pext_u64(i1, first.pext_mask) as usize])
+                        .cast::<f64>(),
+                );
+                let mut combined = _mm256_insertf128_pd(_mm256_castpd128_pd256(t0), t1, 1);
+                for group in rest {
+                    let g0 = _mm_loadu_pd(
+                        std::ptr::from_ref(&group.table[_pext_u64(i0, group.pext_mask) as usize])
+                            .cast::<f64>(),
+                    );
+                    let g1 = _mm_loadu_pd(
+                        std::ptr::from_ref(&group.table[_pext_u64(i1, group.pext_mask) as usize])
+                            .cast::<f64>(),
+                    );
+                    let phase = _mm256_insertf128_pd(_mm256_castpd128_pd256(g0), g1, 1);
+                    combined = simd::complex_mul_avx2fma(
+                        _mm256_movedup_pd(combined),
+                        _mm256_permute_pd(combined, 0b1111),
+                        phase,
+                    );
                 }
-                // SAFETY: j < tile.len() guaranteed by insert_zero_bit mapping
+                let p0 = ptr.add(j0 * 2);
+                let p1 = ptr.add(j1 * 2);
+                let amp = _mm256_insertf128_pd(
+                    _mm256_castpd128_pd256(_mm_loadu_pd(p0)),
+                    _mm_loadu_pd(p1),
+                    1,
+                );
+                let res = simd::complex_mul_avx2fma(
+                    _mm256_movedup_pd(combined),
+                    _mm256_permute_pd(combined, 0b1111),
+                    amp,
+                );
+                _mm_storeu_pd(p0, _mm256_castpd256_pd128(res));
+                _mm_storeu_pd(p1, _mm256_extractf128_pd(res, 1));
+                k += 2;
+            }
+            if k < half {
+                let j = (k << 1) | 1;
+                let i = (base_idx + j) as u64;
+                let mut combined = first.table[_pext_u64(i, first.pext_mask) as usize];
+                for group in rest {
+                    combined *= group.table[_pext_u64(i, group.pext_mask) as usize];
+                }
+                // SAFETY: j < tile.len() guaranteed by (k << 1) | 1 for k < half
                 *tile.get_unchecked_mut(j) *= combined;
             }
         }
@@ -615,10 +799,10 @@ impl StatevectorBackend {
         }
 
         #[cfg(target_arch = "x86_64")]
-        if simd::has_bmi2() && simd::has_fma() {
+        if simd::has_avx2_fma() && simd::has_bmi2() {
             let bmi2_groups = self.batch_tables.rzz_bmi2();
             if let Some(num_groups) = build_batch_rzz_bmi2_tables(edges, bmi2_groups) {
-                // SAFETY: has_bmi2() && has_fma() verified above
+                // SAFETY: AVX2 detected, along with BMI2 and FMA.
                 unsafe { batch_rzz_tile_bmi2(&mut self.state, 0, bmi2_groups, num_groups) };
                 return;
             }
@@ -636,7 +820,7 @@ impl StatevectorBackend {
     #[inline(always)]
     fn apply_batch_rzz_par(&mut self, edges: &[(usize, usize, f64)]) {
         #[cfg(target_arch = "x86_64")]
-        if simd::has_bmi2() && simd::has_fma() {
+        if simd::has_avx2_fma() && simd::has_bmi2() {
             let bmi2_groups = self.batch_tables.rzz_bmi2();
             if let Some(num_groups) = build_batch_rzz_bmi2_tables(edges, bmi2_groups) {
                 let bmi2_groups = &*bmi2_groups;
@@ -645,7 +829,7 @@ impl StatevectorBackend {
                     .enumerate()
                     .for_each(|(chunk_idx, chunk)| {
                         let base = chunk_idx * MIN_PAR_ELEMS;
-                        // SAFETY: has_bmi2() && has_fma() verified above
+                        // SAFETY: AVX2 detected, along with BMI2 and FMA.
                         unsafe {
                             batch_rzz_tile_bmi2(chunk, base, bmi2_groups, num_groups);
                         }
@@ -687,8 +871,8 @@ impl StatevectorBackend {
         let num_groups = build_batch_phase_tables(phases, groups);
 
         #[cfg(target_arch = "x86_64")]
-        if simd::has_bmi2() && simd::has_fma() {
-            // SAFETY: BMI2+FMA availability verified above.
+        if simd::has_avx2_fma() && simd::has_bmi2() {
+            // SAFETY: AVX2 detected, along with BMI2 and FMA.
             unsafe {
                 apply_batch_phase_bmi2(&mut self.state, control, groups, num_groups);
             }
@@ -711,7 +895,7 @@ impl StatevectorBackend {
         let groups = &*groups;
 
         #[cfg(target_arch = "x86_64")]
-        let use_bmi2 = simd::has_bmi2() && simd::has_fma();
+        let use_bmi2 = simd::has_avx2_fma() && simd::has_bmi2();
 
         self.state
             .par_chunks_mut(MIN_PAR_ELEMS)
@@ -721,7 +905,7 @@ impl StatevectorBackend {
 
                 #[cfg(target_arch = "x86_64")]
                 if use_bmi2 {
-                    // SAFETY: BMI2+FMA availability verified above.
+                    // SAFETY: AVX2 detected, along with BMI2 and FMA.
                     unsafe {
                         batch_phase_tile_bmi2(tile, base, control, groups, num_groups);
                     }
@@ -766,8 +950,8 @@ impl StatevectorBackend {
         }
 
         #[cfg(target_arch = "x86_64")]
-        if simd::has_bmi2() && simd::has_fma() {
-            // SAFETY: has_bmi2() + has_fma() confirmed above
+        if simd::has_avx2_fma() && simd::has_bmi2() {
+            // SAFETY: AVX2 detected, along with BMI2 and FMA.
             unsafe {
                 diagonal_batch_tile_bmi2(
                     &mut self.state,
@@ -801,13 +985,13 @@ impl StatevectorBackend {
         }
 
         #[cfg(target_arch = "x86_64")]
-        if simd::has_bmi2() && simd::has_fma() {
+        if simd::has_avx2_fma() && simd::has_bmi2() {
             self.state
                 .par_chunks_mut(MIN_PAR_ELEMS)
                 .enumerate()
                 .for_each(|(chunk_idx, chunk)| {
                     let base = chunk_idx * MIN_PAR_ELEMS;
-                    // SAFETY: has_bmi2() + has_fma() confirmed above
+                    // SAFETY: AVX2 detected, along with BMI2 and FMA.
                     unsafe {
                         diagonal_batch_tile_bmi2(
                             chunk,
@@ -858,7 +1042,7 @@ impl StatevectorBackend {
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "bmi2,fma")]
+#[target_feature(enable = "avx2,bmi2,fma")]
 pub(super) unsafe fn diagonal_batch_tile_bmi2(
     tile: &mut [Complex64],
     base_idx: usize,
@@ -866,15 +1050,62 @@ pub(super) unsafe fn diagonal_batch_tile_bmi2(
     pext_masks: &[u64; MAX_DIAG_BATCH_GROUPS],
     num_groups: usize,
 ) {
-    use std::arch::x86_64::_pext_u64;
-    for (j, amp) in tile.iter_mut().enumerate() {
-        let i = base_idx + j;
-        let mut combined = ONE;
-        for g in 0..num_groups {
-            let bits = _pext_u64(i as u64, pext_masks[g]) as usize;
-            combined *= tables[g][bits];
+    if num_groups == 0 {
+        return;
+    }
+    let first_table = &tables[0];
+    let first_mask = pext_masks[0];
+    let rest_tables = &tables[1..num_groups];
+    let rest_masks = &pext_masks[1..num_groups];
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::{
+            _mm_loadu_pd, _mm256_castpd128_pd256, _mm256_insertf128_pd, _mm256_loadu_pd,
+            _mm256_movedup_pd, _mm256_permute_pd, _mm256_storeu_pd, _pext_u64,
+        };
+        let len = tile.len();
+        let ptr = tile.as_mut_ptr() as *mut f64;
+        let mut j = 0usize;
+        while j + 1 < len {
+            let i0 = (base_idx + j) as u64;
+            let i1 = i0 + 1;
+            let t0 = _mm_loadu_pd(
+                std::ptr::from_ref(&first_table[_pext_u64(i0, first_mask) as usize]).cast::<f64>(),
+            );
+            let t1 = _mm_loadu_pd(
+                std::ptr::from_ref(&first_table[_pext_u64(i1, first_mask) as usize]).cast::<f64>(),
+            );
+            let mut combined = _mm256_insertf128_pd(_mm256_castpd128_pd256(t0), t1, 1);
+            for (tg, &mg) in rest_tables.iter().zip(rest_masks) {
+                let g0 =
+                    _mm_loadu_pd(std::ptr::from_ref(&tg[_pext_u64(i0, mg) as usize]).cast::<f64>());
+                let g1 =
+                    _mm_loadu_pd(std::ptr::from_ref(&tg[_pext_u64(i1, mg) as usize]).cast::<f64>());
+                let phase = _mm256_insertf128_pd(_mm256_castpd128_pd256(g0), g1, 1);
+                combined = simd::complex_mul_avx2fma(
+                    _mm256_movedup_pd(combined),
+                    _mm256_permute_pd(combined, 0b1111),
+                    phase,
+                );
+            }
+            let p = ptr.add(j * 2);
+            let amp = _mm256_loadu_pd(p);
+            let res = simd::complex_mul_avx2fma(
+                _mm256_movedup_pd(combined),
+                _mm256_permute_pd(combined, 0b1111),
+                amp,
+            );
+            _mm256_storeu_pd(p, res);
+            j += 2;
         }
-        *amp *= combined;
+        if j < len {
+            let i = (base_idx + j) as u64;
+            let mut combined = first_table[_pext_u64(i, first_mask) as usize];
+            for (tg, &mg) in rest_tables.iter().zip(rest_masks) {
+                combined *= tg[_pext_u64(i, mg) as usize];
+            }
+            tile[j] *= combined;
+        }
     }
 }
 

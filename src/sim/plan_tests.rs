@@ -255,3 +255,54 @@ fn approximation_name_distinguishes_the_bounded_tensor_kind() {
     );
     assert_eq!(approximation_name(&bounded, ResolvedBackend::Mps), "Mps");
 }
+
+#[cfg(feature = "gpu")]
+#[test]
+fn statevector_save_enforces_export_width_on_device() {
+    let n = crate::gpu::min_qubits().max(2);
+    let mut circuit = ghz(n, 0);
+    circuit.add_save(SaveSpec::StateVector, "sv_dev");
+    let limits = Limits::new().max_export_qubits(n - 1);
+    let plan = simulate(&circuit)
+        .backend(BackendKind::StatevectorGpu {
+            context: crate::gpu::GpuContext::stub_for_tests(),
+        })
+        .limits(limits)
+        .plan(Query::Run)
+        .unwrap();
+    assert_eq!(plan.placement, Placement::Device);
+    match plan.would_fail {
+        Some(PrismError::ResourceLimit(data)) => {
+            assert_eq!(data.knob, Some(crate::limits::LimitKnob::ExportQubits));
+            assert_eq!(data.required, n as u128);
+            assert_eq!(data.limit, (n - 1) as u128);
+            assert!(data.operation.contains("save point `sv_dev`"));
+        }
+        other => panic!("expected ExportQubits ResourceLimit, got {other:?}"),
+    }
+}
+
+#[test]
+fn mps_density_save_plan_checks_static_chi_one_lower_bound() {
+    let mut circuit = ghz(3, 0);
+    circuit.add_save(SaveSpec::DensityMatrix, "rho");
+    // For n = 3 and chi = 1, workspace elements = 7 * 1^2 * 4^3 = 448 <= 2^10 (1024),
+    // while dynamic GHZ entanglement grows chi to 2 (workspace = 1792 > 1024).
+    let plan = simulate(&circuit)
+        .backend(BackendKind::Mps { max_bond_dim: 16 })
+        .limits(Limits::new().max_mps_workspace_qubits(10))
+        .plan(Query::Run)
+        .unwrap();
+    assert!(plan.would_fail.is_none());
+
+    // Below the chi = 1 workspace (2^8 = 256 < 448), the static plan predicts failure.
+    let failing = simulate(&circuit)
+        .backend(BackendKind::Mps { max_bond_dim: 16 })
+        .limits(Limits::new().max_mps_workspace_qubits(8))
+        .plan(Query::Run)
+        .unwrap();
+    assert!(matches!(
+        failing.would_fail,
+        Some(PrismError::ResourceLimit(_))
+    ));
+}

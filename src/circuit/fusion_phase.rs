@@ -10,7 +10,6 @@ use num_complex::Complex64;
 use super::{Circuit, Instruction, SmallVec, smallvec};
 use crate::gates::{BatchPhaseData, Gate, MultiFusedData};
 
-use super::fusion::push_unique;
 use super::plan::{Place, Tracer};
 
 const MIN_BATCH_PHASES: usize = 2;
@@ -442,29 +441,43 @@ pub(super) fn batch_post_phase_1q<'a>(
 
     let mut output: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len());
     let mut pending: Vec<(usize, [[Complex64; 2]; 2])> = Vec::new();
-    let mut pending_src: Vec<usize> = Vec::new();
+    let mut pending_src: Vec<(usize, Place)> = Vec::new();
     t.begin();
 
     let flush = |pending: &mut Vec<(usize, [[Complex64; 2]; 2])>,
-                 pending_src: &mut Vec<usize>,
+                 pending_src: &mut Vec<(usize, Place)>,
                  output: &mut Vec<Instruction>,
                  t: &mut Tracer| {
         if pending.len() >= 2 {
-            let mut targets: SmallVec<[usize; 4]> = SmallVec::new();
-            for &(q, _) in pending.iter() {
-                push_unique(&mut targets, q);
-            }
-            targets.sort_unstable();
-            output.push(Instruction::Gate {
-                gate: Gate::MultiFused(Box::new(MultiFusedData::new(std::mem::take(pending)))),
-                targets,
-            });
-            if t.on {
-                let entries: Vec<Vec<(usize, Place)>> = pending_src
-                    .drain(..)
-                    .map(|src| vec![(src, Place::Plain)])
-                    .collect();
-                t.batch(&entries);
+            let (data, entries) = MultiFusedData::fold_with_sources(
+                std::mem::take(pending),
+                if t.on { pending_src.as_slice() } else { &[] },
+            );
+            pending_src.clear();
+            if data.gates.len() == 1 {
+                let (q, mat) = data.gates[0];
+                output.push(Instruction::Gate {
+                    gate: Gate::Fused(Box::new(mat)),
+                    targets: smallvec![q],
+                });
+                if t.on {
+                    if entries[0].len() == 1 {
+                        t.keep(entries[0][0].0);
+                    } else {
+                        t.merge(&entries[0]);
+                    }
+                }
+            } else {
+                let mut targets: SmallVec<[usize; 4]> =
+                    data.gates.iter().map(|&(q, _)| q).collect();
+                targets.sort_unstable();
+                output.push(Instruction::Gate {
+                    gate: Gate::MultiFused(Box::new(data)),
+                    targets,
+                });
+                if t.on {
+                    t.batch(&entries);
+                }
             }
         } else {
             for (k, (q, mat)) in pending.drain(..).enumerate() {
@@ -473,7 +486,7 @@ pub(super) fn batch_post_phase_1q<'a>(
                     targets: smallvec![q],
                 });
                 if t.on {
-                    t.keep(pending_src[k]);
+                    t.keep(pending_src[k].0);
                 }
             }
             pending_src.clear();
@@ -484,7 +497,9 @@ pub(super) fn batch_post_phase_1q<'a>(
         if is_batchable_1q(inst) {
             if let Instruction::Gate { gate, targets, .. } = inst {
                 pending.push((targets[0], gate.matrix_2x2()));
-                t.note_idx(&mut pending_src, i);
+                if t.on {
+                    pending_src.push((i, Place::Plain));
+                }
             }
         } else {
             flush(&mut pending, &mut pending_src, &mut output, t);

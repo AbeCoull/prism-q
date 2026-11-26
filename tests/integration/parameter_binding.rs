@@ -1346,3 +1346,133 @@ fn diagonal_mixed_bindings_reuse_the_captured_plan() {
         );
     }
 }
+
+#[test]
+fn partially_bound_template_with_unlinked_collapsing_gates_reuses_plan() {
+    let mut template = Circuit::new(14, 0);
+    // Unlinked rotations that collapse to Id, S, or Id, which would decline all_rotations capture.
+    template.add_gate(Gate::P(0.0), &[0]);
+    template.add_gate(Gate::P(0.0), &[0]);
+    template.add_gate(Gate::P(std::f64::consts::FRAC_PI_4), &[1]);
+    template.add_gate(Gate::P(std::f64::consts::FRAC_PI_4), &[1]);
+    template.add_gate(Gate::Rz(0.2), &[2]);
+    template.add_gate(Gate::Rz(-0.2), &[2]);
+    template.add_gate(Gate::cphase(0.35), &[0, 3]);
+    template.add_gate(Gate::cphase(0.45), &[0, 4]);
+    // Linked rotations.
+    let rx_idx = template.instructions.len();
+    template.add_gate(Gate::Rx(0.3), &[5]);
+    let rz_idx = template.instructions.len();
+    template.add_gate(Gate::Rz(0.5), &[5]);
+    let ry_idx = template.instructions.len();
+    template.add_gate(Gate::Ry(0.4), &[6]);
+    template.add_gate(Gate::Cx, &[5, 6]);
+    let rzz_idx = template.instructions.len();
+    template.add_gate(Gate::Rzz(0.25), &[7, 8]);
+
+    let params = Parameters::from_links(
+        vec![
+            ParamLink::new(rx_idx, 0),
+            ParamLink::new(rz_idx, 1),
+            ParamLink::new(ry_idx, 2),
+            ParamLink::new(rzz_idx, 3),
+        ],
+        4,
+    );
+    let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+    assert!(prepared.reuses_fusion_plan());
+
+    for values in [
+        [0.41, -0.73, 1.12, -0.35],
+        [0.0, 0.0, std::f64::consts::FRAC_PI_2, 0.0],
+        [-1.05, 0.88, 0.27, 1.44],
+    ] {
+        let independent = params.bind(&template, &values).unwrap();
+        let expected = fuse_circuit(&independent, true);
+        let actual = prepared.bind_fused(&values).unwrap();
+        assert_streams_match(actual, &expected, "partial binding");
+        assert_states_match(
+            &statevector(actual),
+            &statevector(&independent),
+            "partial binding",
+        );
+    }
+}
+
+#[test]
+fn post_phase_1q_folding_reuses_plan_and_recovers_after_guard_trip() {
+    let mut template = Circuit::new(14, 0);
+    template.add_gate(Gate::H, &[2]);
+    template.add_gate(Gate::cphase(0.2), &[0, 2]);
+    let rz_idx = template.instructions.len();
+    template.add_gate(Gate::Rz(0.35), &[2]);
+    for q in [1usize, 3, 4, 5, 6, 7, 8, 9, 10, 11] {
+        template.add_gate(Gate::cphase(0.15 + 0.01 * q as f64), &[0, q]);
+    }
+    let rx_idx = template.instructions.len();
+    template.add_gate(Gate::Rx(0.4), &[11]);
+
+    let params = Parameters::from_links(
+        vec![ParamLink::new(rz_idx, 0), ParamLink::new(rx_idx, 1)],
+        2,
+    );
+    let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+    assert!(prepared.reuses_fusion_plan());
+
+    let first = prepared.bind_fused(&[0.72, -0.51]).unwrap();
+    assert!(first.instructions.iter().any(|inst| matches!(
+        inst,
+        Instruction::Gate {
+            gate: Gate::BatchPhase(_),
+            ..
+        }
+    )));
+    assert!(first.instructions.iter().any(|inst| matches!(
+        inst,
+        Instruction::Gate {
+            gate: Gate::Fused(_),
+            targets,
+        } if targets.as_slice() == [2]
+    )));
+
+    // Generic -> degenerate named collapse H * Rz(0) = H -> generic recovery.
+    for values in [[0.72, -0.51], [0.0, 0.33], [-0.95, 1.18]] {
+        let independent = params.bind(&template, &values).unwrap();
+        let expected = fuse_circuit(&independent, true);
+        let actual = prepared.bind_fused(&values).unwrap();
+        assert_streams_match(actual, &expected, "post phase folding");
+        assert_states_match(
+            &statevector(actual),
+            &statevector(&independent),
+            "post phase folding",
+        );
+    }
+}
+
+#[test]
+fn absorbed_diagonal_1q_guard_trip_falls_back_and_recovers() {
+    let mut template = Circuit::new(14, 0);
+    template.add_gate(Gate::cphase(0.25), &[0, 2]);
+    template.add_gate(Gate::Rz(0.25), &[0]);
+    template.add_gate(Gate::P(0.37), &[0]);
+    let params = Parameters::all_rotations(&template);
+    let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+    assert!(prepared.reuses_fusion_plan());
+
+    for values in [
+        [0.45, 0.65],
+        [0.0, 0.0],
+        [0.0, std::f64::consts::FRAC_PI_2],
+        [-0.85, 0.55],
+    ] {
+        let independent = params.bind(&template, &values).unwrap();
+        let expected = fuse_circuit(&independent, true);
+        let actual = prepared.bind_fused(&values).unwrap();
+        assert_streams_match(actual, &expected, "absorbed diagonal 1q");
+        assert_states_match(
+            &statevector(actual),
+            &statevector(&independent),
+            "absorbed diagonal 1q",
+        );
+    }
+}

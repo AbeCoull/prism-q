@@ -87,8 +87,9 @@ impl PreparedCircuit {
     ) -> Result<Self> {
         params.validate(&template)?;
         let route = prepared_route(&kind, &template, limits.as_ref());
-        let (skeleton, plan) = FusionPlan::capture(
+        let (skeleton, plan) = FusionPlan::capture_with_params(
             &template,
+            &params,
             fusion_state_qubits(route.as_ref(), &template),
             fusion_profile(route.as_ref()),
         );

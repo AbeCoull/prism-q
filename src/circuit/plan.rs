@@ -2,12 +2,14 @@
 //! from the gate sequence, with a recipe per fused payload, so a later binding rebuilds the
 //! matrices without re-running fusion unless the new angles break a recorded decision.
 
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use num_complex::Complex64;
 
 use super::fusion::is_identity;
-use super::parameter::angle_of;
+use super::parameter::{Parameters, angle_of};
 use super::{Circuit, Instruction};
 use crate::gates::{
     DiagEntry, Gate, is_diagonal_2x2, is_diagonal_4x4, kron_2x2, mat_mul_2x2, mat_mul_4x4,
@@ -20,7 +22,7 @@ use crate::gates::{
 /// Embedding and SWAP conjugation are both multiplicative, so a nested recipe
 /// splices into an enclosing one by rewriting each step's placement flag rather
 /// than by materializing the inner product.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Step {
     /// The 2x2 matrix of the template gate.
     M1 { src: u32 },
@@ -35,10 +37,11 @@ enum Step {
         steps: Box<[Step]>,
         part: DiagPart,
         high: Option<bool>,
+        slot: Option<u32>,
     },
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum DiagPart {
     First,
     Second,
@@ -64,10 +67,12 @@ impl Step {
                 steps,
                 part,
                 high: None,
+                slot,
             } if !matches!(part, DiagPart::Phase) => Step::Project {
                 steps,
                 part,
                 high: Some(high),
+                slot,
             },
             other => other,
         }
@@ -89,13 +94,27 @@ impl Step {
                 steps,
                 part,
                 high: Some(high),
+                slot,
             } => Step::Project {
                 steps,
                 part,
                 high: Some(!high),
+                slot,
             },
             other => other,
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct StepRange {
+    range: Range<u32>,
+    slot: Option<u32>,
+}
+
+impl StepRange {
+    fn new(range: Range<u32>) -> Self {
+        Self { range, slot: None }
     }
 }
 
@@ -105,13 +124,13 @@ enum Recipe {
     /// Product of 2x2 factors, applied left to right onto the accumulator.
     /// The flag is the diagonality the captured block had, which downstream
     /// batching read.
-    Mat2(Range<u32>, bool),
+    Mat2(StepRange, bool),
     /// Product of 4x4 factors, with the captured block's diagonality.
-    Mat4(Range<u32>, bool),
+    Mat4(StepRange, bool),
     /// The angle of a template gate, carried through unfused.
     Angle(u32),
-    Phase(Range<u32>),
-    Parity(Range<u32>),
+    Phase(StepRange),
+    Parity(StepRange),
 }
 
 /// Where a rebuilt payload is written back into the skeleton.
@@ -134,12 +153,12 @@ enum Guard {
     /// as a named gate, and as diagonal as it was, the three properties fusion
     /// read off it. Absorption into a 4x4 downstream leaves it with no payload
     /// of its own, so no site can carry this check.
-    Fuses1q(Range<u32>, bool),
+    Fuses1q(StepRange, bool),
     /// A 1q block whose diagonality decided how the stage planner ordered it.
-    Diag1q(Range<u32>, bool),
+    Diag1q(StepRange, bool),
     /// A 2q block whose diagonality decided whether a same-pair run collapsed.
-    Diag4q(Range<u32>, bool),
-    Phase2q(Range<u32>),
+    Diag4q(StepRange, bool),
+    Phase2q(StepRange),
 }
 
 /// The fused block structure of a template, with a recipe per angle-derived
@@ -150,6 +169,8 @@ pub(super) struct FusionPlan {
     sites: Vec<Site>,
     guard_steps: Vec<Step>,
     guards: Vec<Guard>,
+    shared_2x2_count: u32,
+    shared_4x4_count: u32,
 }
 
 /// Provenance of one instruction: an ordered recipe per payload it carries.
@@ -218,8 +239,24 @@ impl Tracer {
         }
     }
 
-    /// Start tracing a template whose instructions are their own sources.
-    fn tracking(circuit: &Circuit) -> Self {
+    /// Start tracing a template whose instructions are their own sources,
+    /// marking every instruction not bound by `params` as constant.
+    fn tracking(circuit: &Circuit, params: &Parameters) -> Self {
+        let mut constant_sources = vec![true; circuit.instructions.len()];
+        for link in params.links() {
+            if let Some(slot) = constant_sources.get_mut(link.instruction) {
+                *slot = false;
+            }
+        }
+        Self::tracking_with_constants(circuit, constant_sources)
+    }
+
+    #[cfg(test)]
+    fn tracking_all(circuit: &Circuit) -> Self {
+        Self::tracking_with_constants(circuit, vec![false; circuit.instructions.len()])
+    }
+
+    fn tracking_with_constants(circuit: &Circuit, constant_sources: Vec<bool>) -> Self {
         let input = circuit
             .instructions
             .iter()
@@ -229,11 +266,7 @@ impl Tracer {
         Self {
             on: true,
             bailed: false,
-            constant_sources: circuit
-                .instructions
-                .iter()
-                .map(|inst| matches!(inst, Instruction::Gate { gate, .. } if gate.pauli_generator().is_none()))
-                .collect(),
+            constant_sources,
             input,
             output: Vec::new(),
             guard_steps: Vec::new(),
@@ -325,6 +358,7 @@ impl Tracer {
                                 steps: payload.clone().into_boxed_slice(),
                                 part,
                                 high: None,
+                                slot: None,
                             }]);
                         }
                     }
@@ -340,6 +374,7 @@ impl Tracer {
                             steps: payload.clone().into_boxed_slice(),
                             part,
                             high: None,
+                            slot: None,
                         }]);
                     }
                 }
@@ -350,10 +385,18 @@ impl Tracer {
     }
 
     fn guard_payload_diag(&mut self, payload: &[Step]) {
+        if payload
+            .iter()
+            .all(|s| s.is_constant(&self.constant_sources))
+        {
+            return;
+        }
         let start = self.guard_steps.len() as u32;
         self.guard_steps.extend_from_slice(payload);
-        self.guards
-            .push(Guard::Diag4q(start..self.guard_steps.len() as u32, true));
+        self.guards.push(Guard::Diag4q(
+            StepRange::new(start..self.guard_steps.len() as u32),
+            true,
+        ));
     }
 
     pub(super) fn guard_phase(&mut self, src: usize) {
@@ -394,12 +437,16 @@ impl Tracer {
         self.bailed |= child.bailed;
         let offset = self.guard_steps.len() as u32;
         self.guard_steps.extend(child.guard_steps);
+        let shift = |sr: StepRange| StepRange {
+            range: sr.range.start + offset..sr.range.end + offset,
+            slot: sr.slot,
+        };
         self.guards
             .extend(child.guards.into_iter().map(|guard| match guard {
-                Guard::Fuses1q(r, d) => Guard::Fuses1q(r.start + offset..r.end + offset, d),
-                Guard::Diag1q(r, d) => Guard::Diag1q(r.start + offset..r.end + offset, d),
-                Guard::Diag4q(r, d) => Guard::Diag4q(r.start + offset..r.end + offset, d),
-                Guard::Phase2q(r) => Guard::Phase2q(r.start + offset..r.end + offset),
+                Guard::Fuses1q(sr, d) => Guard::Fuses1q(shift(sr), d),
+                Guard::Diag1q(sr, d) => Guard::Diag1q(shift(sr), d),
+                Guard::Diag4q(sr, d) => Guard::Diag4q(shift(sr), d),
+                Guard::Phase2q(sr) => Guard::Phase2q(shift(sr)),
             }));
         self.output.extend(child.input);
     }
@@ -515,27 +562,43 @@ impl Tracer {
             self.bailed = true;
             return;
         };
+        if payload
+            .iter()
+            .all(|s| s.is_constant(&self.constant_sources))
+        {
+            return;
+        }
         let start = self.guard_steps.len() as u32;
         self.guard_steps.extend_from_slice(payload);
         self.guards.push(Guard::Diag4q(
-            start..self.guard_steps.len() as u32,
+            StepRange::new(start..self.guard_steps.len() as u32),
             diagonal,
         ));
     }
 
     /// Resolve `srcs` to template steps without emitting an instruction.
-    fn resolve(&mut self, srcs: &[(usize, Place)]) -> Option<Range<u32>> {
-        let start = self.guard_steps.len() as u32;
-        for &(i, place) in srcs {
+    fn resolve(&mut self, srcs: &[(usize, Place)]) -> Option<StepRange> {
+        let mut all_constant = true;
+        for &(i, _) in srcs {
             let prov = &self.input[i];
             if prov.len() != 1 {
                 self.bailed = true;
                 return None;
             }
-            let placed: Vec<Step> = prov[0].iter().cloned().map(|s| place.apply(s)).collect();
-            self.guard_steps.extend(placed);
+            all_constant &= prov[0]
+                .iter()
+                .all(|s| s.is_constant(&self.constant_sources));
         }
-        Some(start..self.guard_steps.len() as u32)
+        if all_constant {
+            return None;
+        }
+        let start = self.guard_steps.len() as u32;
+        for &(i, place) in srcs {
+            let prov = &self.input[i];
+            self.guard_steps
+                .extend(prov[0].iter().cloned().map(|s| place.apply(s)));
+        }
+        Some(StepRange::new(start..self.guard_steps.len() as u32))
     }
 
     /// Record that the 1q product of `srcs` is what fusion chose to emit as a
@@ -634,18 +697,33 @@ fn identity_prov(index: u32, inst: &Instruction) -> Prov {
     }
 }
 
+struct ReplayCache {
+    mat2: Vec<Option<[[Complex64; 2]; 2]>>,
+    mat4: Vec<Option<[[Complex64; 4]; 4]>>,
+}
+
+thread_local! {
+    static REPLAY_CACHE: RefCell<ReplayCache> = const {
+        RefCell::new(ReplayCache {
+            mat2: Vec::new(),
+            mat4: Vec::new(),
+        })
+    };
+}
+
 impl FusionPlan {
     /// Settle the fused structure of `template` for a `state_qubits`-wide buffer
-    /// and record how to rebuild the angle-derived payloads.
+    /// under `params` and record how to rebuild the angle-derived payloads.
     ///
     /// Returns the fused skeleton, and the plan when every payload in it has a
     /// recipe. A `None` plan means a binding has to run fusion itself.
-    pub(super) fn capture(
+    pub(super) fn capture_with_params(
         template: &Circuit,
+        params: &Parameters,
         state_qubits: usize,
         profile: super::fusion::FusionProfile,
     ) -> (Circuit, Option<FusionPlan>) {
-        let mut tracer = Tracer::tracking(template);
+        let mut tracer = Tracer::tracking(template, params);
         let fused =
             super::fusion::fuse_at_width(template, state_qubits, profile, &mut tracer).into_owned();
         if tracer.bailed || tracer.input.len() != fused.instructions.len() {
@@ -666,15 +744,24 @@ impl FusionPlan {
                 return (fused, None);
             }
         }
-        (
-            fused,
-            Some(FusionPlan {
-                steps,
-                sites,
-                guard_steps: std::mem::take(&mut tracer.guard_steps),
-                guards: std::mem::take(&mut tracer.guards),
-            }),
-        )
+        let plan = build_plan(
+            &fused,
+            steps,
+            sites,
+            std::mem::take(&mut tracer.guard_steps),
+            std::mem::take(&mut tracer.guards),
+        );
+        (fused, Some(plan))
+    }
+
+    #[cfg(test)]
+    pub(super) fn capture(
+        template: &Circuit,
+        state_qubits: usize,
+        profile: super::fusion::FusionProfile,
+    ) -> (Circuit, Option<FusionPlan>) {
+        let params = Parameters::all_rotations(template);
+        Self::capture_with_params(template, &params, state_qubits, profile)
     }
 
     /// Rebuild every payload of `skeleton` from `bound`.
@@ -685,24 +772,80 @@ impl FusionPlan {
     /// stream in each case, so the caller re-runs it.
     #[must_use]
     pub(super) fn replay(&self, bound: &Circuit, skeleton: &mut Circuit) -> bool {
+        if self.shared_2x2_count == 0 && self.shared_4x4_count == 0 {
+            return self.replay_with_cache(bound, skeleton, None, None);
+        }
+        let n2 = self.shared_2x2_count as usize;
+        let n4 = self.shared_4x4_count as usize;
+        REPLAY_CACHE.with(|cell| {
+            let mut cache = cell.borrow_mut();
+            if cache.mat2.len() < n2 {
+                cache.mat2.resize(n2, None);
+            }
+            cache.mat2[..n2].fill(None);
+            if cache.mat4.len() < n4 {
+                cache.mat4.resize(n4, None);
+            }
+            cache.mat4[..n4].fill(None);
+            let ReplayCache { mat2, mat4 } = &mut *cache;
+            self.replay_with_cache(
+                bound,
+                skeleton,
+                (n2 > 0).then_some(&mut mat2[..n2]),
+                (n4 > 0).then_some(&mut mat4[..n4]),
+            )
+        })
+    }
+
+    fn replay_with_cache(
+        &self,
+        bound: &Circuit,
+        skeleton: &mut Circuit,
+        mut mat2: Option<&mut [Option<[[Complex64; 2]; 2]>]>,
+        mut mat4: Option<&mut [Option<[[Complex64; 4]; 4]>]>,
+    ) -> bool {
         for guard in &self.guards {
             let holds = match guard {
-                Guard::Fuses1q(range, diagonal) => {
-                    let mat = product_2x2(&self.guard_steps, bound, range.clone());
+                Guard::Fuses1q(sr, diagonal) => {
+                    let mat = cached_product_2x2(
+                        &self.guard_steps,
+                        bound,
+                        sr,
+                        mat2.as_deref_mut(),
+                        mat4.as_deref_mut(),
+                    );
                     !is_identity(&mat)
                         && is_diagonal_2x2(&mat) == *diagonal
                         && (!could_be_named(&mat) || Gate::recognize_matrix(&mat).is_none())
                 }
-                Guard::Diag1q(range, diagonal) => {
-                    let mat = product_2x2(&self.guard_steps, bound, range.clone());
+                Guard::Diag1q(sr, diagonal) => {
+                    let mat = cached_product_2x2(
+                        &self.guard_steps,
+                        bound,
+                        sr,
+                        mat2.as_deref_mut(),
+                        mat4.as_deref_mut(),
+                    );
                     is_diagonal_2x2(&mat) == *diagonal
                 }
-                Guard::Diag4q(range, diagonal) => {
-                    let mat = product_4x4(&self.guard_steps, bound, range.clone());
+                Guard::Diag4q(sr, diagonal) => {
+                    let mat = cached_product_4x4(
+                        &self.guard_steps,
+                        bound,
+                        sr.range.clone(),
+                        sr.slot,
+                        mat4.as_deref_mut(),
+                    );
                     is_diagonal_4x4(&mat) == *diagonal
                 }
-                Guard::Phase2q(range) => {
-                    let mat = product_4x4(&self.guard_steps, bound, range.clone());
+                Guard::Phase2q(sr) => {
+                    let mat = cached_product_4x4(
+                        &self.guard_steps,
+                        bound,
+                        sr.range.clone(),
+                        sr.slot,
+                        mat4.as_deref_mut(),
+                    );
                     is_phase_pair(&mat)
                 }
             };
@@ -713,20 +856,38 @@ impl FusionPlan {
         for site in &self.sites {
             let inst = &mut skeleton.instructions[site.instruction as usize];
             match &site.recipe {
-                Recipe::Mat2(range, diagonal) => {
-                    let mat = product_2x2(&self.steps, bound, range.clone());
+                Recipe::Mat2(sr, diagonal) => {
+                    let mat = cached_product_2x2(
+                        &self.steps,
+                        bound,
+                        sr,
+                        mat2.as_deref_mut(),
+                        mat4.as_deref_mut(),
+                    );
                     if !write_2x2(inst, site.entry as usize, mat, *diagonal) {
                         return false;
                     }
                 }
-                Recipe::Mat4(range, diagonal) => {
-                    let mat = product_4x4(&self.steps, bound, range.clone());
+                Recipe::Mat4(sr, diagonal) => {
+                    let mat = cached_product_4x4(
+                        &self.steps,
+                        bound,
+                        sr.range.clone(),
+                        sr.slot,
+                        mat4.as_deref_mut(),
+                    );
                     if !write_4x4(inst, site.entry as usize, mat, *diagonal) {
                         return false;
                     }
                 }
-                Recipe::Phase(range) | Recipe::Parity(range) => {
-                    let mat = product_4x4(&self.steps, bound, range.clone());
+                Recipe::Phase(sr) | Recipe::Parity(sr) => {
+                    let mat = cached_product_4x4(
+                        &self.steps,
+                        bound,
+                        sr.range.clone(),
+                        sr.slot,
+                        mat4.as_deref_mut(),
+                    );
                     if !write_diagonal_pair(
                         inst,
                         site.entry as usize,
@@ -748,19 +909,272 @@ impl FusionPlan {
     }
 }
 
-fn product_2x2(pool: &[Step], bound: &Circuit, range: Range<u32>) -> [[Complex64; 2]; 2] {
-    let factor = |step: &Step| match step {
+fn step_slice<'a>(pool: &'a [Step], r: &Range<u32>) -> &'a [Step] {
+    &pool[r.start as usize..r.end as usize]
+}
+
+fn build_plan(
+    fused: &Circuit,
+    mut steps: Vec<Step>,
+    mut sites: Vec<Site>,
+    old_guard_steps: Vec<Step>,
+    old_guards: Vec<Guard>,
+) -> FusionPlan {
+    let mut fuses1q_covered: HashSet<(&[Step], bool)> = HashSet::new();
+    let mut diag1q_covered: HashSet<(&[Step], bool)> = HashSet::new();
+    let mut diag4q_covered: HashSet<(&[Step], bool)> = HashSet::new();
+    let mut phase2q_covered: HashSet<&[Step]> = HashSet::new();
+
+    for site in &sites {
+        let inst = &fused.instructions[site.instruction as usize];
+        match &site.recipe {
+            Recipe::Mat2(sr, diag) => {
+                let s = step_slice(&steps, &sr.range);
+                if matches!(
+                    inst,
+                    Instruction::Gate {
+                        gate: Gate::Fused(_) | Gate::MultiFused(_),
+                        ..
+                    }
+                ) {
+                    fuses1q_covered.insert((s, *diag));
+                }
+                diag1q_covered.insert((s, *diag));
+            }
+            Recipe::Mat4(sr, diag) => {
+                diag4q_covered.insert((step_slice(&steps, &sr.range), *diag));
+            }
+            Recipe::Phase(sr) => {
+                let s = step_slice(&steps, &sr.range);
+                diag4q_covered.insert((s, true));
+                phase2q_covered.insert(s);
+            }
+            Recipe::Parity(sr) => {
+                diag4q_covered.insert((step_slice(&steps, &sr.range), true));
+            }
+            Recipe::Angle(_) => {}
+        }
+    }
+
+    let mut keep_guard = vec![false; old_guards.len()];
+    let mut seen_fuses1q: HashSet<(&[Step], bool)> = HashSet::new();
+    let mut seen_diag1q: HashSet<(&[Step], bool)> = HashSet::new();
+    let mut seen_diag4q: HashSet<(&[Step], bool)> = HashSet::new();
+    let mut seen_phase2q: HashSet<&[Step]> = HashSet::new();
+
+    for (idx, guard) in old_guards.iter().enumerate() {
+        match guard {
+            Guard::Fuses1q(sr, diag) => {
+                let s = step_slice(&old_guard_steps, &sr.range);
+                if !fuses1q_covered.contains(&(s, *diag)) && seen_fuses1q.insert((s, *diag)) {
+                    keep_guard[idx] = true;
+                }
+            }
+            Guard::Diag4q(sr, diag) => {
+                let s = step_slice(&old_guard_steps, &sr.range);
+                if !diag4q_covered.contains(&(s, *diag)) && seen_diag4q.insert((s, *diag)) {
+                    keep_guard[idx] = true;
+                }
+            }
+            Guard::Phase2q(sr) => {
+                let s = step_slice(&old_guard_steps, &sr.range);
+                if !phase2q_covered.contains(s) && seen_phase2q.insert(s) {
+                    keep_guard[idx] = true;
+                }
+            }
+            Guard::Diag1q(..) => {}
+        }
+    }
+    for (idx, guard) in old_guards.iter().enumerate() {
+        if let Guard::Diag1q(sr, diag) = guard {
+            let s = step_slice(&old_guard_steps, &sr.range);
+            if !diag1q_covered.contains(&(s, *diag))
+                && !seen_fuses1q.contains(&(s, *diag))
+                && seen_diag1q.insert((s, *diag))
+            {
+                keep_guard[idx] = true;
+            }
+        }
+    }
+
+    let mut guard_steps = Vec::new();
+    let mut guards = Vec::with_capacity(old_guards.len());
+    for (idx, guard) in old_guards.into_iter().enumerate() {
+        if !keep_guard[idx] {
+            continue;
+        }
+        let push_range = |pool: &mut Vec<Step>, sr: StepRange| -> StepRange {
+            let start = pool.len() as u32;
+            pool.extend_from_slice(step_slice(&old_guard_steps, &sr.range));
+            StepRange::new(start..pool.len() as u32)
+        };
+        guards.push(match guard {
+            Guard::Fuses1q(sr, d) => Guard::Fuses1q(push_range(&mut guard_steps, sr), d),
+            Guard::Diag1q(sr, d) => Guard::Diag1q(push_range(&mut guard_steps, sr), d),
+            Guard::Diag4q(sr, d) => Guard::Diag4q(push_range(&mut guard_steps, sr), d),
+            Guard::Phase2q(sr) => Guard::Phase2q(push_range(&mut guard_steps, sr)),
+        });
+    }
+
+    let mut counts_2x2: HashMap<&[Step], usize> = HashMap::new();
+    let mut counts_4x4: HashMap<&[Step], usize> = HashMap::new();
+    for guard in &guards {
+        match guard {
+            Guard::Fuses1q(sr, _) | Guard::Diag1q(sr, _) => {
+                let s = step_slice(&guard_steps, &sr.range);
+                *counts_2x2.entry(s).or_insert(0) += 1;
+                count_project_4x4(s, &mut counts_4x4);
+            }
+            Guard::Diag4q(sr, _) | Guard::Phase2q(sr) => {
+                let s = step_slice(&guard_steps, &sr.range);
+                *counts_4x4.entry(s).or_insert(0) += 1;
+                count_project_4x4(s, &mut counts_4x4);
+            }
+        }
+    }
+    for site in &sites {
+        match &site.recipe {
+            Recipe::Mat2(sr, _) => {
+                let s = step_slice(&steps, &sr.range);
+                *counts_2x2.entry(s).or_insert(0) += 1;
+                count_project_4x4(s, &mut counts_4x4);
+            }
+            Recipe::Mat4(sr, _) | Recipe::Phase(sr) | Recipe::Parity(sr) => {
+                let s = step_slice(&steps, &sr.range);
+                *counts_4x4.entry(s).or_insert(0) += 1;
+                count_project_4x4(s, &mut counts_4x4);
+            }
+            Recipe::Angle(_) => {}
+        }
+    }
+
+    let slots_2x2 = assign_slots(counts_2x2);
+    let slots_4x4 = assign_slots(counts_4x4);
+    let shared_2x2_count = slots_2x2.len() as u32;
+    let shared_4x4_count = slots_4x4.len() as u32;
+
+    if shared_2x2_count > 0 || shared_4x4_count > 0 {
+        for guard in &mut guards {
+            match guard {
+                Guard::Fuses1q(sr, _) | Guard::Diag1q(sr, _) => {
+                    sr.slot = slots_2x2.get(step_slice(&guard_steps, &sr.range)).copied();
+                }
+                Guard::Diag4q(sr, _) | Guard::Phase2q(sr) => {
+                    sr.slot = slots_4x4.get(step_slice(&guard_steps, &sr.range)).copied();
+                }
+            }
+        }
+        for site in &mut sites {
+            match &mut site.recipe {
+                Recipe::Mat2(sr, _) => {
+                    sr.slot = slots_2x2.get(step_slice(&steps, &sr.range)).copied();
+                }
+                Recipe::Mat4(sr, _) | Recipe::Phase(sr) | Recipe::Parity(sr) => {
+                    sr.slot = slots_4x4.get(step_slice(&steps, &sr.range)).copied();
+                }
+                Recipe::Angle(_) => {}
+            }
+        }
+        assign_project_slots(&mut guard_steps, &slots_4x4);
+        assign_project_slots(&mut steps, &slots_4x4);
+    }
+
+    FusionPlan {
+        steps,
+        sites,
+        guard_steps,
+        guards,
+        shared_2x2_count,
+        shared_4x4_count,
+    }
+}
+
+fn assign_slots(counts: HashMap<&[Step], usize>) -> HashMap<Vec<Step>, u32> {
+    let mut slots = HashMap::new();
+    for (slice, count) in counts {
+        if count >= 2 {
+            let next = slots.len() as u32;
+            slots.insert(slice.to_vec(), next);
+        }
+    }
+    slots
+}
+
+fn count_project_4x4<'a>(pool: &'a [Step], counts_4x4: &mut HashMap<&'a [Step], usize>) {
+    for step in pool {
+        if let Step::Project { steps, .. } = step {
+            *counts_4x4.entry(steps.as_ref()).or_insert(0) += 1;
+            count_project_4x4(steps, counts_4x4);
+        }
+    }
+}
+
+fn assign_project_slots(pool: &mut [Step], slots_4x4: &HashMap<Vec<Step>, u32>) {
+    for step in pool {
+        if let Step::Project { steps, slot, .. } = step {
+            *slot = slots_4x4.get(steps.as_ref()).copied();
+            assign_project_slots(steps, slots_4x4);
+        }
+    }
+}
+
+fn cached_product_2x2(
+    pool: &[Step],
+    bound: &Circuit,
+    sr: &StepRange,
+    mat2: Option<&mut [Option<[[Complex64; 2]; 2]>]>,
+    mat4: Option<&mut [Option<[[Complex64; 4]; 4]>]>,
+) -> [[Complex64; 2]; 2] {
+    if let (Some(slot), Some(cache)) = (sr.slot, mat2.as_deref())
+        && let Some(cached) = cache[slot as usize]
+    {
+        return cached;
+    }
+    let mat = product_2x2(pool, bound, sr.range.clone(), mat4);
+    if let (Some(slot), Some(cache)) = (sr.slot, mat2) {
+        cache[slot as usize] = Some(mat);
+    }
+    mat
+}
+
+fn cached_product_4x4(
+    pool: &[Step],
+    bound: &Circuit,
+    range: Range<u32>,
+    slot: Option<u32>,
+    mut mat4: Option<&mut [Option<[[Complex64; 4]; 4]>]>,
+) -> [[Complex64; 4]; 4] {
+    if let (Some(slot), Some(cache)) = (slot, mat4.as_deref())
+        && let Some(cached) = cache[slot as usize]
+    {
+        return cached;
+    }
+    let mat = product_4x4(pool, bound, range, mat4.as_deref_mut());
+    if let (Some(slot), Some(cache)) = (slot, mat4) {
+        cache[slot as usize] = Some(mat);
+    }
+    mat
+}
+
+fn product_2x2(
+    pool: &[Step],
+    bound: &Circuit,
+    range: Range<u32>,
+    mut mat4: Option<&mut [Option<[[Complex64; 4]; 4]>]>,
+) -> [[Complex64; 2]; 2] {
+    let steps = &pool[range.start as usize..range.end as usize];
+    let Some((first, rest)) = steps.split_first() else {
+        return Gate::Id.matrix_2x2();
+    };
+    let mut factor = |step: &Step| match step {
         Step::M1 { src } => gate_2x2(bound, *src),
         Step::Project {
             steps,
             part,
             high: None,
-        } => projected_1q(steps, *part, bound),
+            slot,
+        } => projected_1q(steps, *part, *slot, bound, mat4.as_deref_mut()),
         _ => unreachable!("2x2 recipe holds 1q steps"),
-    };
-    let steps = &pool[range.start as usize..range.end as usize];
-    let Some((first, rest)) = steps.split_first() else {
-        return Gate::Id.matrix_2x2();
     };
     let mut acc = factor(first);
     for step in rest {
@@ -769,9 +1183,18 @@ fn product_2x2(pool: &[Step], bound: &Circuit, range: Range<u32>) -> [[Complex64
     acc
 }
 
-fn product_4x4(pool: &[Step], bound: &Circuit, range: Range<u32>) -> [[Complex64; 4]; 4] {
+fn product_4x4(
+    pool: &[Step],
+    bound: &Circuit,
+    range: Range<u32>,
+    mut mat4: Option<&mut [Option<[[Complex64; 4]; 4]>]>,
+) -> [[Complex64; 4]; 4] {
     let id = Gate::Id.matrix_2x2();
-    let factor = |step: &Step| match step {
+    let steps = &pool[range.start as usize..range.end as usize];
+    let Some((first, rest)) = steps.split_first() else {
+        return kron_2x2(&id, &id);
+    };
+    let mut factor = |step: &Step| match step {
         Step::M1 { src } => kron_2x2(&gate_2x2(bound, *src), &id),
         Step::E1 { src, high } => {
             let m = gate_2x2(bound, *src);
@@ -793,26 +1216,34 @@ fn product_4x4(pool: &[Step], bound: &Circuit, range: Range<u32>) -> [[Complex64
         Step::Project {
             steps,
             part: DiagPart::Phase,
+            slot,
             ..
         } => {
-            let m = product_4x4(steps, bound, 0..steps.len() as u32);
+            let m = cached_product_4x4(
+                steps,
+                bound,
+                0..steps.len() as u32,
+                *slot,
+                mat4.as_deref_mut(),
+            );
             let phase = m[3][3] * m[0][0] / (m[2][2] * m[1][1]);
             let mut out = kron_2x2(&id, &id);
             out[3][3] = phase;
             out
         }
-        Step::Project { steps, part, high } => {
-            let m = projected_1q(steps, *part, bound);
+        Step::Project {
+            steps,
+            part,
+            high,
+            slot,
+        } => {
+            let m = projected_1q(steps, *part, *slot, bound, mat4.as_deref_mut());
             if high == &Some(true) {
                 kron_2x2(&id, &m)
             } else {
                 kron_2x2(&m, &id)
             }
         }
-    };
-    let steps = &pool[range.start as usize..range.end as usize];
-    let Some((first, rest)) = steps.split_first() else {
-        return kron_2x2(&id, &id);
     };
     let mut acc = factor(first);
     for step in rest {
@@ -821,8 +1252,14 @@ fn product_4x4(pool: &[Step], bound: &Circuit, range: Range<u32>) -> [[Complex64
     acc
 }
 
-fn projected_1q(steps: &[Step], part: DiagPart, bound: &Circuit) -> [[Complex64; 2]; 2] {
-    let m = product_4x4(steps, bound, 0..steps.len() as u32);
+fn projected_1q(
+    steps: &[Step],
+    part: DiagPart,
+    slot: Option<u32>,
+    bound: &Circuit,
+    mat4: Option<&mut [Option<[[Complex64; 4]; 4]>]>,
+) -> [[Complex64; 2]; 2] {
+    let m = cached_product_4x4(steps, bound, 0..steps.len() as u32, slot, mat4);
     let zero = Complex64::new(0.0, 0.0);
     let (d0, d1) = match part {
         DiagPart::First => (m[0][0], m[2][2]),
@@ -924,7 +1361,9 @@ fn record_sites(
             let Some(src) = angle_source(single) else {
                 return false;
             };
-            sites.push(angle_site(0, src));
+            if !constant_sources[src as usize] {
+                sites.push(angle_site(0, src));
+            }
             true
         }
         Gate::BatchRzz(d) => {
@@ -935,7 +1374,9 @@ fn record_sites(
                 let [Step::M2 { src, .. } | Step::Rzz { src }] = p.as_slice() else {
                     return false;
                 };
-                sites.push(angle_site(entry, *src));
+                if !constant_sources[*src as usize] {
+                    sites.push(angle_site(entry, *src));
+                }
             }
             true
         }
@@ -947,7 +1388,9 @@ fn record_sites(
                 let Some(src) = angle_source(p) else {
                     return false;
                 };
-                sites.push(angle_site(entry, src));
+                if !constant_sources[src as usize] {
+                    sites.push(angle_site(entry, src));
+                }
             }
             true
         }
@@ -956,6 +1399,9 @@ fn record_sites(
                 return false;
             }
             for (entry, (p, diagonal)) in prov.iter().zip(&data.entries).enumerate() {
+                if p.iter().all(|step| step.is_constant(constant_sources)) {
+                    continue;
+                }
                 let range = push_steps(steps, p);
                 let recipe = match diagonal {
                     DiagEntry::Phase1q { .. } => Recipe::Mat2(range, true),
@@ -975,6 +1421,9 @@ fn record_sites(
                 return false;
             }
             for (entry, p) in prov.iter().enumerate() {
+                if p.iter().all(|step| step.is_constant(constant_sources)) {
+                    continue;
+                }
                 let range = push_steps(steps, p);
                 sites.push(Site {
                     instruction: index,
@@ -988,12 +1437,17 @@ fn record_sites(
             let [payload] = prov.as_slice() else {
                 return false;
             };
-            let range = push_steps(steps, payload);
-            sites.push(Site {
-                instruction: index,
-                entry: 0,
-                recipe: Recipe::Phase(range),
-            });
+            if !payload
+                .iter()
+                .all(|step| step.is_constant(constant_sources))
+            {
+                let range = push_steps(steps, payload);
+                sites.push(Site {
+                    instruction: index,
+                    entry: 0,
+                    recipe: Recipe::Phase(range),
+                });
+            }
             true
         }
         // No angle, so a binding leaves these untouched. Listed rather than
@@ -1019,10 +1473,10 @@ fn record_sites(
     }
 }
 
-fn push_steps(steps: &mut Vec<Step>, payload: &[Step]) -> Range<u32> {
+fn push_steps(steps: &mut Vec<Step>, payload: &[Step]) -> StepRange {
     let start = steps.len() as u32;
     steps.extend_from_slice(payload);
-    start..steps.len() as u32
+    StepRange::new(start..steps.len() as u32)
 }
 
 fn angle_source(payload: &[Step]) -> Option<u32> {

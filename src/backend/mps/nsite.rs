@@ -9,10 +9,11 @@ use rayon::prelude::*;
 #[cfg(feature = "parallel")]
 use super::MIN_BOND_FOR_PAR;
 use super::svd::{
-    discards_resolvable_weight, fill_isometry_site_data, fill_scaled_vt_data, svd,
+    discards_resolvable_weight, fill_isometry_site_data, fill_scaled_vt_data, svd_with_workspace,
     truncated_svd_rank, widest_block_cut,
 };
 use super::{MpsBackend, SiteTensor, ZERO};
+use crate::backend::gemm::gemm_nn;
 use crate::error::Result;
 use crate::gates::Gate;
 
@@ -21,7 +22,11 @@ impl MpsBackend {
     ///
     /// Returns (theta, bl, br) where theta is indexed as Θ[α, s, β] at
     /// `α * (dim * br) + s * br + β`, with dim = 2^n.
-    fn contract_n_sites(&self, start: usize, n: usize) -> (Vec<Complex64>, usize, usize) {
+    pub(super) fn contract_n_sites(
+        &self,
+        start: usize,
+        n: usize,
+    ) -> (Vec<Complex64>, usize, usize) {
         debug_assert!(n >= 2);
         let bl = self.sites[start].bond_left;
         let br = self.sites[start + n - 1].bond_right;
@@ -40,69 +45,15 @@ impl MpsBackend {
 
             let nsite_chunk = new_dim * next_right;
             let needed = bl * nsite_chunk;
-            new_theta.clear();
             new_theta.resize(needed, ZERO);
-            let t_data = &t.data;
-            let theta_ref = &theta;
-
-            #[cfg(feature = "parallel")]
-            if bl >= MIN_BOND_FOR_PAR {
-                new_theta
-                    .par_chunks_mut(nsite_chunk)
-                    .enumerate()
-                    .for_each(|(alpha, chunk)| {
-                        for s in 0..cur_dim {
-                            for j in 0..2 {
-                                for beta in 0..next_right {
-                                    let mut val = ZERO;
-                                    for gamma in 0..bond_mid {
-                                        val += theta_ref
-                                            [alpha * (cur_dim * bond_mid) + s * bond_mid + gamma]
-                                            * t_data
-                                                [gamma * (2 * next_right) + j * next_right + beta];
-                                    }
-                                    let new_s = s * 2 + j;
-                                    chunk[new_s * next_right + beta] = val;
-                                }
-                            }
-                        }
-                    });
-            } else {
-                for alpha in 0..bl {
-                    for s in 0..cur_dim {
-                        for j in 0..2 {
-                            for beta in 0..next_right {
-                                let mut val = ZERO;
-                                for gamma in 0..bond_mid {
-                                    val += theta_ref
-                                        [alpha * (cur_dim * bond_mid) + s * bond_mid + gamma]
-                                        * t_data[gamma * (2 * next_right) + j * next_right + beta];
-                                }
-                                let new_s = s * 2 + j;
-                                new_theta[alpha * nsite_chunk + new_s * next_right + beta] = val;
-                            }
-                        }
-                    }
-                }
-            }
-
-            #[cfg(not(feature = "parallel"))]
-            for alpha in 0..bl {
-                for s in 0..cur_dim {
-                    for j in 0..2 {
-                        for beta in 0..next_right {
-                            let mut val = ZERO;
-                            for gamma in 0..bond_mid {
-                                val += theta_ref
-                                    [alpha * (cur_dim * bond_mid) + s * bond_mid + gamma]
-                                    * t_data[gamma * (2 * next_right) + j * next_right + beta];
-                            }
-                            let new_s = s * 2 + j;
-                            new_theta[alpha * nsite_chunk + new_s * next_right + beta] = val;
-                        }
-                    }
-                }
-            }
+            gemm_nn(
+                &mut new_theta,
+                &theta,
+                &t.data,
+                bl * cur_dim,
+                bond_mid,
+                2 * next_right,
+            );
             std::mem::swap(&mut theta, &mut new_theta);
             cur_dim = new_dim;
             cur_right = next_right;
@@ -229,23 +180,40 @@ impl MpsBackend {
                 }
             }
 
-            let svd_result = svd(&mat, rows, cols);
-            let chi_new = truncated_svd_rank(&svd_result.s, self.svd_epsilon, self.max_bond_dim);
-            if judge && discards_resolvable_weight(&svd_result.s, chi_new) {
+            svd_with_workspace(&mut self.svd, &mat, rows, cols);
+            let chi_new =
+                truncated_svd_rank(&self.svd.result.s, self.svd_epsilon, self.max_bond_dim);
+            if judge && discards_resolvable_weight(&self.svd.result.s, chi_new) {
                 return false;
             }
-            self.record_truncation(&svd_result.s, chi_new);
+            self.record_svd_truncation(chi_new);
             self.bond_high_water = self.bond_high_water.max(chi_new);
 
             // Extract left site from U: shape (cur_bl, 2, chi_new)
             let mut left_data = std::mem::take(&mut self.sites[start + k].data);
-            fill_isometry_site_data(
-                &mut left_data,
-                &svd_result.u,
-                svd_result.u_rows,
-                cur_bl,
-                chi_new,
-            );
+            {
+                let svd_result = &self.svd.result;
+                fill_isometry_site_data(
+                    &mut left_data,
+                    &svd_result.u,
+                    svd_result.u_rows,
+                    cur_bl,
+                    chi_new,
+                );
+                if k < n - 2 {
+                    // Build remainder from S·V†: shape (chi_new, remaining_dim, br)
+                    fill_scaled_vt_data(&mut new_remaining, svd_result, chi_new, remaining_dim, br);
+                } else {
+                    // Last site: S·V† reshaped to (chi_new, 2, br)
+                    let mut right_data = std::mem::take(&mut self.sites[start + n - 1].data);
+                    fill_scaled_vt_data(&mut right_data, svd_result, chi_new, 2, br);
+                    self.sites[start + n - 1] = SiteTensor {
+                        bond_left: chi_new,
+                        bond_right: br,
+                        data: right_data,
+                    };
+                }
+            }
 
             self.sites[start + k] = SiteTensor {
                 bond_left: cur_bl,
@@ -254,19 +222,8 @@ impl MpsBackend {
             };
 
             if k < n - 2 {
-                // Build remainder from S·V†: shape (chi_new, remaining_dim, br)
-                fill_scaled_vt_data(&mut new_remaining, &svd_result, chi_new, remaining_dim, br);
                 std::mem::swap(&mut remaining, &mut new_remaining);
                 cur_bl = chi_new;
-            } else {
-                // Last site: S·V† reshaped to (chi_new, 2, br)
-                let mut right_data = std::mem::take(&mut self.sites[start + n - 1].data);
-                fill_scaled_vt_data(&mut right_data, &svd_result, chi_new, 2, br);
-                self.sites[start + n - 1] = SiteTensor {
-                    bond_left: chi_new,
-                    bond_right: br,
-                    data: right_data,
-                };
             }
         }
         true

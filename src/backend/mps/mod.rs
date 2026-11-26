@@ -46,6 +46,7 @@ use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
+use crate::backend::gemm::{gemm_nh, gemm_nn};
 use crate::backend::{
     Backend, BasisSamples, NORM_CLAMP_MIN, dense_probability_len, dense_statevector_len, overlap,
     reserve_dense_output, schmidt, simd,
@@ -75,15 +76,16 @@ use linalg::{cu_phase_swap_matrix, swap_gate_qubits};
 #[cfg(feature = "parallel")]
 #[doc(hidden)]
 pub use svd::svd_faer;
+pub(crate) use svd::svd_singular_values;
 #[doc(hidden)]
 pub use svd::{SvdResult, svd, svd_jacobi};
 
 #[cfg(test)]
 use svd::l2_norm;
 use svd::{
-    ThinQr, WeightSide, cut_rank, discards_resolvable_weight, fill_isometry_site_data,
-    fill_scaled_u_site_data, fill_scaled_vt_data, fill_vt_site_data, scratch_slice,
-    truncated_svd_rank,
+    SvdWorkspace, ThinQr, WeightSide, cut_rank, discards_resolvable_weight,
+    fill_isometry_site_data, fill_scaled_u_site_data, fill_scaled_vt_data, fill_vt_site_data,
+    scratch_slice, svd_singular_values_with_workspace, svd_with_workspace, truncated_svd_rank,
 };
 
 const ZERO: Complex64 = Complex64::new(0.0, 0.0);
@@ -169,12 +171,10 @@ pub struct MpsBackend {
     workspace_cap: u128,
     limits: ResolvedLimits,
     /// Grow-only scratch for [`Self::apply_adjacent_two_qubit`], held across
-    /// calls so the four contraction buffers cost no allocation per gate.
+    /// calls so the contraction buffers cost no allocation per gate.
     /// Every element of each call's window is written by assignment before
     /// any read, so stale contents never leak between calls.
     scratch_theta: Vec<Complex64>,
-    scratch_right_t: Vec<Complex64>,
-    scratch_theta_prime: Vec<Complex64>,
     scratch_mat: Vec<Complex64>,
     /// Steps [`MpsBackend::move_center`] has taken since construction, so a
     /// test can price the walk a gate order asks for.
@@ -191,6 +191,7 @@ pub struct MpsBackend {
     /// absorbs `R` into.
     qr: ThinQr,
     scratch_absorb: Vec<Complex64>,
+    svd: SvdWorkspace,
 }
 
 // Manual so clones start with empty scratch: the buffers are write-before-read
@@ -217,11 +218,10 @@ impl Clone for MpsBackend {
             workspace_cap: self.workspace_cap,
             limits: self.limits,
             scratch_theta: Vec::new(),
-            scratch_right_t: Vec::new(),
-            scratch_theta_prime: Vec::new(),
             scratch_mat: Vec::new(),
             qr: ThinQr::default(),
             scratch_absorb: Vec::new(),
+            svd: SvdWorkspace::default(),
         }
     }
 }
@@ -252,11 +252,10 @@ impl MpsBackend {
             workspace_cap: limits.mps_workspace_elements(),
             limits: *limits,
             scratch_theta: Vec::new(),
-            scratch_right_t: Vec::new(),
-            scratch_theta_prime: Vec::new(),
             scratch_mat: Vec::new(),
             qr: ThinQr::default(),
             scratch_absorb: Vec::new(),
+            svd: SvdWorkspace::default(),
         }
     }
 
@@ -332,7 +331,8 @@ impl MpsBackend {
         self.truncation_discarded
     }
 
-    fn record_truncation(&mut self, singular_values: &[f64], chi_kept: usize) {
+    pub(super) fn record_svd_truncation(&mut self, chi_kept: usize) {
+        let singular_values = &self.svd.result.s;
         if chi_kept >= singular_values.len() {
             return;
         }
@@ -562,46 +562,21 @@ impl MpsBackend {
         }
 
         let br = self.sites[site + 1].bond_right;
-        let next = &self.sites[site + 1].data;
-        let r = &self.qr.r;
-        let absorb = scratch_slice(&mut self.scratch_absorb, chi * 2 * br);
         let width = 2 * br;
-        let row = |gamma: usize, out: &mut [Complex64]| {
-            out.fill(ZERO);
-            for delta in 0..bond {
-                let weight = r[gamma * bond + delta];
-                for (o, x) in out
-                    .iter_mut()
-                    .zip(&next[delta * width..delta * width + width])
-                {
-                    *o += weight * x;
-                }
-            }
-        };
-
-        #[cfg(feature = "parallel")]
-        if chi >= MIN_BOND_FOR_PAR {
-            absorb
-                .par_chunks_mut(width)
-                .enumerate()
-                .for_each(|(gamma, out)| row(gamma, out));
-        } else {
-            absorb
-                .chunks_mut(width)
-                .enumerate()
-                .for_each(|(gamma, out)| row(gamma, out));
-        }
-
-        #[cfg(not(feature = "parallel"))]
-        absorb
-            .chunks_mut(width)
-            .enumerate()
-            .for_each(|(gamma, out)| row(gamma, out));
-
+        let needed = chi * width;
+        debug_assert_eq!(self.sites[site + 1].bond_left, bond);
+        self.scratch_absorb.resize(needed, ZERO);
+        gemm_nn(
+            &mut self.scratch_absorb,
+            &self.qr.r[..chi * bond],
+            &self.sites[site + 1].data,
+            chi,
+            bond,
+            width,
+        );
         let right = &mut self.sites[site + 1];
         right.bond_left = chi;
-        right.data.clear();
-        right.data.extend_from_slice(absorb);
+        std::mem::swap(&mut right.data, &mut self.scratch_absorb);
 
         fill_isometry_site_data(&mut self.sites[site].data, &self.qr.q, rows, bl, chi);
         self.sites[site].bond_right = chi;
@@ -629,49 +604,20 @@ impl MpsBackend {
         }
 
         let bl = self.sites[site - 1].bond_left;
-        let prev = &self.sites[site - 1].data;
-        let r = &self.qr.r;
-        let absorb = scratch_slice(&mut self.scratch_absorb, bl * 2 * chi);
-        // Summed over the old bond innermost, so the site being read and the
-        // row of `R` both run stride 1 and each output element takes a single
-        // store.
-        let row = |alpha: usize, out: &mut [Complex64]| {
-            for i in 0..2 {
-                let base = alpha * (2 * bond) + i * bond;
-                let amps = &prev[base..base + bond];
-                for gamma in 0..chi {
-                    let mut acc = ZERO;
-                    for (amp, factor) in amps.iter().zip(&r[gamma * bond..gamma * bond + bond]) {
-                        acc += amp * factor.conj();
-                    }
-                    out[i * chi + gamma] = acc;
-                }
-            }
-        };
-
-        #[cfg(feature = "parallel")]
-        if bl >= MIN_BOND_FOR_PAR {
-            absorb
-                .par_chunks_mut(2 * chi)
-                .enumerate()
-                .for_each(|(alpha, out)| row(alpha, out));
-        } else {
-            absorb
-                .chunks_mut(2 * chi)
-                .enumerate()
-                .for_each(|(alpha, out)| row(alpha, out));
-        }
-
-        #[cfg(not(feature = "parallel"))]
-        absorb
-            .chunks_mut(2 * chi)
-            .enumerate()
-            .for_each(|(alpha, out)| row(alpha, out));
-
+        let needed = bl * 2 * chi;
+        debug_assert_eq!(self.sites[site - 1].bond_right, bond);
+        self.scratch_absorb.resize(needed, ZERO);
+        gemm_nh(
+            &mut self.scratch_absorb,
+            &self.sites[site - 1].data,
+            &self.qr.r[..chi * bond],
+            bl * 2,
+            bond,
+            chi,
+        );
         let left = &mut self.sites[site - 1];
         left.bond_right = chi;
-        left.data.clear();
-        left.data.extend_from_slice(absorb);
+        std::mem::swap(&mut left.data, &mut self.scratch_absorb);
 
         let t = &mut self.sites[site];
         t.bond_left = chi;
@@ -802,165 +748,65 @@ impl MpsBackend {
         // 1. Contract: Θ[α, i, j, β] = Σ_γ A[k][α,i,γ] · A[k+1][γ,j,β]
         let left_data = &self.sites[left_site].data;
         let right_data = &self.sites[right_site].data;
-        let chunk_size = 2 * 2 * br;
+        let chunk_size = 4 * br;
         let theta = scratch_slice(&mut self.scratch_theta, bl * chunk_size);
+        gemm_nn(theta, left_data, right_data, bl * 2, bond_mid, 2 * br);
 
-        // Transpose right: (bond_mid, 2, br) → (2, br, bond_mid) for sequential gamma access.
-        let right_t = scratch_slice(&mut self.scratch_right_t, bond_mid * 2 * br);
-        for gamma in 0..bond_mid {
-            for j in 0..2usize {
-                for beta in 0..br {
-                    right_t[j * br * bond_mid + beta * bond_mid + gamma] =
-                        right_data[gamma * (2 * br) + j * br + beta];
-                }
-            }
-        }
-
-        #[cfg(feature = "parallel")]
-        if bl >= MIN_BOND_FOR_PAR {
-            let right_ref = &right_t;
-            theta
-                .par_chunks_mut(chunk_size)
-                .enumerate()
-                .for_each(|(alpha, chunk)| {
-                    for i in 0..2 {
-                        for j in 0..2 {
-                            for beta in 0..br {
-                                let mut val = ZERO;
-                                let rt_base = j * br * bond_mid + beta * bond_mid;
-                                for gamma in 0..bond_mid {
-                                    val += left_data[alpha * (2 * bond_mid) + i * bond_mid + gamma]
-                                        * right_ref[rt_base + gamma];
-                                }
-                                chunk[i * (2 * br) + j * br + beta] = val;
-                            }
-                        }
-                    }
-                });
-        } else {
-            for alpha in 0..bl {
-                for i in 0..2 {
-                    for j in 0..2 {
-                        for beta in 0..br {
-                            let mut val = ZERO;
-                            let rt_base = j * br * bond_mid + beta * bond_mid;
-                            for gamma in 0..bond_mid {
-                                val += left_data[alpha * (2 * bond_mid) + i * bond_mid + gamma]
-                                    * right_t[rt_base + gamma];
-                            }
-                            theta[alpha * chunk_size + i * (2 * br) + j * br + beta] = val;
-                        }
-                    }
-                }
-            }
-        }
-
-        #[cfg(not(feature = "parallel"))]
-        for alpha in 0..bl {
-            for i in 0..2 {
-                for j in 0..2 {
-                    for beta in 0..br {
-                        let mut val = ZERO;
-                        let rt_base = j * br * bond_mid + beta * bond_mid;
-                        for gamma in 0..bond_mid {
-                            val += left_data[alpha * (2 * bond_mid) + i * bond_mid + gamma]
-                                * right_t[rt_base + gamma];
-                        }
-                        theta[alpha * chunk_size + i * (2 * br) + j * br + beta] = val;
-                    }
-                }
-            }
-        }
-
-        // 2. Apply gate: Θ'[α, i', j', β] = Σ_{i,j} G[i'2+j', i2+j] · Θ[α,i,j,β]
+        // 2 & 3. Apply gate and reshape directly into column-major M (rows = bl*2, cols = 2*br):
+        //    M[(α*2+i'), (j'*br+β)] = Σ_{i,j} G[i'2+j', i2+j] · Θ[α,i,j,β]
         let theta = &self.scratch_theta[..bl * chunk_size];
-        let theta_prime = scratch_slice(&mut self.scratch_theta_prime, bl * chunk_size);
-
-        #[cfg(feature = "parallel")]
-        if bl >= MIN_BOND_FOR_PAR {
-            let theta_ref = &theta;
-            theta_prime
-                .par_chunks_mut(chunk_size)
-                .enumerate()
-                .for_each(|(alpha, chunk)| {
-                    for ip in 0..2 {
-                        for jp in 0..2 {
-                            for beta in 0..br {
-                                let mut val = ZERO;
-                                for i in 0..2 {
-                                    for j in 0..2 {
-                                        val += g[ip * 2 + jp][i * 2 + j]
-                                            * theta_ref
-                                                [alpha * chunk_size + i * (2 * br) + j * br + beta];
-                                    }
-                                }
-                                chunk[ip * (2 * br) + jp * br + beta] = val;
-                            }
-                        }
-                    }
-                });
-        } else {
-            for alpha in 0..bl {
-                for ip in 0..2 {
-                    for jp in 0..2 {
-                        for beta in 0..br {
-                            let mut val = ZERO;
-                            for i in 0..2 {
-                                for j in 0..2 {
-                                    val += g[ip * 2 + jp][i * 2 + j]
-                                        * theta[alpha * chunk_size + i * (2 * br) + j * br + beta];
-                                }
-                            }
-                            theta_prime[alpha * chunk_size + ip * (2 * br) + jp * br + beta] = val;
-                        }
-                    }
-                }
-            }
-        }
-
-        #[cfg(not(feature = "parallel"))]
-        for alpha in 0..bl {
-            for ip in 0..2 {
-                for jp in 0..2 {
-                    for beta in 0..br {
-                        let mut val = ZERO;
-                        for i in 0..2 {
-                            for j in 0..2 {
-                                val += g[ip * 2 + jp][i * 2 + j]
-                                    * theta[alpha * chunk_size + i * (2 * br) + j * br + beta];
-                            }
-                        }
-                        theta_prime[alpha * chunk_size + ip * (2 * br) + jp * br + beta] = val;
-                    }
-                }
-            }
-        }
-
-        // 3. Reshape to matrix M: rows = bl*2, cols = 2*br
-        //    M[(α*2+i), (j*br+β)] = Θ'[α, i, j, β]
         let rows = bl * 2;
         let cols = 2 * br;
-        let theta_prime = &self.scratch_theta_prime[..bl * chunk_size];
         let mat = scratch_slice(&mut self.scratch_mat, rows * cols);
-        for alpha in 0..bl {
-            for i in 0..2 {
-                for j in 0..2 {
-                    for beta in 0..br {
-                        let r = alpha * 2 + i;
-                        let c = j * br + beta;
-                        mat[c * rows + r] =
-                            theta_prime[alpha * (2 * 2 * br) + i * (2 * br) + j * br + beta];
-                    }
+
+        #[cfg(feature = "parallel")]
+        let parallel = bl >= MIN_BOND_FOR_PAR && br >= MIN_BOND_FOR_PAR;
+        #[cfg(not(feature = "parallel"))]
+        let parallel = false;
+
+        if parallel {
+            #[cfg(feature = "parallel")]
+            mat.par_chunks_mut(rows).enumerate().for_each(|(c, col)| {
+                let jp = c / br;
+                let beta = c % br;
+                let g0 = g[jp];
+                let g1 = g[2 + jp];
+                for alpha in 0..bl {
+                    let base = alpha * chunk_size + beta;
+                    let z00 = theta[base];
+                    let z01 = theta[base + br];
+                    let z10 = theta[base + 2 * br];
+                    let z11 = theta[base + 3 * br];
+                    col[alpha * 2] = g0[0] * z00 + g0[1] * z01 + g0[2] * z10 + g0[3] * z11;
+                    col[alpha * 2 + 1] = g1[0] * z00 + g1[1] * z01 + g1[2] * z10 + g1[3] * z11;
+                }
+            });
+        } else {
+            let (col0, col1) = mat.split_at_mut(br * rows);
+            for alpha in 0..bl {
+                let base = alpha * chunk_size;
+                let t00 = &theta[base..base + br];
+                let t01 = &theta[base + br..base + 2 * br];
+                let t10 = &theta[base + 2 * br..base + 3 * br];
+                let t11 = &theta[base + 3 * br..base + 4 * br];
+                let r0 = alpha * 2;
+                for beta in 0..br {
+                    let (z00, z01, z10, z11) = (t00[beta], t01[beta], t10[beta], t11[beta]);
+                    let off = beta * rows + r0;
+                    col0[off] = g[0][0] * z00 + g[0][1] * z01 + g[0][2] * z10 + g[0][3] * z11;
+                    col0[off + 1] = g[2][0] * z00 + g[2][1] * z01 + g[2][2] * z10 + g[2][3] * z11;
+                    col1[off] = g[1][0] * z00 + g[1][1] * z01 + g[1][2] * z10 + g[1][3] * z11;
+                    col1[off + 1] = g[3][0] * z00 + g[3][1] * z01 + g[3][2] * z10 + g[3][3] * z11;
                 }
             }
         }
 
-        let svd_result = svd(mat, rows, cols);
-        let chi_new = truncated_svd_rank(&svd_result.s, self.svd_epsilon, self.max_bond_dim);
-        if !maintained && discards_resolvable_weight(&svd_result.s, chi_new) {
+        svd_with_workspace(&mut self.svd, &self.scratch_mat[..rows * cols], rows, cols);
+        let chi_new = truncated_svd_rank(&self.svd.result.s, self.svd_epsilon, self.max_bond_dim);
+        if !maintained && discards_resolvable_weight(&self.svd.result.s, chi_new) {
             return Ok(false);
         }
-        self.record_truncation(&svd_result.s, chi_new);
+        self.record_svd_truncation(chi_new);
 
         // A[k] has shape (bl, 2, chi_new) and A[k+1] shape (chi_new, 2, br).
         // U is column-major, U[col * rows + row]; V† is row-major,
@@ -970,6 +816,7 @@ impl MpsBackend {
         // bond allocates nothing per gate.
         let mut left_data = std::mem::take(&mut self.sites[left_site].data);
         let mut right_data = std::mem::take(&mut self.sites[right_site].data);
+        let svd_result = &self.svd.result;
         match weight {
             WeightSide::Right => {
                 fill_isometry_site_data(
@@ -979,11 +826,11 @@ impl MpsBackend {
                     bl,
                     chi_new,
                 );
-                fill_scaled_vt_data(&mut right_data, &svd_result, chi_new, 2, br);
+                fill_scaled_vt_data(&mut right_data, svd_result, chi_new, 2, br);
             }
             WeightSide::Left => {
-                fill_scaled_u_site_data(&mut left_data, &svd_result, bl, chi_new);
-                fill_vt_site_data(&mut right_data, &svd_result, chi_new, 2, br);
+                fill_scaled_u_site_data(&mut left_data, svd_result, bl, chi_new);
+                fill_vt_site_data(&mut right_data, svd_result, chi_new, 2, br);
             }
         }
 
@@ -1454,7 +1301,10 @@ impl MpsBackend {
         } else {
             (2 * t.bond_right, t.bond_left)
         };
-        schmidt::finish_schmidt_values(svd(&t.data, rows, cols).s)
+        let s =
+            svd_singular_values_with_workspace(&mut self.svd, &self.sites[site].data, rows, cols)
+                .to_vec();
+        schmidt::finish_schmidt_values(s)
     }
 
     /// Schmidt values from the eigenvalues of the reduced density matrix over
@@ -1504,9 +1354,8 @@ impl MpsBackend {
             .collect();
         let mut dim = 1usize;
         let mut kept = sites.iter().peekable();
-        for site in first..=last {
+        for (site, t) in self.sites.iter().enumerate().take(last + 1).skip(first) {
             let keep = kept.next_if_eq(&&site).is_some();
-            let t = &self.sites[site];
             let (bl, br) = (t.bond_left, t.bond_right);
             let width = 2 * br;
             // half[o, a', i, b] = sum_a env[o, a, a'] A[a, i, b]

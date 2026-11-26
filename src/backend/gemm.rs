@@ -26,6 +26,13 @@ pub(crate) fn gemm_tn<const CONJ_Y: bool>(
     n: usize,
 ) {
     debug_assert_eq!((x.len(), y.len(), out.len()), (r * m, r * n, m * n));
+    if m == 0 || n == 0 {
+        return;
+    }
+    if r == 0 {
+        out.fill(ZERO);
+        return;
+    }
     #[cfg(feature = "parallel")]
     if r * m * n >= MIN_FAER_GEMM_WORK {
         use faer::linalg::matmul::matmul;
@@ -61,6 +68,13 @@ pub(crate) fn gemm_nn(
     n: usize,
 ) {
     debug_assert_eq!((x.len(), y.len(), out.len()), (m * k, k * n, m * n));
+    if m == 0 || n == 0 {
+        return;
+    }
+    if k == 0 {
+        out.fill(ZERO);
+        return;
+    }
     #[cfg(feature = "parallel")]
     if m * k * n >= MIN_FAER_GEMM_WORK {
         faer_gemm_nn(out, x, y, m, k, n);
@@ -112,6 +126,13 @@ pub(crate) fn gemm_nh(
     n: usize,
 ) {
     debug_assert_eq!((x.len(), y.len(), out.len()), (m * k, n * k, m * n));
+    if m == 0 || n == 0 {
+        return;
+    }
+    if k == 0 {
+        out.fill(ZERO);
+        return;
+    }
     #[cfg(feature = "parallel")]
     if m * k * n >= MIN_FAER_GEMM_WORK {
         use faer::linalg::matmul::matmul;
@@ -132,6 +153,88 @@ pub(crate) fn gemm_nh(
                 .iter()
                 .zip(y_row)
                 .fold(ZERO, |acc, (&xv, &yv)| acc + xv * yv.conj());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::RngExt;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    fn random_vec(rng: &mut ChaCha8Rng, len: usize) -> Vec<Complex64> {
+        (0..len)
+            .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
+            .collect()
+    }
+
+    #[test]
+    fn gemm_zero_dimensions_do_not_panic_and_zero_fill_empty_inner() {
+        let sentinel = Complex64::new(9.0, -3.0);
+
+        let mut empty = [];
+        let z12 = [ZERO; 12];
+        gemm_nn(&mut empty, &[], &z12, 0, 3, 4);
+        gemm_nn(&mut empty, &z12, &[], 3, 4, 0);
+        gemm_nh(&mut empty, &[], &z12, 0, 3, 4);
+        gemm_nh(&mut empty, &z12, &[], 3, 4, 0);
+        gemm_tn::<false>(&mut empty, &[], &z12, 3, 0, 4);
+        gemm_tn::<true>(&mut empty, &z12, &[], 3, 4, 0);
+
+        let mut out_nn = vec![sentinel; 6];
+        gemm_nn(&mut out_nn, &[], &[], 2, 0, 3);
+        assert!(out_nn.iter().all(|&z| z == ZERO));
+
+        let mut out_nh = vec![sentinel; 6];
+        gemm_nh(&mut out_nh, &[], &[], 2, 0, 3);
+        assert!(out_nh.iter().all(|&z| z == ZERO));
+
+        let mut out_tn = vec![sentinel; 6];
+        gemm_tn::<false>(&mut out_tn, &[], &[], 0, 2, 3);
+        assert!(out_tn.iter().all(|&z| z == ZERO));
+        let mut out_tn_conj = vec![sentinel; 6];
+        gemm_tn::<true>(&mut out_tn_conj, &[], &[], 0, 2, 3);
+        assert!(out_tn_conj.iter().all(|&z| z == ZERO));
+    }
+
+    #[test]
+    fn gemm_nn_and_gemm_nh_match_reference_across_threshold() {
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        for &(m, k, n) in &[(7, 5, 11), (32, 32, 32), (64, 64, 64), (70, 65, 60)] {
+            let x = random_vec(&mut rng, m * k);
+            let y_nn = random_vec(&mut rng, k * n);
+            let mut out_nn = vec![Complex64::new(1.0, 1.0); m * n];
+            gemm_nn(&mut out_nn, &x, &y_nn, m, k, n);
+            for i in 0..m {
+                for j in 0..n {
+                    let mut ref_val = ZERO;
+                    for p in 0..k {
+                        ref_val += x[i * k + p] * y_nn[p * n + j];
+                    }
+                    assert!(
+                        (out_nn[i * n + j] - ref_val).norm() < 1e-12,
+                        "gemm_nn ({m},{k},{n})[{i},{j}]"
+                    );
+                }
+            }
+
+            let y_nh = random_vec(&mut rng, n * k);
+            let mut out_nh = vec![Complex64::new(1.0, 1.0); m * n];
+            gemm_nh(&mut out_nh, &x, &y_nh, m, k, n);
+            for i in 0..m {
+                for j in 0..n {
+                    let mut ref_val = ZERO;
+                    for p in 0..k {
+                        ref_val += x[i * k + p] * y_nh[j * k + p].conj();
+                    }
+                    assert!(
+                        (out_nh[i * n + j] - ref_val).norm() < 1e-12,
+                        "gemm_nh ({m},{k},{n})[{i},{j}]"
+                    );
+                }
+            }
         }
     }
 }

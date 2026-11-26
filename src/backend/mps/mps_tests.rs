@@ -594,6 +594,12 @@ fn svd_faer_recovers_the_vectors_divide_and_conquer_loses() {
         "relative reconstruction error {}",
         err.sqrt() / norm
     );
+
+    let sv = svd_singular_values(&a, n, n);
+    assert_eq!(sv.len(), r.s.len());
+    for (k, (&got, &want)) in sv.iter().zip(&r.s).enumerate() {
+        assert!((got - want).abs() < 1e-12, "s[{k}]: {got} vs {want}");
+    }
 }
 
 // A 128 by 128 product of rank 64 with a graded spectrum, the shape of a SWAP
@@ -651,6 +657,12 @@ fn svd_faer_rejects_an_inaccurate_divide_and_conquer() {
         res.vt[k * res.vt_cols + c]
     });
     assert!(error < 1e-13, "relative reconstruction error {error:e}");
+
+    let sv = svd_singular_values(&a, n, n);
+    assert_eq!(sv.len(), res.s.len());
+    for (k, (&got, &want)) in sv.iter().zip(&res.s).enumerate() {
+        assert!((got - want).abs() < 1e-12, "s[{k}]: {got} vs {want}");
+    }
 }
 
 #[test]
@@ -3604,5 +3616,403 @@ fn windowed_expectations_match_stored_environments_on_random_chains() {
                 "n={n}, max bond {max_bond}, {observable:?}: windowed {w}, stored {s}"
             );
         }
+    }
+}
+
+#[test]
+fn shift_center_rank_drop_and_faer_crossover_preserve_lengths_and_state() {
+    // 1) Rank drop after growing scratch_absorb: ensure swap sets exact site.data.len().
+    let circuit = crate::circuits::brickwork_circuit(8, 6, 42);
+    let mut b = mps_after(&circuit, 64);
+    b.establish_center(0);
+    b.move_center(7);
+    let peak_cap = b.scratch_absorb.capacity();
+    assert!(peak_cap > 0);
+    // Disentangle a site by projecting onto |0>, dropping rank on subsequent sweeps.
+    for q in [2usize, 5] {
+        b.project_z_outcome(q, false).unwrap();
+    }
+    let expected = b.export_statevector().unwrap();
+    b.move_center(0);
+    b.assert_gauge(0);
+    b.move_center(7);
+    b.assert_gauge(7);
+    for (idx, site) in b.sites.iter().enumerate() {
+        assert_eq!(
+            site.data.len(),
+            site.bond_left * 2 * site.bond_right,
+            "site {idx} data len mismatch after rank drop"
+        );
+    }
+    let actual = b.export_statevector().unwrap();
+    for (i, (a, e)) in actual.iter().zip(&expected).enumerate() {
+        assert!((a - e).norm() < 1e-12, "amp {i}: {a} vs {e}");
+    }
+
+    // 2) Synthetic chain crossing MIN_FAER_GEMM_WORK (chi=64, bond=64, 2*br=64 -> 262_144).
+    let mut rng = ChaCha8Rng::seed_from_u64(17);
+    let mut rand_data = |len: usize| -> Vec<Complex64> {
+        (0..len)
+            .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
+            .collect()
+    };
+    let mut big = MpsBackend::new(42, 128);
+    big.init(4, 0).unwrap();
+    let dims = [(1usize, 32usize), (32, 64), (64, 32), (32, 1)];
+    for (site, &(bl, br)) in dims.iter().enumerate() {
+        big.sites[site] = SiteTensor {
+            bond_left: bl,
+            bond_right: br,
+            data: rand_data(bl * 2 * br),
+        };
+    }
+    let before = big.export_statevector().unwrap();
+    big.center = Some(1);
+    big.shift_center_right(1);
+    assert_eq!(
+        big.sites[1].data.len(),
+        big.sites[1].bond_left * 2 * big.sites[1].bond_right
+    );
+    assert_eq!(
+        big.sites[2].data.len(),
+        big.sites[2].bond_left * 2 * big.sites[2].bond_right
+    );
+    let after_right = big.export_statevector().unwrap();
+    for (i, (a, e)) in after_right.iter().zip(&before).enumerate() {
+        assert!((a - e).norm() < 1e-11, "right shift amp {i}: {a} vs {e}");
+    }
+    big.shift_center_left(2);
+    assert_eq!(
+        big.sites[1].data.len(),
+        big.sites[1].bond_left * 2 * big.sites[1].bond_right
+    );
+    assert_eq!(
+        big.sites[2].data.len(),
+        big.sites[2].bond_left * 2 * big.sites[2].bond_right
+    );
+    let after_left = big.export_statevector().unwrap();
+    for (i, (a, e)) in after_left.iter().zip(&before).enumerate() {
+        assert!((a - e).norm() < 1e-11, "left shift amp {i}: {a} vs {e}");
+    }
+}
+
+#[test]
+fn mps_clone_leaves_all_scratch_and_svd_workspaces_empty() {
+    let circuit = crate::circuits::brickwork_circuit(8, 8, 42);
+    let mut b = mps_after(&circuit, 64);
+    b.establish_center(0);
+    b.move_center(7);
+    let _ = b.schmidt_values(&[0, 1, 2]).unwrap();
+    assert!(b.scratch_theta.capacity() > 0);
+    assert!(b.scratch_mat.capacity() > 0);
+    assert!(b.scratch_absorb.capacity() > 0);
+    assert!(b.qr.q.capacity() > 0);
+    assert!(b.qr.r.capacity() > 0);
+    assert!(b.svd.result.u.capacity() > 0);
+    assert!(b.svd.result.s.capacity() > 0);
+    assert!(b.svd.result.vt.capacity() > 0);
+
+    let cloned = b.clone();
+    assert_eq!(cloned.scratch_theta.capacity(), 0);
+    assert_eq!(cloned.scratch_mat.capacity(), 0);
+    assert_eq!(cloned.scratch_absorb.capacity(), 0);
+    assert_eq!(cloned.qr.q.capacity(), 0);
+    assert_eq!(cloned.qr.r.capacity(), 0);
+    assert_eq!(cloned.svd.result.u.capacity(), 0);
+    assert_eq!(cloned.svd.result.s.capacity(), 0);
+    assert_eq!(cloned.svd.result.vt.capacity(), 0);
+}
+
+#[test]
+fn cut_adjacent_pair_fused_matches_dense_across_shapes_and_non_unitary_gates() {
+    let mut rng = ChaCha8Rng::seed_from_u64(99);
+    let mut non_unitary = [[ZERO; 4]; 4];
+    for row in &mut non_unitary {
+        for cell in row {
+            *cell = Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5);
+        }
+    }
+    let mut rand_data = |len: usize| -> Vec<Complex64> {
+        (0..len)
+            .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
+            .collect()
+    };
+
+    for &(bl, bond_mid, br) in &[(1, 1, 1), (1, 4, 16), (16, 4, 1), (32, 8, 32), (32, 64, 32)] {
+        for &left_is_first in &[true, false] {
+            let mut b = MpsBackend::new(42, 1024);
+            b.svd_epsilon = 0.0;
+            b.init(4, 0).unwrap();
+            b.sites[0] = SiteTensor {
+                bond_left: 1,
+                bond_right: bl,
+                data: rand_data(2 * bl),
+            };
+            b.sites[1] = SiteTensor {
+                bond_left: bl,
+                bond_right: bond_mid,
+                data: rand_data(bl * 2 * bond_mid),
+            };
+            b.sites[2] = SiteTensor {
+                bond_left: bond_mid,
+                bond_right: br,
+                data: rand_data(bond_mid * 2 * br),
+            };
+            b.sites[3] = SiteTensor {
+                bond_left: br,
+                bond_right: 1,
+                data: rand_data(br * 2),
+            };
+            let before = b.export_statevector().unwrap();
+
+            // Apply the 2q gate to qubits (1, 2) or (2, 1) directly on `before` as reference.
+            let mut expected = vec![ZERO; 16];
+            let g = if left_is_first {
+                non_unitary
+            } else {
+                swap_gate_qubits(&non_unitary)
+            };
+            for (basis_out, slot) in expected.iter_mut().enumerate() {
+                let q1p = (basis_out >> 1) & 1;
+                let q2p = (basis_out >> 2) & 1;
+                let mut acc = ZERO;
+                for q1 in 0..2usize {
+                    for q2 in 0..2usize {
+                        let basis_in = (basis_out & !0b0110) | (q1 << 1) | (q2 << 2);
+                        acc += g[q1p * 2 + q2p][q1 * 2 + q2] * before[basis_in];
+                    }
+                }
+                *slot = acc;
+            }
+
+            let ok = b.cut_adjacent_pair(&non_unitary, 1, left_is_first).unwrap();
+            assert!(ok);
+            let exp_norm = l2_norm(&expected);
+            for z in &mut expected {
+                *z /= exp_norm;
+            }
+            let actual = b.export_statevector().unwrap();
+            for (i, (a, e)) in actual.iter().zip(&expected).enumerate() {
+                assert!(
+                    (a - e).norm() < 1e-11,
+                    "shape ({bl},{bond_mid},{br}) left_first={left_is_first} amp {i}: {a} vs {e}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn contract_n_sites_gemm_matches_reference_across_faer_threshold() {
+    let mut rng = ChaCha8Rng::seed_from_u64(123);
+    let mut rand_data = |len: usize| -> Vec<Complex64> {
+        (0..len)
+            .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
+            .collect()
+    };
+
+    // At k=2 (3 sites): bl=16, cur_dim=4 -> bl*cur_dim=64, bond_mid=64, 2*next_right=128 (524_288 >= MIN_FAER_GEMM_WORK).
+    let mut b = MpsBackend::new(42, 256);
+    b.init(5, 0).unwrap();
+    let dims = [(1usize, 16usize), (16, 48), (48, 64), (64, 64), (64, 1)];
+    for (site, &(bl, br)) in dims.iter().enumerate() {
+        b.sites[site] = SiteTensor {
+            bond_left: bl,
+            bond_right: br,
+            data: rand_data(bl * 2 * br),
+        };
+    }
+
+    let (theta, bl, br) = b.contract_n_sites(1, 3);
+    assert_eq!(bl, 16);
+    assert_eq!(br, 64);
+    assert_eq!(theta.len(), bl * 8 * br);
+
+    // Direct scalar reference contraction of sites 1, 2, 3.
+    let s1 = &b.sites[1];
+    let s2 = &b.sites[2];
+    let s3 = &b.sites[3];
+    for alpha in 0..bl {
+        for i in 0..2 {
+            for j in 0..2 {
+                for k in 0..2 {
+                    for beta in 0..br {
+                        let mut ref_val = ZERO;
+                        for g1 in 0..s1.bond_right {
+                            let a1 = s1.data[s1.idx(alpha, i, g1)];
+                            for g2 in 0..s2.bond_right {
+                                ref_val +=
+                                    a1 * s2.data[s2.idx(g1, j, g2)] * s3.data[s3.idx(g2, k, beta)];
+                            }
+                        }
+                        let s = (i * 2 + j) * 2 + k;
+                        let got = theta[alpha * (8 * br) + s * br + beta];
+                        assert!(
+                            (got - ref_val).norm() < 1e-11,
+                            "theta[{alpha},{s},{beta}]: {got} vs {ref_val}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn thin_qr_faer_tall_square_wide_and_rank_deficient_reuse() {
+    let mut rng = ChaCha8Rng::seed_from_u64(77);
+    let mut rand_col_major = |rows: usize, cols: usize| -> Vec<Complex64> {
+        (0..rows * cols)
+            .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
+            .collect()
+    };
+
+    let check_qr = |qr: &ThinQr, a: &[Complex64], rows: usize, cols: usize, label: &str| {
+        let k = qr.rank;
+        assert_eq!(k, rows.min(cols), "{label}: rank");
+        for c1 in 0..k {
+            for c2 in 0..k {
+                let dot: Complex64 = (0..rows)
+                    .map(|r| qr.q[c1 * rows + r].conj() * qr.q[c2 * rows + r])
+                    .sum();
+                let target = if c1 == c2 { ONE } else { ZERO };
+                assert!(
+                    (dot - target).norm() < 1e-12,
+                    "{label}: Q^H Q[{c1},{c2}] = {dot}"
+                );
+            }
+        }
+        let norm = l2_norm(a).max(1.0);
+        let mut err = 0.0f64;
+        for c in 0..cols {
+            for r in 0..rows {
+                let recon: Complex64 = (0..k)
+                    .map(|p| qr.q[p * rows + r] * qr.r[p * cols + c])
+                    .sum();
+                err += (recon - a[c * rows + r]).norm_sqr();
+            }
+        }
+        assert!(
+            err.sqrt() < 1e-11 * norm,
+            "{label}: reconstruction error {}",
+            err.sqrt() / norm
+        );
+    };
+
+    let mut qr = ThinQr::default();
+
+    // Tall (256x128), wide (128x256), square (128x128), all >= QR_FAER_MIN_ELEMS (16384).
+    for &(rows, cols, label) in &[(256, 128, "tall"), (128, 256, "wide"), (128, 128, "square")] {
+        let a = rand_col_major(rows, cols);
+        qr.factorize(&a, rows, cols);
+        check_qr(&qr, &a, rows, cols, label);
+    }
+
+    // Rank-deficient 128x128 (rank 32).
+    let (n, rank) = (128usize, 32usize);
+    let left = rand_col_major(n, rank);
+    let right = rand_col_major(rank, n);
+    let mut rank_def = vec![ZERO; n * n];
+    for c in 0..n {
+        for r in 0..n {
+            rank_def[c * n + r] = (0..rank)
+                .map(|p| left[p * n + r] * right[c * rank + p])
+                .sum();
+        }
+    }
+    qr.factorize(&rank_def, n, n);
+    check_qr(&qr, &rank_def, n, n, "rank_deficient");
+
+    // All-zero 128x128 after shrinking/reusing.
+    let zeros = vec![ZERO; n * n];
+    qr.factorize(&zeros, n, n);
+    check_qr(&qr, &zeros, n, n, "zero");
+}
+
+#[test]
+fn svd_workspace_reuse_across_shapes_and_paths() {
+    let mut rng = ChaCha8Rng::seed_from_u64(55);
+    let mut ws = SvdWorkspace::default();
+
+    for &(m, n) in &[(300, 32), (6, 4), (32, 300), (4, 6), (24, 16), (8, 8)] {
+        let k = m.min(n);
+        let a: Vec<Complex64> = (0..m * n)
+            .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
+            .collect();
+        svd_with_workspace(&mut ws, &a, m, n);
+        let r = &ws.result;
+        assert_eq!(r.u_rows, m);
+        assert_eq!(r.vt_cols, n);
+        assert_eq!(r.s.len(), k);
+        assert_eq!(r.u.len(), m * k);
+        assert_eq!(r.vt.len(), k * n);
+        assert!(r.s.windows(2).all(|w| w[0] >= w[1]));
+
+        let norm = l2_norm(&a).max(1.0);
+        let mut err = 0.0f64;
+        for c in 0..n {
+            for row in 0..m {
+                let x: Complex64 = (0..k)
+                    .map(|p| r.u[p * r.u_rows + row] * r.s[p] * r.vt[p * r.vt_cols + c])
+                    .sum();
+                err += (x - a[c * m + row]).norm_sqr();
+            }
+        }
+        assert!(
+            err.sqrt() < 1e-11 * norm,
+            "({m}, {n}) reconstruction error {}",
+            err.sqrt() / norm
+        );
+    }
+}
+
+#[test]
+fn svd_singular_values_matches_full_svd_across_shapes() {
+    let mut rng = ChaCha8Rng::seed_from_u64(88);
+    let mut ws = SvdWorkspace::default();
+
+    for &(m, n) in &[(300, 32), (32, 300), (12, 8), (8, 12), (20, 20)] {
+        let a: Vec<Complex64> = (0..m * n)
+            .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
+            .collect();
+        let full = svd(&a, m, n);
+        let s_only = svd_singular_values_with_workspace(&mut ws, &a, m, n).to_vec();
+        let s_convenience = svd_singular_values(&a, m, n);
+        assert_eq!(s_only.len(), full.s.len());
+        assert_eq!(s_convenience.len(), full.s.len());
+        for (i, ((&g1, &g2), &w)) in s_only.iter().zip(&s_convenience).zip(&full.s).enumerate() {
+            assert!((g1 - w).abs() < 1e-12, "({m},{n}) ws s[{i}]: {g1} vs {w}");
+            assert!((g2 - w).abs() < 1e-12, "({m},{n}) vec s[{i}]: {g2} vs {w}");
+        }
+    }
+}
+
+#[test]
+fn schmidt_density_faer_evd_handles_rank_deficient_and_large_rho() {
+    // 1) Pure product state reduced density matrix at dim=16 (dim*dim = 256 -> faer_hermitian_eigenvalues).
+    let dim = 16usize;
+    let mut rank1_rho = vec![ZERO; dim * dim];
+    rank1_rho[0] = ONE;
+    // Inject tiny Hermitian rounding noise on off-zero modes.
+    rank1_rho[5 * dim + 5] = Complex64::new(-1e-17, 0.0);
+    rank1_rho[7 * dim + 7] = Complex64::new(1e-17, 0.0);
+    let vals = schmidt::schmidt_values_from_density(&rank1_rho, dim);
+    assert_eq!(vals.len(), 1);
+    assert!((vals[0] - 1.0).abs() < 1e-12);
+
+    // 2) Entangled 8q brickwork state over non-contiguous 4q subsystem (dim=16).
+    let circuit = crate::circuits::brickwork_circuit(8, 6, 42);
+    let mut mps = mps_after(&circuit, 128);
+    let mut sv = crate::backend::statevector::StatevectorBackend::new(42);
+    sv.init(8, 0).unwrap();
+    sv.apply_instructions(&circuit.instructions).unwrap();
+
+    let sub = [0usize, 2, 4, 6];
+    let got = mps.schmidt_values(&sub).unwrap();
+    let want = sv.schmidt_values(&sub).unwrap();
+    assert_eq!(got.len(), want.len());
+    for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
+        assert!((g - w).abs() < 1e-11, "s[{i}]: {g} vs {w}");
     }
 }

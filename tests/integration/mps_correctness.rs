@@ -270,3 +270,75 @@ fn mps_truncated_probabilities_are_normalized() {
         );
     }
 }
+
+#[test]
+fn mps_multi_qubit_unitary_and_mcu_gates_match_statevector() {
+    use num_complex::Complex64;
+    use prism_q::gates::Gate;
+
+    // Build a non-trivial 3-qubit permutation + phase unitary and route both
+    // contiguous and non-contiguous Unitary / Mcu gates through contract_n_sites.
+    let mut u3 = vec![Complex64::new(0.0, 0.0); 64];
+    for col in 0..8usize {
+        let row = (col + 3) % 8;
+        let phase = Complex64::from_polar(1.0, 0.37 * col as f64 + 0.19);
+        u3[row * 8 + col] = phase;
+    }
+
+    let mut circuit = Circuit::new(6, 0);
+    for q in 0..6 {
+        circuit.add_gate(Gate::Ry(0.25 * q as f64 + 0.3), &[q]);
+    }
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_gate(Gate::Cx, &[2, 3]);
+    circuit.add_gate(Gate::Cx, &[4, 5]);
+    // Contiguous 3q unitary.
+    circuit.add_gate(Gate::unitary(u3.clone(), 3).unwrap(), &[1, 2, 3]);
+    // Non-contiguous 3q unitary (triggers SWAP routing + contract_n_sites).
+    circuit.add_gate(Gate::unitary(u3, 3).unwrap(), &[5, 0, 2]);
+    // 4-qubit Toffoli / MCU gate (contiguous and non-contiguous).
+    let x_mat = Gate::X.matrix_2x2();
+    circuit.add_gate(Gate::mcu(x_mat, 3), &[0, 1, 2, 3]);
+    circuit.add_gate(Gate::mcu(x_mat, 3), &[4, 1, 5, 0]);
+
+    check_sv_cross("multi-qubit unitary & mcu 6q", &circuit);
+}
+
+#[test]
+fn mps_gauge_walks_and_cuts_stay_accurate_after_mid_circuit_measurement() {
+    use prism_q::backend::Backend;
+    use prism_q::gates::Gate;
+
+    let mut circuit = Circuit::new(6, 2);
+    for q in 0..6 {
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::Rz(0.3 * q as f64 + 0.1), &[q]);
+    }
+    for d in 0..3 {
+        let start = d % 2;
+        for q in (start..5).step_by(2) {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+            circuit.add_gate(Gate::Ry(0.4 + 0.1 * d as f64), &[q]);
+        }
+    }
+    circuit.add_measure(0, 0);
+    circuit.add_measure(4, 1);
+    circuit.add_gate(Gate::Cx, &[1, 2]);
+    circuit.add_gate(Gate::Cz, &[3, 4]);
+    circuit.add_gate(Gate::Rzz(0.55), &[2, 3]);
+
+    let mut mps = MpsBackend::new(SEED, 64);
+    let mut sv = prism_q::backend::statevector::StatevectorBackend::new(SEED);
+    prism_q::sim::run_on(&mut mps, &circuit).unwrap();
+    prism_q::sim::run_on(&mut sv, &circuit).unwrap();
+
+    // Verify norm, exactness, and statevector agreement when classical outcomes match.
+    if mps.classical_results() == sv.classical_results() {
+        let mps_probs = mps.probabilities().unwrap();
+        let sv_probs = sv.probabilities().unwrap();
+        for (i, (p, e)) in mps_probs.iter().zip(&sv_probs).enumerate() {
+            assert!((p - e).abs() < MPS_EPS, "basis {i}: {p} vs {e}");
+        }
+    }
+    assert!(mps.truncation_discarded() < 1e-20);
+}

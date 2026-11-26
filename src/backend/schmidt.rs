@@ -4,7 +4,7 @@
 
 use num_complex::Complex64;
 
-use super::mps::svd;
+use super::mps::svd_singular_values;
 use crate::error::{PrismError, Result};
 use crate::limits::{LimitKnob, ResolvedLimits};
 
@@ -107,16 +107,18 @@ const MAX_JACOBI_SIDE: usize = 8;
 /// any order, to about `1e-16` of the largest.
 ///
 /// Above `JACOBI_EIGEN_ELEMENTS` under `parallel` the matrix goes to
-/// `svd_faer`, since the singular values of a semidefinite matrix are its
-/// eigenvalues. `svd_jacobi` is not used below it: that sweep stops on a
-/// criterion absolute in the Frobenius norm, which leaves an eigenvalue near
-/// `1e-7` of the largest unresolved, and on the squared spectrum a density
-/// matrix carries that is a Schmidt value near `3e-4`. This cyclic Jacobi stops
-/// per pair on [`EIGEN_PAIR_TOL`] instead, at `O(dim^3)` per sweep.
+/// `faer_hermitian_eigenvalues` (`self_adjoint_evd` with
+/// `ComputeEigenvectors::No`), falling back to `svd_singular_values` if it
+/// fails. `svd_jacobi` is not used below it: that sweep stops on a criterion
+/// absolute in the Frobenius norm, which leaves an eigenvalue near `1e-7` of
+/// the largest unresolved, and on the squared spectrum a density matrix carries
+/// that is a Schmidt value near `3e-4`. This cyclic Jacobi stops per pair on
+/// [`EIGEN_PAIR_TOL`] instead, at `O(dim^3)` per sweep.
 fn hermitian_eigenvalues(a: &[Complex64], dim: usize) -> Vec<f64> {
     #[cfg(feature = "parallel")]
     if dim * dim >= JACOBI_EIGEN_ELEMENTS {
-        return super::mps::svd_faer(a, dim, dim).s;
+        return faer_hermitian_eigenvalues(a, dim)
+            .unwrap_or_else(|| svd_singular_values(a, dim, dim));
     }
     let mut a = a.to_vec();
     let at = |p: usize, q: usize| p * dim + q;
@@ -160,6 +162,39 @@ fn hermitian_eigenvalues(a: &[Complex64], dim: usize) -> Vec<f64> {
         }
     }
     (0..dim).map(|i| a[at(i, i)].re).collect()
+}
+
+#[cfg(feature = "parallel")]
+fn faer_hermitian_eigenvalues(a: &[Complex64], dim: usize) -> Option<Vec<f64>> {
+    use faer::diag::Diag;
+    use faer::dyn_stack::{MemBuffer, MemStack};
+    use faer::linalg::evd::{self, ComputeEigenvectors, SelfAdjointEvdParams};
+    use faer::{Auto, MatRef};
+
+    let par = faer::get_global_parallelism();
+    let params = <SelfAdjointEvdParams as Auto<Complex64>>::auto();
+    let scratch = evd::self_adjoint_evd_scratch::<Complex64>(
+        dim,
+        ComputeEigenvectors::No,
+        par,
+        params.into(),
+    );
+    let mut s_diag = Diag::<Complex64>::zeros(dim);
+    // `a` is row-major Hermitian, so reading it column-major passes its conjugate,
+    // which is also Hermitian with the same real eigenvalues.
+    evd::self_adjoint_evd(
+        MatRef::from_column_major_slice(a, dim, dim),
+        s_diag.as_mut(),
+        None,
+        par,
+        MemStack::new(&mut MemBuffer::new(scratch)),
+        params.into(),
+    )
+    .ok()?;
+
+    let s_col = s_diag.column_vector();
+    let vals: Vec<f64> = (0..dim).map(|i| s_col[i].re).collect();
+    vals.iter().all(|x| x.is_finite()).then_some(vals)
 }
 
 /// `-sum p ln p` in nats over `p = s^2 / sum s^2`.
@@ -285,5 +320,5 @@ pub(crate) fn dense_schmidt_values(
         }
         col_bits = col_bits.wrapping_sub(col_mask) & col_mask;
     }
-    Ok(finish_schmidt_values(svd(&mat, rows, cols).s))
+    Ok(finish_schmidt_values(svd_singular_values(&mat, rows, cols)))
 }

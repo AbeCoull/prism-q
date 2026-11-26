@@ -64,6 +64,26 @@ impl ClassicalCondition {
         }
     }
 
+    /// Check that the condition reads only bits inside the classical register.
+    pub fn validate_bits(&self, num_bits: usize) -> crate::error::Result<()> {
+        use super::dynamic::check_bit;
+
+        match self {
+            Self::BitIsOne(bit) | Self::BitIsZero(bit) => check_bit(*bit, num_bits),
+            Self::Parity { bits, .. } => bits.iter().try_for_each(|&bit| check_bit(bit, num_bits)),
+            Self::RegisterEquals { offset, size, .. }
+            | Self::RegisterNotEquals { offset, size, .. } => {
+                if *offset <= num_bits && *size <= num_bits - offset {
+                    return Ok(());
+                }
+                Err(crate::error::PrismError::InvalidClassicalBit {
+                    index: offset.saturating_add(size.saturating_sub(1)),
+                    register_size: num_bits,
+                })
+            }
+        }
+    }
+
     pub(super) fn for_each_bit(&self, mut f: impl FnMut(usize)) {
         match self {
             ClassicalCondition::BitIsOne(bit) | ClassicalCondition::BitIsZero(bit) => f(*bit),
@@ -417,25 +437,80 @@ fn remap_condition(
     }
 }
 
-/// `gate` with the qubit range a [`Gate::QftBlock`] carries in its payload moved
-/// under `qubit`, which must keep the block's qubits consecutive and ascending.
+/// Relabel embedded qubits. A [`Gate::QftBlock`] must stay consecutive and ascending.
 pub(super) fn remap_gate(gate: &Gate, qubit: &impl Fn(usize) -> usize) -> Gate {
-    match gate {
-        Gate::QftBlock {
-            start,
-            num,
-            inverse,
-            swaps,
-            big_endian,
-        } => Gate::QftBlock {
-            start: qubit(*start as usize) as u8,
-            num: *num,
-            inverse: *inverse,
-            swaps: *swaps,
-            big_endian: *big_endian,
-        },
-        other => other.clone(),
+    use crate::gates::DiagEntry;
+
+    let mut gate = gate.clone();
+    let map = |q: &mut usize| *q = qubit(*q);
+    match &mut gate {
+        Gate::QftBlock { start, .. } => *start = qubit(*start as usize) as u8,
+        Gate::BatchPhase(data) => data.phases.iter_mut().for_each(|(q, _)| map(q)),
+        Gate::MultiFused(data) => data.gates.iter_mut().for_each(|(q, _)| map(q)),
+        Gate::BatchRzz(data) => {
+            for (a, b, _) in &mut data.edges {
+                map(a);
+                map(b);
+            }
+        }
+        Gate::Multi2q(data) => {
+            for (a, b, _) in &mut data.gates {
+                map(a);
+                map(b);
+            }
+        }
+        Gate::DiagonalBatch(data) => {
+            for entry in &mut data.entries {
+                match entry {
+                    DiagEntry::Phase1q { qubit, .. } => map(qubit),
+                    DiagEntry::Phase2q { q0, q1, .. } | DiagEntry::Parity2q { q0, q1, .. } => {
+                        map(q0);
+                        map(q1);
+                    }
+                }
+            }
+        }
+        Gate::MultiPauliRot(data) => {
+            let remap_mask = |mut mask: usize| {
+                let mut mapped = 0;
+                while mask != 0 {
+                    mapped |= 1 << qubit(mask.trailing_zeros() as usize);
+                    mask &= mask - 1;
+                }
+                mapped
+            };
+            for (x, z, _) in &mut data.rotations {
+                *x = remap_mask(*x);
+                *z = remap_mask(*z);
+            }
+        }
+        Gate::Id
+        | Gate::X
+        | Gate::Y
+        | Gate::Z
+        | Gate::H
+        | Gate::S
+        | Gate::Sdg
+        | Gate::T
+        | Gate::Tdg
+        | Gate::SX
+        | Gate::SXdg
+        | Gate::Rx(_)
+        | Gate::Ry(_)
+        | Gate::Rz(_)
+        | Gate::P(_)
+        | Gate::Rzz(_)
+        | Gate::Cx
+        | Gate::Cz
+        | Gate::Swap
+        | Gate::Cu(_)
+        | Gate::Mcu(_)
+        | Gate::Fused(_)
+        | Gate::Fused2q(_)
+        | Gate::PauliRot(_)
+        | Gate::Unitary(_) => {}
     }
+    gate
 }
 
 /// Rebuild `inst` under a qubit and classical-bit relabeling.

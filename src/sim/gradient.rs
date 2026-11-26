@@ -1013,14 +1013,17 @@ pub(crate) fn prepared_shift(
             .sum())
     };
 
+    let _tensor_scope = super::batch::ShiftTensorScope::enter();
     let value = energy(prepared, None)?;
     let mut gradient = vec![0.0; num_slots];
     if links.is_empty() {
         return Ok(ExpectationGradient { value, gradient });
     }
 
+    let cached_verdict = super::batch::ShiftTensorScope::current();
     let shift = std::f64::consts::FRAC_PI_2;
     let terms = prepared.map_split_if(split, links, |worker, link| {
+        let _worker_scope = super::batch::ShiftTensorScope::enter_with(cached_verdict);
         let plus = energy(worker, Some((link.instruction, shift)))?;
         let minus = energy(worker, Some((link.instruction, -shift)))?;
         Ok(0.5 * (plus - minus))

@@ -966,7 +966,7 @@ fn target_feature_kernel_count_is_pinned() {
         ("src/backend/statevector/kernels/mod.rs", 0),
         ("src/backend/statevector/kernels/batch_tables/mod.rs", 4),
         ("src/backend/statevector/kernels/pauli_rot.rs", 0),
-        ("src/backend/statevector/kernels/qft/mod.rs", 15),
+        ("src/backend/statevector/kernels/qft/mod.rs", 27),
         ("src/backend/statevector/kernels/tiling.rs", 0),
         ("src/sim/compiled/accumulator.rs", 2),
         ("src/sim/compiled/bts.rs", 4),

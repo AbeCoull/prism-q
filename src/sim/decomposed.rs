@@ -16,8 +16,8 @@ use super::{
     BackendKind, ExecutionPlan, FactoredBlock, Probabilities, ProbabilityRoute, RunMetadata,
     RunOutcome, ShotsResult, SimOptions,
     dispatch::{BackendPlan, TemporalCliffordPlan},
-    ensure_saves_recorded, execute_circuit, expand_for_backend, fuse_for_backend,
-    plan_probability_route, plan_temporal_clifford, resolve, run_route, run_temporal_clifford,
+    execute_circuit, expand_for_backend, fuse_for_backend, plan_probability_route,
+    plan_temporal_clifford, resolve, run_route, run_temporal_clifford,
 };
 
 pub(super) const MIN_DECOMPOSITION_QUBITS: usize = 8;
@@ -150,18 +150,16 @@ impl BlockRoute {
         opts: &SimOptions,
         limits: &ResolvedLimits,
     ) -> Result<RunOutcome> {
-        let outcome = match self {
+        match self {
             BlockRoute::TemporalClifford(plan) => {
-                run_temporal_clifford(plan, seed, opts.probabilities)?
+                run_temporal_clifford(plan, seed, opts.probabilities)
             }
             BlockRoute::Backend { plan, fused } => {
                 let mut backend = plan.build(seed, limits);
-                execute_circuit(&mut *backend, fused, opts)?
+                execute_circuit(&mut *backend, fused, opts)
             }
-            BlockRoute::Route(route) => run_route(kind, block, seed, *opts, route, limits)?,
-        };
-        ensure_saves_recorded(block, &outcome)?;
-        Ok(outcome)
+            BlockRoute::Route(route) => run_route(kind, block, seed, *opts, route, limits),
+        }
     }
 }
 

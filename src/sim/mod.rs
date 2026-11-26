@@ -376,14 +376,7 @@ fn apply_fused_without_saves(
     circuit: &Circuit,
     terminal: &str,
 ) -> Result<()> {
-    if circuit.save_count() > 0 {
-        return Err(PrismError::IncompatibleBackend {
-            backend: backend.name().to_string(),
-            reason: format!(
-                "save points are returned by `run`, and `{terminal}` has nowhere to put them"
-            ),
-        });
-    }
+    decline_saves(circuit, backend.name(), terminal)?;
     apply_fused_circuit(backend, circuit).map(|_| ())
 }
 
@@ -558,24 +551,14 @@ fn probs_only_result(probs: Vec<f64>, metadata: RunMetadata) -> RunOutcome {
     }
 }
 
-/// Fail rather than return a run that quietly skipped a save point.
-///
-/// Routes that cannot read a state mid-circuit decline by name where they meet
-/// the instruction. This is the backstop for a route that instead drops the
-/// instruction while rewriting the circuit, which is what the decomposed and
-/// exact-mixture paths do.
-fn ensure_saves_recorded(circuit: &Circuit, outcome: &RunOutcome) -> Result<()> {
-    let wanted = circuit.save_count();
-    if wanted == outcome.saves.len() {
-        return Ok(());
+fn decline_saves(circuit: &Circuit, backend: impl std::fmt::Display, terminal: &str) -> Result<()> {
+    if let Some((_, label)) = circuit.save_points().next() {
+        return Err(PrismError::IncompatibleBackend {
+            backend: backend.to_string(),
+            reason: format!("{terminal} cannot return save point `{label}`"),
+        });
     }
-    Err(PrismError::IncompatibleBackend {
-        backend: format!("{:?}", outcome.metadata.backend),
-        reason: format!(
-            "circuit carries {wanted} save point(s) and the route that ran recorded {}",
-            outcome.saves.len()
-        ),
-    })
+    Ok(())
 }
 
 fn try_backend_probabilities(backend: &dyn Backend) -> Result<Option<Probabilities>> {
@@ -659,32 +642,29 @@ fn apply_recording_saves(
 /// cannot produce the requested form fails here with its own message rather
 /// than needing a save implementation of its own.
 fn read_save(backend: &mut dyn Backend, spec: SaveSpec, label: &str) -> Result<SavedValue> {
-    let named = |err: crate::error::PrismError| match err {
-        crate::error::PrismError::IncompatibleBackend { backend, reason } => {
-            crate::error::PrismError::IncompatibleBackend {
-                backend,
-                reason: format!("save point `{label}`: {reason}"),
-            }
-        }
-        other => other,
-    };
     match spec {
-        SaveSpec::StateVector => backend
-            .export_statevector()
-            .map(SavedValue::StateVector)
-            .map_err(named),
-        SaveSpec::Probabilities => backend
-            .probabilities()
-            .map(SavedValue::Probabilities)
-            .map_err(named),
+        SaveSpec::StateVector => backend.export_statevector().map(SavedValue::StateVector),
+        SaveSpec::Probabilities => backend.probabilities().map(SavedValue::Probabilities),
         SaveSpec::DensityMatrix => {
             let whole: Vec<usize> = (0..backend.num_qubits()).collect();
             backend
                 .reduced_density_matrix(&whole)
                 .map(SavedValue::DensityMatrix)
-                .map_err(named)
         }
     }
+    .map_err(|err| name_save_error(err, label))
+}
+
+fn name_save_error(mut error: PrismError, label: &str) -> PrismError {
+    let text = match &mut error {
+        PrismError::InvalidParameter { message } => message,
+        PrismError::IncompatibleBackend { reason, .. } => reason,
+        PrismError::BackendUnsupported { operation, .. } => operation,
+        PrismError::ResourceLimit(limit) => &mut limit.operation,
+        _ => return error,
+    };
+    *text = format!("save point `{label}`: {text}");
+    error
 }
 
 /// Provenance read off the engine that ran, after it ran. Exactness and
@@ -747,9 +727,7 @@ fn run_with_internal(
         });
     }
     let route = plan_probability_route(&kind, circuit, limits);
-    let outcome = run_route(&kind, circuit, seed, opts, &route, limits)?;
-    ensure_saves_recorded(circuit, &outcome)?;
-    Ok(outcome)
+    run_route(&kind, circuit, seed, opts, &route, limits)
 }
 
 /// Execute one seed of a planned probability route. Shot loops plan once and
@@ -809,7 +787,11 @@ fn run_direct(
     has_partial_independence: bool,
     limits: &ResolvedLimits,
 ) -> Result<RunOutcome> {
-    match resolve(kind, circuit, has_partial_independence, limits) {
+    let route = resolve(kind, circuit, has_partial_independence, limits);
+    if !matches!(route, ExecutionPlan::Backend(_)) {
+        decline_saves(circuit, format_args!("{kind:?}"), "a probability-only run")?;
+    }
+    match route {
             ExecutionPlan::Backend(plan) => {
                 let mut backend = plan.build(seed, limits);
                 execute(&mut *backend, circuit, &opts).map(|mut r| {

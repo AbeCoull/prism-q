@@ -287,3 +287,123 @@ fn a_save_has_no_openqasm_spelling() {
         .to_string();
     assert!(err.contains("save point `mid`"), "{err}");
 }
+
+#[test]
+fn a_save_reads_the_whole_state_on_block_and_prefix_circuits() {
+    let n = 8;
+    for kind in [BackendKind::Statevector, BackendKind::Auto] {
+        let mut circuit = Circuit::new(n, 0);
+        for q in 0..n {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        if matches!(kind, BackendKind::Auto) {
+            for q in 0..n - 1 {
+                circuit.add_gate(Gate::Cx, &[q, q + 1]);
+                circuit.add_gate(Gate::Z, &[q]);
+            }
+        }
+        let expected = simulate(&circuit)
+            .backend(BackendKind::Statevector)
+            .seed(SEED)
+            .state_vector()
+            .unwrap();
+        circuit.add_save(SaveSpec::StateVector, "prefix");
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        circuit.add_gate(Gate::T, &[1]);
+        let request = || simulate(&circuit).backend(kind.clone());
+        let plan = request().plan(prism_q::Query::Run).unwrap();
+        assert!(plan.would_fail.is_none());
+        let result = request().seed(SEED).run().unwrap();
+        assert_eq!(result.metadata.reason, plan.rule);
+        assert_eq!(result.saves.len(), 1);
+        assert_eq!(result.saves[0].label, "prefix");
+        assert_amps_close(
+            saved_statevector(&result.saves[0].value),
+            &expected,
+            EPS,
+            "prefix",
+        );
+    }
+}
+
+#[test]
+fn compiled_sampling_and_either_overlap_operand_decline_a_save_by_name() {
+    let plain = Circuit::new(8, 1);
+    let mut saved = plain.clone();
+    saved.add_save(SaveSpec::Probabilities, "midpoint");
+    saved.add_measure(0, 0);
+    let noise = prism_q::NoiseModel::uniform_depolarizing(&saved, 0.01);
+    for err in [
+        prism_q::compile_measurements(&saved, SEED).err(),
+        prism_q::compile_forward(&saved, SEED).err(),
+        prism_q::compile_detector_sampler(&saved, vec![], vec![], SEED).err(),
+        prism_q::run_shots_compiled(&saved, 1, SEED).err(),
+        prism_q::compile_noisy(&saved, &noise, SEED).err(),
+        prism_q::run_shots_noisy(&saved, &noise, 1, SEED).err(),
+        simulate(&saved)
+            .seed(SEED)
+            .overlap(simulate(&plain).seed(SEED))
+            .err(),
+        simulate(&plain)
+            .seed(SEED)
+            .overlap(simulate(&saved).seed(SEED))
+            .err(),
+    ] {
+        assert!(err.unwrap().to_string().contains("save point `midpoint`"));
+    }
+}
+
+#[test]
+fn plan_names_the_save_that_the_backend_cannot_read() {
+    for (kind, spec, limits) in [
+        (
+            BackendKind::DensityMatrix,
+            SaveSpec::StateVector,
+            prism_q::Limits::new(),
+        ),
+        (
+            BackendKind::TensorNetwork,
+            SaveSpec::Probabilities,
+            prism_q::Limits::new().max_export_qubits(1),
+        ),
+        (
+            BackendKind::Sparse,
+            SaveSpec::Probabilities,
+            prism_q::Limits::new().max_probability_qubits(1),
+        ),
+    ] {
+        let mut circuit = Circuit::new(2, 0);
+        circuit.add_save(spec, "first");
+        let request = || simulate(&circuit).backend(kind.clone()).limits(limits);
+        for err in [
+            request().plan(prism_q::Query::Run).unwrap().would_fail,
+            request().seed(SEED).run().err(),
+        ] {
+            assert!(err.unwrap().to_string().contains("save point `first`"));
+        }
+    }
+}
+
+#[test]
+fn plan_predicts_density_save_errors_from_register_width() {
+    for (n, kind, limits) in [
+        (0, BackendKind::Statevector, prism_q::Limits::new()),
+        (
+            2,
+            BackendKind::Mps { max_bond_dim: 32 },
+            prism_q::Limits::new().max_mps_workspace_qubits(6),
+        ),
+    ] {
+        let mut circuit = Circuit::new(n, 0);
+        circuit.add_save(SaveSpec::DensityMatrix, "rho");
+        let request = || simulate(&circuit).backend(kind.clone()).limits(limits);
+        let planned = request()
+            .plan(prism_q::Query::Run)
+            .unwrap()
+            .would_fail
+            .unwrap();
+        let actual = request().seed(SEED).run().unwrap_err();
+        assert!(actual.to_string().contains("save point `rho`"));
+        assert_eq!(planned, actual);
+    }
+}

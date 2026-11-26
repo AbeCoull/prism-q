@@ -1100,3 +1100,63 @@ fn prepared_gradient_rejects_a_short_binding_and_a_non_statevector_backend() {
             .is_ok()
     );
 }
+
+#[test]
+fn prepared_shift_at_tensor_route_min_qubits_matches_statevector() {
+    let n = 18;
+    let mut template = Circuit::new(n, 0);
+    template.add_gate(Gate::Ry(0.41), &[0]);
+    template.add_gate(Gate::Cx, &[0, 1]);
+    template.add_gate(Gate::Rz(0.73), &[1]);
+    for layer in 0..8 {
+        for q in 2..n {
+            template.add_gate(Gate::Ry(0.31 + 0.05 * q as f64), &[q]);
+            template.add_gate(Gate::Rz(0.57), &[q]);
+        }
+        for q in (2 + (layer % 2)..n - 1).step_by(2) {
+            template.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    let mut params = Parameters::new(3);
+    params.link(0, 0);
+    params.link(2, 1);
+    let mut extra_links = 0usize;
+    for (idx, inst) in template.instructions.iter().enumerate().skip(3) {
+        if matches!(
+            inst,
+            Instruction::Gate {
+                gate: Gate::Ry(_),
+                ..
+            }
+        ) && extra_links < 4
+        {
+            params.link(idx, 2);
+            extra_links += 1;
+        }
+    }
+    let values = vec![0.41, 0.73, 0.31];
+    let bound = params.bind(&template, &values).unwrap();
+
+    let dense_obs =
+        PauliObservable::from_terms([(1.0, (2..n).map(PauliTerm::z).collect::<Vec<_>>())]).unwrap();
+    let shallow_obs = PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)])]).unwrap();
+
+    let mut auto_prep = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+    let mut sv_prep =
+        PreparedCircuit::with_backend(template, params.clone(), BackendKind::Statevector).unwrap();
+
+    for (label, obs) in [
+        ("dense_sv_fallback", &dense_obs),
+        ("shallow_tn", &shallow_obs),
+    ] {
+        let auto_g = auto_prep
+            .expectation_gradient_shift(&values, obs, SEED)
+            .unwrap();
+        let sv_g = sv_prep
+            .expectation_gradient_shift(&values, obs, SEED)
+            .unwrap();
+        let direct_g = run_expectation_gradient_shift(&bound, obs, &params, SEED).unwrap();
+        assert_gradients_close(label, &auto_g, &sv_g);
+        assert_gradients_close(&format!("{label}_direct"), &direct_g, &sv_g);
+    }
+}

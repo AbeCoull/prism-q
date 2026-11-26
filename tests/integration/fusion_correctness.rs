@@ -1370,3 +1370,193 @@ fn a_phase_just_outside_the_recognizer_tolerance_is_not_snapped() {
 
     assert_fusion_preserves_state(&c);
 }
+
+fn dense_asymmetric_2q_matrix(seed_offset: usize) -> [[Complex64; 4]; 4] {
+    std::array::from_fn(|r| {
+        std::array::from_fn(|c| {
+            let s = seed_offset as f64 * 0.03;
+            Complex64::new(
+                0.11 + 0.07 * r as f64 - 0.03 * c as f64 + s,
+                0.29 - 0.05 * c as f64 + 0.04 * r as f64 - 0.5 * s,
+            )
+        })
+    })
+}
+
+fn entangled_initial_state(nq: usize) -> Vec<Complex64> {
+    let mut prep = Circuit::new(nq, 0);
+    for q in 0..nq {
+        prep.add_gate(Gate::Ry(0.31 + 0.17 * q as f64), &[q]);
+        prep.add_gate(Gate::Rz(0.87 - 0.11 * q as f64), &[q]);
+    }
+    for q in 0..nq.saturating_sub(1) {
+        prep.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    let mut b = StatevectorBackend::new(42);
+    b.init(nq, 0).unwrap();
+    b.apply_instructions(&prep.instructions).unwrap();
+    b.state_vector().to_vec()
+}
+
+fn apply_2q_reference(state: &mut [Complex64], q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
+    let m0 = 1usize << q0;
+    let m1 = 1usize << q1;
+    let (lo, hi) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
+    let n_iter = state.len() >> 2;
+    for k in 0..n_iter {
+        let lo_mask = (1usize << lo) - 1;
+        let step1 = ((k & !lo_mask) << 1) | (k & lo_mask);
+        let hi_mask = (1usize << hi) - 1;
+        let base = ((step1 & !hi_mask) << 1) | (step1 & hi_mask);
+        let idx = [base, base | m1, base | m0, base | m0 | m1];
+        let v = [state[idx[0]], state[idx[1]], state[idx[2]], state[idx[3]]];
+        for (r, &dst) in idx.iter().enumerate() {
+            state[dst] = mat[r][0] * v[0] + mat[r][1] * v[1] + mat[r][2] * v[2] + mat[r][3] * v[3];
+        }
+    }
+}
+
+#[test]
+fn fused_2q_dense_adjacent_and_lo0_matches_reference() {
+    let mat = dense_asymmetric_2q_matrix(0);
+    let cases: &[(usize, &[(usize, usize)])] = &[
+        (2, &[(0, 1), (1, 0)]),
+        (3, &[(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)]),
+        (
+            14,
+            &[
+                (0, 1),
+                (1, 0),
+                (0, 13),
+                (13, 0),
+                (1, 2),
+                (2, 1),
+                (12, 13),
+                (13, 12),
+            ],
+        ),
+        (
+            15,
+            &[
+                (0, 1),
+                (1, 0),
+                (1, 2),
+                (2, 1),
+                (2, 3),
+                (3, 2),
+                (13, 14),
+                (14, 13),
+                (0, 2),
+                (2, 0),
+                (0, 14),
+                (14, 0),
+            ],
+        ),
+        (
+            16,
+            &[
+                (0, 1),
+                (1, 0),
+                (1, 2),
+                (2, 1),
+                (2, 3),
+                (3, 2),
+                (14, 15),
+                (15, 14),
+                (0, 2),
+                (2, 0),
+                (0, 15),
+                (15, 0),
+            ],
+        ),
+    ];
+
+    for &(nq, pairs) in cases {
+        let start = entangled_initial_state(nq);
+        for &(q0, q1) in pairs {
+            let mut expected = start.clone();
+            apply_2q_reference(&mut expected, q0, q1, &mat);
+
+            let mut c = Circuit::new(nq, 0);
+            c.add_gate(Gate::Fused2q(Box::new(mat)), &[q0, q1]);
+            let mut backend = StatevectorBackend::new(42);
+            backend.init_from_amplitudes(start.clone(), 0).unwrap();
+            backend.apply_instructions(&c.instructions).unwrap();
+            assert_amps_close(
+                backend.state_vector(),
+                &expected,
+                EPS,
+                &format!("fused_2q nq={nq} ({q0}, {q1})"),
+            );
+        }
+    }
+}
+
+#[test]
+fn multi_2q_dense_lo0_matches_reference() {
+    use prism_q::gates::Multi2qData;
+
+    let nq = 16;
+    let start = entangled_initial_state(nq);
+
+    let in_place_pairs = [(0, 1), (1, 0), (0, 5), (5, 0), (2, 3), (3, 2)];
+    let subcube_pairs = [(0, 15), (15, 0), (0, 14), (14, 0), (14, 15)];
+
+    for (label, pairs) in [
+        ("in_place", in_place_pairs.as_slice()),
+        ("subcube", subcube_pairs.as_slice()),
+    ] {
+        let gates: Vec<(usize, usize, [[Complex64; 4]; 4])> = pairs
+            .iter()
+            .enumerate()
+            .map(|(idx, &(q0, q1))| (q0, q1, dense_asymmetric_2q_matrix(idx + 1)))
+            .collect();
+
+        let mut expected = start.clone();
+        for &(q0, q1, ref mat) in &gates {
+            apply_2q_reference(&mut expected, q0, q1, mat);
+        }
+
+        let mut targets: Vec<usize> = gates.iter().flat_map(|&(a, b, _)| [a, b]).collect();
+        targets.sort_unstable();
+        targets.dedup();
+
+        let mut c = Circuit::new(nq, 0);
+        c.add_gate(Gate::Multi2q(Box::new(Multi2qData::new(gates))), &targets);
+        let mut backend = StatevectorBackend::new(42);
+        backend.init_from_amplitudes(start.clone(), 0).unwrap();
+        backend.apply_instructions(&c.instructions).unwrap();
+        assert_amps_close(
+            backend.state_vector(),
+            &expected,
+            EPS,
+            &format!("multi_2q_{label}"),
+        );
+    }
+}
+
+#[test]
+fn fusion_adjacent_2q_dense_circuits_16q() {
+    let nq = 16;
+    let mut c = Circuit::new(nq, 0);
+    for layer in 0..3 {
+        for q in 0..nq {
+            c.add_gate(Gate::Ry(0.27 + 0.13 * q as f64 + 0.1 * layer as f64), &[q]);
+            c.add_gate(Gate::Rz(0.51 - 0.09 * q as f64), &[q]);
+        }
+        for &(q0, q1) in &[(0, 1), (1, 0), (1, 2), (14, 15), (0, 2), (0, 15)] {
+            if layer % 2 == 0 {
+                c.add_gate(Gate::Cx, &[q0, q1]);
+            } else {
+                c.add_gate(Gate::Cz, &[q0, q1]);
+            }
+            c.add_gate(Gate::Rx(0.41), &[q0]);
+            c.add_gate(Gate::Ry(-0.33), &[q1]);
+        }
+    }
+    assert!(
+        has_2q_fusion(&c),
+        "16q adjacent circuit should fuse 2q gates"
+    );
+    assert_fusion_preserves_state(&c);
+}

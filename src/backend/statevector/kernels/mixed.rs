@@ -35,8 +35,8 @@ fn apply_ops(tile: &mut [Complex64], base: usize, bits: usize, rest: &[usize], o
             Prepared::Pauli(rotation) => rotation.apply(tile, base),
             Prepared::DiagonalBatch(tables) => {
                 #[cfg(target_arch = "x86_64")]
-                if simd::has_bmi2() && simd::has_fma() {
-                    // SAFETY: BMI2 and FMA detected; the tables cover the mapped tile coordinates.
+                if simd::has_avx2_fma() && simd::has_bmi2() {
+                    // SAFETY: AVX2 detected, along with BMI2 and FMA; the tables cover the mapped tile coordinates.
                     unsafe {
                         diagonal_batch_tile_bmi2(
                             tile,

@@ -14,7 +14,7 @@ use super::complex_mul_neon;
 #[cfg(target_arch = "x86_64")]
 use super::{
     SimdTier, complex_mul_avx2fma, complex_mul_avx512, complex_mul_fma, complex_mul_sse2,
-    for_each_quad, has_fma, load_pd, simd_tier, store_pd,
+    for_each_quad, load_pd, simd_tier, store_pd,
 };
 
 #[cfg(target_arch = "x86_64")]
@@ -373,7 +373,7 @@ unsafe fn apply_full_loop_fma(state: &mut [Complex64], target: usize, mat: &MatB
     }
 }
 
-/// Requires `target >= 2`, so the AVX2 pair loop runs whole iterations.
+/// Requires `target >= 1`, so each half block holds whole 256-bit steps.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn apply_full_loop_avx2fma_inline(
@@ -383,6 +383,8 @@ unsafe fn apply_full_loop_avx2fma_inline(
 ) {
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
+        debug_assert!(target >= 1);
+        debug_assert!(state.len().is_multiple_of(1usize << (target + 1)));
         let half = 1usize << target;
         let block_size = half << 1;
         let avx_pairs = half / 2;
@@ -442,6 +444,57 @@ unsafe fn apply_full_loop_avx512(state: &mut [Complex64], target: usize, mat: &M
                 _mm512_storeu_pd(hi_ptr.add(off), new_b);
             }
             offset += block_size;
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn apply_full_loop_q0_avx2fma(state: &mut [Complex64], mat: &MatBroadcast256) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        debug_assert!(state.len().is_multiple_of(2));
+        let diag_rr = _mm256_permute2f128_pd(mat.m00_rr, mat.m11_rr, 0x20);
+        let diag_ii = _mm256_permute2f128_pd(mat.m00_ii, mat.m11_ii, 0x20);
+        let off_rr = _mm256_permute2f128_pd(mat.m01_rr, mat.m10_rr, 0x20);
+        let off_ii = _mm256_permute2f128_pd(mat.m01_ii, mat.m10_ii, 0x20);
+        let base = state.as_mut_ptr() as *mut f64;
+        let num_pairs = state.len() >> 1;
+        for k in 0..num_pairs {
+            let p = base.add(k * 4);
+            let x = _mm256_loadu_pd(p);
+            let sx = _mm256_permute2f128_pd(x, x, 0x01);
+            let res = _mm256_add_pd(
+                complex_mul_avx2fma(diag_rr, diag_ii, x),
+                complex_mul_avx2fma(off_rr, off_ii, sx),
+            );
+            _mm256_storeu_pd(p, res);
+        }
+    }
+}
+
+/// Requires `state.len() >= 4` (multiple of 4), so each 512-bit step holds two qubit-0 pairs.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn apply_full_loop_q0_avx512(state: &mut [Complex64], mat: &MatBroadcast256) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        debug_assert!(state.len() >= 4 && state.len().is_multiple_of(4));
+        let diag_rr = _mm512_broadcast_f64x4(_mm256_permute2f128_pd(mat.m00_rr, mat.m11_rr, 0x20));
+        let diag_ii = _mm512_broadcast_f64x4(_mm256_permute2f128_pd(mat.m00_ii, mat.m11_ii, 0x20));
+        let off_rr = _mm512_broadcast_f64x4(_mm256_permute2f128_pd(mat.m01_rr, mat.m10_rr, 0x20));
+        let off_ii = _mm512_broadcast_f64x4(_mm256_permute2f128_pd(mat.m01_ii, mat.m10_ii, 0x20));
+        let base = state.as_mut_ptr() as *mut f64;
+        let num_quads = state.len() >> 2;
+        for k in 0..num_quads {
+            let p = base.add(k * 8);
+            let x = _mm512_loadu_pd(p);
+            let sx = _mm512_permutex_pd::<0x4E>(x);
+            let res = _mm512_add_pd(
+                complex_mul_avx512(diag_rr, diag_ii, x),
+                complex_mul_avx512(off_rr, off_ii, sx),
+            );
+            _mm512_storeu_pd(p, res);
         }
     }
 }
@@ -672,27 +725,31 @@ impl PreparedGate1q {
             // in the constructor. The target index is validated by circuit construction.
             unsafe {
                 const MAX_AVX2_STATE: usize = 8192;
-                const MIN_AVX2_TARGET: usize = 2;
-                let wide =
-                    target >= MIN_AVX2_TARGET && (!CAP_AVX2_STATE || state.len() <= MAX_AVX2_STATE);
+                let wide = !CAP_AVX2_STATE || state.len() <= MAX_AVX2_STATE;
                 match self.tier {
-                    SimdTier::Avx512 => {
-                        if wide {
-                            let b256 = self.broadcast256.as_ref().unwrap_unchecked();
+                    SimdTier::Avx512 if wide => {
+                        let b256 = self.broadcast256.as_ref().unwrap_unchecked();
+                        if target >= 2 {
                             apply_full_loop_avx512(state, target, b256);
+                        } else if target == 1 {
+                            apply_full_loop_avx2fma_inline(state, target, b256);
+                        } else if state.len() >= 4 {
+                            apply_full_loop_q0_avx512(state, b256);
                         } else {
-                            apply_full_loop_fma(state, target, &self.broadcast);
+                            apply_full_loop_q0_avx2fma(state, b256);
                         }
                     }
-                    SimdTier::Avx2Fma => {
-                        if wide {
-                            let b256 = self.broadcast256.as_ref().unwrap_unchecked();
+                    SimdTier::Avx2Fma if wide => {
+                        let b256 = self.broadcast256.as_ref().unwrap_unchecked();
+                        if target >= 1 {
                             apply_full_loop_avx2fma_inline(state, target, b256);
                         } else {
-                            apply_full_loop_fma(state, target, &self.broadcast);
+                            apply_full_loop_q0_avx2fma(state, b256);
                         }
                     }
-                    SimdTier::Fma => apply_full_loop_fma(state, target, &self.broadcast),
+                    SimdTier::Avx512 | SimdTier::Avx2Fma | SimdTier::Fma => {
+                        apply_full_loop_fma(state, target, &self.broadcast);
+                    }
                     SimdTier::Sse2 => apply_full_loop_sse2(state, target, &self.broadcast),
                 }
             }
@@ -775,7 +832,7 @@ impl PreparedGate1q {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "fma")]
-unsafe fn apply_diagonal_loop_fma(
+pub(super) unsafe fn apply_diagonal_loop_fma(
     state: &mut [Complex64],
     target: usize,
     d0_rr: __m128d,
@@ -813,6 +870,180 @@ unsafe fn apply_diagonal_loop_fma(
                 let s1 = _mm_loadu_pd(p1);
                 let r1 = complex_mul_fma(d1_rr, d1_ii, s1);
                 _mm_storeu_pd(p1, r1);
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+pub(super) unsafe fn apply_diagonal_loop_avx2fma(
+    state: &mut [Complex64],
+    target: usize,
+    d0: Complex64,
+    d1: Complex64,
+    skip_lo: bool,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        debug_assert!(state.len().is_multiple_of(1usize << (target + 1)));
+        let n = state.len();
+        let base = state.as_mut_ptr() as *mut f64;
+
+        if target == 0 {
+            let num_pairs = n >> 1;
+            if skip_lo {
+                let d1_rr = _mm256_set1_pd(d1.re);
+                let d1_ii = _mm256_set1_pd(d1.im);
+                for i in 0..num_pairs {
+                    let p = base.add(i * 4);
+                    let v = _mm256_loadu_pd(p);
+                    let r = complex_mul_avx2fma(d1_rr, d1_ii, v);
+                    _mm256_storeu_pd(p, _mm256_blend_pd::<0b1100>(v, r));
+                }
+            } else {
+                let d_rr = _mm256_setr_pd(d0.re, d0.re, d1.re, d1.re);
+                let d_ii = _mm256_setr_pd(d0.im, d0.im, d1.im, d1.im);
+                for i in 0..num_pairs {
+                    let p = base.add(i * 4);
+                    let v = _mm256_loadu_pd(p);
+                    _mm256_storeu_pd(p, complex_mul_avx2fma(d_rr, d_ii, v));
+                }
+            }
+            return;
+        }
+
+        let half = 1usize << target;
+        let block_size = half << 1;
+        let step_lanes = 2 * half;
+        let d1_rr = _mm256_set1_pd(d1.re);
+        let d1_ii = _mm256_set1_pd(d1.im);
+        if skip_lo {
+            let mut offset = 0;
+            while offset < n {
+                let hi_ptr = base.add((offset + half) * 2);
+                for off in (0..step_lanes).step_by(4) {
+                    let p = hi_ptr.add(off);
+                    let v = _mm256_loadu_pd(p);
+                    _mm256_storeu_pd(p, complex_mul_avx2fma(d1_rr, d1_ii, v));
+                }
+                offset += block_size;
+            }
+        } else {
+            let d0_rr = _mm256_set1_pd(d0.re);
+            let d0_ii = _mm256_set1_pd(d0.im);
+            let mut offset = 0;
+            while offset < n {
+                let lo_ptr = base.add(offset * 2);
+                let hi_ptr = base.add((offset + half) * 2);
+                for off in (0..step_lanes).step_by(4) {
+                    let pl = lo_ptr.add(off);
+                    let vl = _mm256_loadu_pd(pl);
+                    _mm256_storeu_pd(pl, complex_mul_avx2fma(d0_rr, d0_ii, vl));
+
+                    let ph = hi_ptr.add(off);
+                    let vh = _mm256_loadu_pd(ph);
+                    _mm256_storeu_pd(ph, complex_mul_avx2fma(d1_rr, d1_ii, vh));
+                }
+                offset += block_size;
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+pub(super) unsafe fn apply_diagonal_loop_avx512(
+    state: &mut [Complex64],
+    target: usize,
+    d0: Complex64,
+    d1: Complex64,
+    skip_lo: bool,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        debug_assert!(state.len().is_multiple_of(1usize << (target + 1)));
+        let n = state.len();
+        let base = state.as_mut_ptr() as *mut f64;
+
+        if target == 0 {
+            if skip_lo {
+                let d1_rr = _mm512_set1_pd(d1.re);
+                let d1_ii = _mm512_set1_pd(d1.im);
+                for_each_quad!(n, |off, k| {
+                    let p = base.add(off);
+                    let v = load_pd(p, k);
+                    let r = complex_mul_avx512(d1_rr, d1_ii, v);
+                    store_pd(p, k, _mm512_mask_blend_pd(0xCC, v, r));
+                });
+            } else {
+                let d_rr = _mm512_setr_pd(d0.re, d0.re, d1.re, d1.re, d0.re, d0.re, d1.re, d1.re);
+                let d_ii = _mm512_setr_pd(d0.im, d0.im, d1.im, d1.im, d0.im, d0.im, d1.im, d1.im);
+                for_each_quad!(n, |off, k| {
+                    let p = base.add(off);
+                    let v = load_pd(p, k);
+                    store_pd(p, k, complex_mul_avx512(d_rr, d_ii, v));
+                });
+            }
+            return;
+        }
+
+        if target == 1 {
+            let lanes = 2 * n;
+            if skip_lo {
+                let d1_rr = _mm512_set1_pd(d1.re);
+                let d1_ii = _mm512_set1_pd(d1.im);
+                for off in (0..lanes).step_by(8) {
+                    let p = base.add(off);
+                    let v = _mm512_loadu_pd(p);
+                    let r = complex_mul_avx512(d1_rr, d1_ii, v);
+                    _mm512_storeu_pd(p, _mm512_mask_blend_pd(0xF0, v, r));
+                }
+            } else {
+                let d_rr = _mm512_setr_pd(d0.re, d0.re, d0.re, d0.re, d1.re, d1.re, d1.re, d1.re);
+                let d_ii = _mm512_setr_pd(d0.im, d0.im, d0.im, d0.im, d1.im, d1.im, d1.im, d1.im);
+                for off in (0..lanes).step_by(8) {
+                    let p = base.add(off);
+                    let v = _mm512_loadu_pd(p);
+                    _mm512_storeu_pd(p, complex_mul_avx512(d_rr, d_ii, v));
+                }
+            }
+            return;
+        }
+
+        let half = 1usize << target;
+        let block_size = half << 1;
+        let step_lanes = 2 * half;
+        let d1_rr = _mm512_set1_pd(d1.re);
+        let d1_ii = _mm512_set1_pd(d1.im);
+        if skip_lo {
+            let mut offset = 0;
+            while offset < n {
+                let hi_ptr = base.add((offset + half) * 2);
+                for off in (0..step_lanes).step_by(8) {
+                    let p = hi_ptr.add(off);
+                    let v = _mm512_loadu_pd(p);
+                    _mm512_storeu_pd(p, complex_mul_avx512(d1_rr, d1_ii, v));
+                }
+                offset += block_size;
+            }
+        } else {
+            let d0_rr = _mm512_set1_pd(d0.re);
+            let d0_ii = _mm512_set1_pd(d0.im);
+            let mut offset = 0;
+            while offset < n {
+                let lo_ptr = base.add(offset * 2);
+                let hi_ptr = base.add((offset + half) * 2);
+                for off in (0..step_lanes).step_by(8) {
+                    let pl = lo_ptr.add(off);
+                    let vl = _mm512_loadu_pd(pl);
+                    _mm512_storeu_pd(pl, complex_mul_avx512(d0_rr, d0_ii, vl));
+
+                    let ph = hi_ptr.add(off);
+                    let vh = _mm512_loadu_pd(ph);
+                    _mm512_storeu_pd(ph, complex_mul_avx512(d1_rr, d1_ii, vh));
+                }
+                offset += block_size;
             }
         }
     }
@@ -1073,8 +1304,8 @@ unsafe fn sandwich_1q_blocked_q0_avx2fma(
 /// Apply a diagonal single-qubit gate using a tight SIMD loop.
 ///
 /// For gates where `d0 ≈ 1` (Z, S, T, P), set `skip_lo = true` to halve
-/// memory traffic. Uses the same mask-based pair iteration as the full 2×2
-/// kernel but with 1 complex multiply per element instead of 2 + add.
+/// memory traffic. Processes block-strided slices on AVX2/AVX-512 and pairs
+/// on 128-bit tiers with 1 complex multiply per element instead of 2 + add.
 pub(crate) fn apply_diagonal_sequential(
     state: &mut [Complex64],
     target: usize,
@@ -1083,10 +1314,24 @@ pub(crate) fn apply_diagonal_sequential(
     skip_lo: bool,
 ) {
     #[cfg(target_arch = "x86_64")]
-    {
-        if has_fma() {
-            // SAFETY: FMA checked above. State indexing is handled
-            // by the diagonal loop using validated target positions.
+    match simd_tier() {
+        SimdTier::Avx512 => {
+            if target == 1 && skip_lo {
+                // SAFETY: AVX2 detected, FMA is implied by SimdTier::Avx512, and
+                // state.len() is a multiple of 2 << target.
+                unsafe { apply_diagonal_loop_avx2fma(state, target, d0, d1, true) };
+            } else {
+                // SAFETY: AVX-512F detected, and state.len() is a multiple of 2 << target.
+                unsafe { apply_diagonal_loop_avx512(state, target, d0, d1, skip_lo) };
+            }
+        }
+        SimdTier::Avx2Fma => {
+            // SAFETY: AVX2 detected, FMA is implied by SimdTier::Avx2Fma, and
+            // state.len() is a multiple of 2 << target.
+            unsafe { apply_diagonal_loop_avx2fma(state, target, d0, d1, skip_lo) };
+        }
+        SimdTier::Fma => {
+            // SAFETY: FMA detected, and state.len() is a multiple of 2 << target.
             unsafe {
                 let d0_rr = _mm_set1_pd(d0.re);
                 let d0_ii = _mm_set1_pd(d0.im);
@@ -1094,9 +1339,8 @@ pub(crate) fn apply_diagonal_sequential(
                 let d1_ii = _mm_set1_pd(d1.im);
                 apply_diagonal_loop_fma(state, target, d0_rr, d0_ii, d1_rr, d1_ii, skip_lo);
             }
-        } else {
-            apply_diagonal_scalar(state, target, d0, d1, skip_lo);
         }
+        SimdTier::Sse2 => apply_diagonal_scalar(state, target, d0, d1, skip_lo),
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -1116,7 +1360,7 @@ pub(crate) fn apply_diagonal_sequential(
 
 #[cfg(not(target_arch = "aarch64"))]
 #[inline(always)]
-fn apply_diagonal_scalar(
+pub(super) fn apply_diagonal_scalar(
     state: &mut [Complex64],
     target: usize,
     d0: Complex64,

@@ -337,11 +337,6 @@ fn check_run_saves(
                     operation: "statevector export".into(),
                 })
             }
-            SaveSpec::StateVector
-                if plan.backend == Statevector && plan.placement == Placement::Device =>
-            {
-                Ok(())
-            }
             SaveSpec::StateVector => {
                 check_diagnostic_width(&backend, Diagnostic::StateVector, n, limits)
             }
@@ -349,6 +344,8 @@ fn check_run_saves(
                 crate::backend::schmidt::validate_qubit_set(&[], n)
             }
             SaveSpec::DensityMatrix if plan.backend == Mps => {
+                // Static plans cannot bound runtime entanglement, so `chi = 1`
+                // is the lower bound on the contraction workspace.
                 check_diagnostic_width(&backend, Diagnostic::ReducedDensityMatrix, n, limits)
                     .and_then(|()| crate::backend::mps::check_density_workspace(n, 1, limits))
             }

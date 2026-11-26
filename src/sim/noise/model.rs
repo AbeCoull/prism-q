@@ -269,7 +269,10 @@ const CPTP_TOLERANCE: f64 = 1e-9;
 /// Reject an empty operator set, a non-finite entry, and any deviation from
 /// `sum_k Kdagger_k K_k = I` past [`CPTP_TOLERANCE`]. Shared by the one-qubit
 /// and two-qubit dense channels, which differ only in `D`.
-fn validate_kraus_set<const D: usize>(name: &str, kraus: &[[[Complex64; D]; D]]) -> Result<()> {
+pub(crate) fn validate_kraus_set<const D: usize>(
+    name: &str,
+    kraus: &[[[Complex64; D]; D]],
+) -> Result<()> {
     if kraus.is_empty() {
         return Err(crate::error::PrismError::InvalidParameter {
             message: format!("{name} Kraus channel must contain at least one operator"),
@@ -547,16 +550,27 @@ impl NoiseModel {
         })
     }
 
+    pub(crate) fn has_quasi_static(&self) -> bool {
+        self.after_gate.iter().flatten().any(|event| {
+            matches!(
+                event.channel,
+                NoiseChannel::QuasiStatic { ref weights, .. } if !weights.is_empty()
+            )
+        })
+    }
+
     /// Standard normal draws each shot makes for its
     /// [`NoiseChannel::QuasiStatic`] events: one past the highest source index.
+    #[cfg(test)]
     pub(crate) fn quasi_static_sources(&self) -> usize {
         self.after_gate
             .iter()
             .flatten()
             .filter_map(|event| match &event.channel {
-                NoiseChannel::QuasiStatic { weights, .. } => {
-                    weights.iter().map(|&(source, _)| source + 1).max()
-                }
+                NoiseChannel::QuasiStatic { weights, .. } => weights
+                    .iter()
+                    .map(|&(source, _)| source.saturating_add(1))
+                    .max(),
                 _ => None,
             })
             .max()
@@ -567,7 +581,7 @@ impl NoiseModel {
     /// a leak flag or a quasi-static draw. A mixture averages each event on its
     /// own, which neither survives.
     pub(crate) fn ensure_memoryless(&self, engine: &str) -> Result<()> {
-        if self.has_leakage() || self.quasi_static_sources() > 0 {
+        if self.has_leakage() || self.has_quasi_static() {
             return Err(crate::error::PrismError::IncompatibleBackend {
                 backend: engine.into(),
                 reason: "leakage and quasi-static channels carry state from one event to the \

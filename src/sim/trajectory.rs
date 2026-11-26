@@ -50,11 +50,44 @@ pub(crate) struct PreparedNoise {
 
 impl PreparedNoise {
     pub(crate) fn new(noise: &NoiseModel) -> Self {
+        Self::from_model(noise, &[])
+    }
+
+    pub(crate) fn compact_sources<'a>(
+        models: impl IntoIterator<Item = &'a NoiseModel>,
+    ) -> Vec<usize> {
+        let mut sources: Vec<usize> = models
+            .into_iter()
+            .flat_map(|noise| noise.after_gate.iter().flatten())
+            .filter_map(|event| match &event.channel {
+                NoiseChannel::QuasiStatic { weights, .. } => {
+                    Some(weights.iter().map(|&(source, _)| source))
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        sources.sort_unstable();
+        sources.dedup();
+        sources
+    }
+
+    pub(crate) fn with_memory(noise: &NoiseModel) -> (Self, Option<MemorySpec>) {
+        let sources = Self::compact_sources([noise]);
+        let prepared = Self::from_model(noise, &sources);
+        let memory = MemorySpec::with_sources(noise.has_leakage(), sources.len());
+        (prepared, memory)
+    }
+
+    pub(crate) fn from_model(noise: &NoiseModel, sources: &[usize]) -> Self {
         let mut events = Vec::with_capacity(noise.after_gate.iter().map(Vec::len).sum());
         let mut offsets = Vec::with_capacity(noise.after_gate.len() + 1);
         offsets.push(0);
         for slot in &noise.after_gate {
-            events.extend(slot.iter().map(PreparedEvent::new));
+            events.extend(
+                slot.iter()
+                    .map(|event| PreparedEvent::with_sources(event, sources)),
+            );
             offsets.push(events.len());
         }
         Self { events, offsets }
@@ -101,10 +134,10 @@ pub(crate) struct PreparedEvent {
 }
 
 impl PreparedEvent {
-    fn new(event: &NoiseEvent) -> Self {
+    fn with_sources(event: &NoiseEvent, sources: &[usize]) -> Self {
         let q0 = event.qubits[0];
         Self {
-            channel: PreparedChannel::new(&event.channel),
+            channel: PreparedChannel::with_sources(&event.channel, sources),
             qubits: [q0, event.qubits.get(1).copied().unwrap_or(q0)],
         }
     }
@@ -126,6 +159,7 @@ pub(crate) enum PreparedChannel {
         p: f64,
         branch_width: f64,
     },
+    Unitary1q(Box<[[Complex64; 2]; 2]>),
     Custom(Box<[Kraus1q]>),
     Kraus2q(Box<[Kraus2q]>),
     Leakage(f64),
@@ -138,7 +172,12 @@ pub(crate) enum PreparedChannel {
 }
 
 impl PreparedChannel {
+    #[cfg(any(test, feature = "bench-internal"))]
     fn new(channel: &NoiseChannel) -> Self {
+        Self::with_sources(channel, &[])
+    }
+
+    fn with_sources(channel: &NoiseChannel, sources: &[usize]) -> Self {
         match channel {
             NoiseChannel::Pauli { px, py, pz } => Self::Pauli(PauliThresholds::new(*px, *py, *pz)),
             NoiseChannel::Depolarizing { p } => {
@@ -170,7 +209,13 @@ impl PreparedChannel {
                 branch_width: p / 15.0,
             },
             NoiseChannel::Custom { kraus } => {
-                Self::Custom(kraus.iter().map(Kraus1q::new).collect())
+                if kraus.len() == 1
+                    && crate::sim::noise::validate_kraus_set("custom", kraus).is_ok()
+                {
+                    Self::Unitary1q(Box::new(kraus[0]))
+                } else {
+                    Self::Custom(kraus.iter().map(Kraus1q::new).collect())
+                }
             }
             NoiseChannel::Kraus2q { kraus } => Self::Kraus2q(
                 kraus
@@ -184,10 +229,31 @@ impl PreparedChannel {
             NoiseChannel::Leakage { p } => Self::Leakage(*p),
             NoiseChannel::Seepage { p } => Self::Seepage(*p),
             NoiseChannel::LeakageTransport { p } => Self::LeakageTransport(*p),
-            NoiseChannel::QuasiStatic { axis, weights } => Self::QuasiStatic {
-                axis: *axis,
-                weights: weights.as_slice().into(),
-            },
+            NoiseChannel::QuasiStatic { axis, weights } => {
+                if weights.is_empty() {
+                    Self::Identity
+                } else {
+                    let mapped: Box<[(usize, f64)]> = if sources.is_empty() {
+                        weights.as_slice().into()
+                    } else {
+                        weights
+                            .iter()
+                            .map(|&(source, weight)| {
+                                (
+                                    sources
+                                        .binary_search(&source)
+                                        .expect("active quasi-static source was collected"),
+                                    weight,
+                                )
+                            })
+                            .collect()
+                    };
+                    Self::QuasiStatic {
+                        axis: *axis,
+                        weights: mapped,
+                    }
+                }
+            }
         }
     }
 }
@@ -604,6 +670,31 @@ fn apply_thermal_relaxation(
     if let Some(applied) = backend.thermal_on_device(qubit, branches, r) {
         return applied;
     }
+    if branches.excited == 0.0 && branches.cold_keep > 0.0 {
+        let gamma = branches.relax + branches.dephase;
+        if r >= gamma
+            && let Some(p1) = backend.damp_no_jump(qubit, gamma, branches.cold_keep)
+        {
+            let p_relax = branches.relax * p1;
+            let p_dephase = branches.dephase * p1;
+            if r < p_relax + p_dephase {
+                let denom = 1.0 - gamma * p1;
+                let applied = if denom > JUMP_EPSILON {
+                    branches.cold_keep / denom.sqrt()
+                } else {
+                    1.0
+                };
+                let s = (1.0 / p1).sqrt() / applied;
+                if r < p_relax && p_relax > JUMP_EPSILON {
+                    return apply_damping_jump(backend, qubit, s, true);
+                }
+                if p_dephase > JUMP_EPSILON {
+                    return apply_damping_jump(backend, qubit, s, false);
+                }
+            }
+            return Ok(());
+        }
+    }
     thermal_host_decided(backend, qubit, branches, r)
 }
 
@@ -613,7 +704,10 @@ fn thermal_host_decided(
     branches: &ThermalBranches,
     r: f64,
 ) -> Result<()> {
-    let p1 = backend.qubit_probability(qubit)?;
+    let p1 = match backend.damping_probability(qubit) {
+        Some(p1) => p1?,
+        None => backend.qubit_probability(qubit)?,
+    };
     let p0 = 1.0 - p1;
 
     let p_relax = branches.relax * p1;
@@ -622,19 +716,16 @@ fn thermal_host_decided(
     let p_hold_hot = branches.excited * (branches.decay_keep * p0 + branches.dephase_keep * p1);
 
     let zero = Complex64::new(0.0, 0.0);
-    let mat = if r < p_relax {
+    let mat = if r < p_relax && p_relax > JUMP_EPSILON {
         let s = (1.0 / p1).sqrt();
         [[zero, Complex64::new(s, 0.0)], [zero, zero]]
-    } else if r < p_relax + p_dephase {
+    } else if r < p_relax + p_dephase && p_dephase > JUMP_EPSILON {
         let s = (1.0 / p1).sqrt();
         [[zero, zero], [zero, Complex64::new(s, 0.0)]]
-    } else if r < p_relax + p_dephase + p_excite {
+    } else if r < p_relax + p_dephase + p_excite && p_excite > JUMP_EPSILON {
         let s = (1.0 / p0).sqrt();
         [[zero, zero], [Complex64::new(s, 0.0), zero]]
-    } else if r < p_relax + p_dephase + p_excite + p_hold_hot {
-        if p_hold_hot <= JUMP_EPSILON {
-            return Ok(());
-        }
+    } else if r < p_relax + p_dephase + p_excite + p_hold_hot && p_hold_hot > JUMP_EPSILON {
         let inv = (branches.excited / p_hold_hot).sqrt();
         [
             [Complex64::new(branches.hot[0] * inv, 0.0), zero],
@@ -885,8 +976,10 @@ fn apply_noise_event(
         PreparedChannel::PauliPair { p, branch_width } => {
             apply_two_qubit_depolarizing(backend, event.qubits, *p, *branch_width, rng)
         }
+        PreparedChannel::Unitary1q(matrix) => backend.apply_1q_matrix(qubit, matrix),
         PreparedChannel::Custom(kraus) => apply_custom_kraus(backend, qubit, kraus, rng),
         PreparedChannel::Kraus2q(kraus) => apply_custom_kraus_2q(backend, event.qubits, kraus, rng),
+        PreparedChannel::QuasiStatic { weights, .. } if weights.is_empty() => Ok(()),
         PreparedChannel::Leakage(_)
         | PreparedChannel::Seepage(_)
         | PreparedChannel::LeakageTransport(_)
@@ -1052,12 +1145,13 @@ pub(crate) struct MemorySpec {
 impl MemorySpec {
     /// `None` for a model whose events need no per-shot memory, which keeps the
     /// trajectory loop and its draws exactly as they were before these channels.
-    pub(crate) fn of(noise: &NoiseModel) -> Option<Self> {
-        let spec = Self {
-            leakage: noise.has_leakage(),
-            sources: noise.quasi_static_sources(),
-        };
-        (spec.leakage || spec.sources > 0).then_some(spec)
+    pub(crate) fn with_sources(leakage: bool, sources: usize) -> Option<Self> {
+        (leakage || sources > 0).then_some(Self { leakage, sources })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_count(self) -> usize {
+        self.sources
     }
 }
 
@@ -1564,7 +1658,7 @@ pub(crate) fn run_trajectories(
     force_serial: bool,
     route: crate::sim::ResolvedBackend,
 ) -> Result<ShotsResult> {
-    let prepared = PreparedNoise::new(noise);
+    let (prepared, memory) = PreparedNoise::with_memory(noise);
     #[cfg(not(feature = "parallel"))]
     let _ = force_serial;
     #[cfg(feature = "parallel")]
@@ -1574,7 +1668,7 @@ pub(crate) fn run_trajectories(
                 &backend_factory,
                 circuit,
                 noise,
-                &prepared,
+                (&prepared, memory),
                 num_shots,
                 seed,
                 route,
@@ -1583,7 +1677,6 @@ pub(crate) fn run_trajectories(
     }
 
     let readout = ShotReadout::new(circuit, &noise.readout);
-    let memory = MemorySpec::of(noise);
     let serial = || {
         run_serial(circuit, memory, num_shots, seed, route, |shot_seed, rng| {
             let mut backend = backend_factory(shot_seed);
@@ -1619,9 +1712,8 @@ pub(crate) fn run_trajectories_held<B: Backend>(
     seed: u64,
     route: crate::sim::ResolvedBackend,
 ) -> Result<ShotsResult> {
-    let prepared = PreparedNoise::new(noise);
+    let (prepared, memory) = PreparedNoise::with_memory(noise);
     let readout = ShotReadout::new(circuit, &noise.readout);
-    let memory = MemorySpec::of(noise);
     run_serial(circuit, memory, num_shots, seed, route, |shot_seed, rng| {
         reseed(backend, shot_seed);
         let (result, leaked) = run_shot(backend, circuit, &prepared, &readout, memory, rng)?;
@@ -1748,13 +1840,12 @@ fn run_trajectories_par(
     backend_factory: &(impl Fn(u64) -> Box<dyn Backend> + Sync),
     circuit: &Circuit,
     noise: &NoiseModel,
-    prepared: &PreparedNoise,
+    (prepared, memory): (&PreparedNoise, Option<MemorySpec>),
     num_shots: usize,
     seed: u64,
     route: crate::sim::ResolvedBackend,
 ) -> Result<ShotsResult> {
     let readout = ShotReadout::new(circuit, &noise.readout);
-    let memory = MemorySpec::of(noise);
     type ParShot = (Vec<bool>, Vec<bool>, crate::sim::RunMetadata);
     let results: Result<Vec<ParShot>> = (0..num_shots)
         .into_par_iter()
@@ -2576,6 +2667,19 @@ impl SharedEvent {
                     bound: damping.gamma * (1.0 + P1_HEADROOM),
                 }
             }
+            PreparedChannel::Thermal(branches)
+                if branches.excited == 0.0 && branches.cold_keep > 0.0 =>
+            {
+                let gamma = branches.relax + branches.dephase;
+                Self::Damping {
+                    qubit: event.qubits[0],
+                    damping: Damping {
+                        gamma,
+                        keep: branches.cold_keep,
+                    },
+                    bound: gamma * (1.0 + P1_HEADROOM),
+                }
+            }
             _ => return None,
         })
     }
@@ -2597,7 +2701,7 @@ impl SharedEvent {
 /// first branch.
 ///
 /// Up to the first instruction that is not a gate or barrier, or whose slot holds a
-/// channel other than Pauli, depolarizing, damping, or thermal relaxation over no time,
+/// channel other than Pauli, depolarizing, damping, or cold thermal relaxation,
 /// a shot whose draws stay at or above each event's bound applies what every other such
 /// shot applies: a Pauli channel's identity and the no-jump damping pass. Which event a
 /// shot leaves on reads its noise stream alone, and the walk checks each `P(1)` it reads
@@ -2782,7 +2886,7 @@ pub(crate) fn run_shared_prefix(
     route: crate::sim::ResolvedBackend,
     limits: &ResolvedLimits,
 ) -> Result<Option<ShotsResult>> {
-    if MemorySpec::of(noise).is_some() {
+    if noise.has_leakage() || noise.has_quasi_static() {
         return Ok(None);
     }
     let prepared = PreparedNoise::new(noise);

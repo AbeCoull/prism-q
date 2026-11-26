@@ -82,3 +82,72 @@ fn a_reused_statevector_matches_a_fresh_one_per_shot() {
         .collect();
     assert_eq!(reused.shots, fresh);
 }
+
+#[test]
+fn sparse_quasi_static_source_ids_compact_across_blocks_and_actions() {
+    use crate::sim::noise::{GateFilter, NoiseBuilder, NoiseChannel};
+    use crate::sim::unified_pauli::PauliAxis;
+
+    let build_prog = || {
+        let mut b = DynamicProgramBuilder::new(2, 2);
+        let flag = b.declare("flag", ClassicalType::Bool, true.into());
+        b.add_gate(Gate::H, &[0]);
+        b.add_measure(0, 0);
+        b.begin_if(ClassicalExpr::Var(flag));
+        b.add_gate(Gate::H, &[1]);
+        b.add_rotation(RotationKind::Rx, &[1], ClassicalExpr::from(0.5));
+        b.add_measure(1, 1);
+        b.end().unwrap();
+        b.build().unwrap()
+    };
+
+    let program = build_prog();
+    let sparse_rules = NoiseBuilder::new()
+        .after_gates(
+            GateFilter::all().named("h"),
+            NoiseChannel::QuasiStatic {
+                axis: PauliAxis::Z,
+                weights: vec![(1usize << 61, 0.25)],
+            },
+        )
+        .after_gates(
+            GateFilter::all().named("rx"),
+            NoiseChannel::QuasiStatic {
+                axis: PauliAxis::X,
+                weights: vec![(1usize << 61, 0.15), (usize::MAX, -0.2)],
+            },
+        );
+    let dense_rules = NoiseBuilder::new()
+        .after_gates(
+            GateFilter::all().named("h"),
+            NoiseChannel::QuasiStatic {
+                axis: PauliAxis::Z,
+                weights: vec![(0, 0.25)],
+            },
+        )
+        .after_gates(
+            GateFilter::all().named("rx"),
+            NoiseChannel::QuasiStatic {
+                axis: PauliAxis::X,
+                weights: vec![(0, 0.15), (1, -0.2)],
+            },
+        );
+
+    let (compiled, _) = ProgramNoise::compile(&program, &sparse_rules).unwrap();
+    let memory = compiled
+        .memory
+        .expect("quasi-static sources require shot memory");
+    assert_eq!(memory.source_count(), 2);
+
+    let sparse_shots = simulate_program(&program)
+        .noise(&sparse_rules)
+        .seed(42)
+        .shots(64)
+        .unwrap();
+    let dense_shots = simulate_program(&program)
+        .noise(&dense_rules)
+        .seed(42)
+        .shots(64)
+        .unwrap();
+    assert_eq!(sparse_shots.shots, dense_shots.shots);
+}

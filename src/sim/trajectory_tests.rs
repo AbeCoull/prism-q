@@ -1804,3 +1804,404 @@ fn split_statevector_trajectories_match_on_one_and_many_threads() {
     };
     assert_same_records(&run(1), &run(4), "one against four threads");
 }
+
+#[test]
+fn thermal_uses_the_normalized_weight_of_the_target_site() {
+    use crate::backend::mps::MpsBackend;
+
+    let mut circuit = Circuit::new(3, 0);
+    circuit.add_gate(Gate::X, &[0]);
+    circuit.add_gate(Gate::H, &[1]);
+    circuit.add_gate(Gate::Cx, &[1, 2]);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Swap, &[0, 2]);
+    let mut base = MpsBackend::new(42, 1);
+    base.init(3, 0).unwrap();
+    base.apply_instructions(&circuit.instructions).unwrap();
+    assert!(base.truncation_discarded() > 0.1);
+    let before = base.export_statevector().unwrap();
+    let w0: f64 = before
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i & 4 == 0)
+        .map(|(_, a)| a.norm_sqr())
+        .sum();
+    let w1: f64 = before
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i & 4 != 0)
+        .map(|(_, a)| a.norm_sqr())
+        .sum();
+    let p1 = w1 / (w0 + w1);
+    let p0 = w0 / (w0 + w1);
+
+    for excited in [0.0, 0.25] {
+        let branches = ThermalBranches::new(0.4, 0.2, excited);
+        let p_relax = branches.relax * p1;
+        let p_dephase = branches.dephase * p1;
+        let p_excite = branches.excite * p0;
+        let p_hold_hot = branches.excited * (branches.decay_keep * p0 + branches.dephase_keep * p1);
+        let denom = 1.0 - p_relax - p_dephase - p_excite - p_hold_hot;
+
+        let mut draws = vec![0.5 * p_relax, p_relax + 0.5 * p_dephase, 0.99];
+        if excited > 0.0 {
+            draws.push(p_relax + p_dephase + 0.5 * p_excite);
+            draws.push(p_relax + p_dephase + p_excite + 0.5 * p_hold_hot);
+        }
+
+        for r in draws {
+            let mut actual = base.clone();
+            thermal_host_decided(&mut actual, 2, &branches, r).unwrap();
+            let after = actual.export_statevector().unwrap();
+            for (index, amp) in after.into_iter().enumerate() {
+                let bit1 = index & 4 != 0;
+                let expected = if r < p_relax {
+                    if bit1 {
+                        Complex64::default()
+                    } else {
+                        before[index | 4] / p1.sqrt()
+                    }
+                } else if r < p_relax + p_dephase {
+                    if bit1 {
+                        before[index] / p1.sqrt()
+                    } else {
+                        Complex64::default()
+                    }
+                } else if r < p_relax + p_dephase + p_excite {
+                    if bit1 {
+                        before[index & !4] / p0.sqrt()
+                    } else {
+                        Complex64::default()
+                    }
+                } else if r < p_relax + p_dephase + p_excite + p_hold_hot {
+                    let inv = (branches.excited / p_hold_hot).sqrt();
+                    let factor = if bit1 {
+                        branches.hot[1] * inv
+                    } else {
+                        branches.hot[0] * inv
+                    };
+                    before[index] * factor
+                } else {
+                    let inv = branches.cold_scale / denom.sqrt();
+                    let factor = if bit1 { branches.cold_keep * inv } else { inv };
+                    before[index] * factor
+                };
+                assert!(
+                    (amp - expected).norm() < 1e-10,
+                    "excited {excited} draw {r} amplitude {index}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn one_pass_cold_thermal_matches_host_decided_and_uses_one_sweep() {
+    use crate::backend::statevector::sweeps::take_ticks;
+
+    let branches = ThermalBranches::new(0.2, 0.15, 0.0);
+    let gamma = branches.relax + branches.dephase;
+    for (index, state) in damping_states().iter().enumerate() {
+        for qubit in 0..5 {
+            for seed in 0..16 {
+                let mut rng_fast = noise_rng(seed);
+                let mut rng_ref = rng_fast.clone();
+                let r: f64 = rand::RngExt::random(&mut rng_ref);
+
+                let (mut fast, mut host) = (copy_of(state), copy_of(state));
+                take_ticks();
+                apply_thermal_relaxation(&mut fast, qubit, &branches, &mut rng_fast).unwrap();
+                let fast_ticks = take_ticks();
+                thermal_host_decided(&mut host, qubit, &branches, r).unwrap();
+                let host_ticks = take_ticks();
+
+                if r >= gamma {
+                    assert_eq!(fast_ticks, 1, "state {index} q{qubit} seed {seed}");
+                    assert_eq!(host_ticks, 2, "state {index} q{qubit} seed {seed}");
+                }
+                assert_states_close(&fast, &host, &format!("state {index} q{qubit} seed {seed}"));
+            }
+        }
+    }
+
+    // Exercise p1 > 1.0 deferred-norm jump recovery and cold_keep == 0.0 fallback.
+    let mut excited = StatevectorBackend::new(42);
+    excited.init(1, 0).unwrap();
+    excited.apply(&one_gate(Gate::X, 0)).unwrap();
+    let mut rounded = copy_of(&excited);
+    rounded.pending_norm = 1.0 + 4.0 * f64::EPSILON;
+
+    let mut rng = noise_rng(1);
+    for (state, br, label) in [
+        (&rounded, ThermalBranches::new(0.3, 0.2, 0.0), "rounded"),
+        (
+            &excited,
+            ThermalBranches::new(1.0, 0.0, 0.0),
+            "cold_keep_zero",
+        ),
+    ] {
+        for _ in 0..12 {
+            let mut rng_ref = rng.clone();
+            let r: f64 = rand::RngExt::random(&mut rng_ref);
+            let (mut fast, mut host) = (copy_of(state), copy_of(state));
+            apply_thermal_relaxation(&mut fast, 0, &br, &mut rng).unwrap();
+            thermal_host_decided(&mut host, 0, &br, r).unwrap();
+            assert_states_close(&fast, &host, label);
+        }
+    }
+}
+
+#[test]
+fn cold_thermal_shared_prefix_keeps_the_per_shot_records() {
+    let circuit = damping_ansatz(5, 2);
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    for (slot_idx, slot) in noise.after_gate.iter_mut().enumerate() {
+        let target = slot_idx % 5;
+        slot.push(NoiseEvent {
+            channel: NoiseChannel::ThermalRelaxation {
+                t1: 40.0,
+                t2: 50.0,
+                gate_time: 5.0,
+                excited_population: 0.0,
+            },
+            qubits: smallvec![target],
+        });
+    }
+    let shared = shared_prefix(&circuit, &noise, 128, 42)
+        .expect("cold thermal relaxation shares its no-jump prefix");
+    let reference = per_shot(&circuit, &noise, 128, 42);
+    assert_same_records(&shared, &reference, "cold thermal shared prefix");
+}
+
+#[test]
+fn thermal_host_decided_zero_population_edges_avoid_nan() {
+    let mut ground = StatevectorBackend::new(42);
+    ground.init(1, 0).unwrap();
+
+    let mut tiny_excited = StatevectorBackend::new(42);
+    tiny_excited
+        .init_from_state(
+            vec![
+                Complex64::new((1.0 - 1e-16_f64).sqrt(), 0.0),
+                Complex64::new(1e-8, 0.0),
+            ],
+            0,
+        )
+        .unwrap();
+
+    let mut excited = StatevectorBackend::new(42);
+    excited.init(1, 0).unwrap();
+    excited.apply(&one_gate(Gate::X, 0)).unwrap();
+
+    let mut rounded = copy_of(&excited);
+    rounded.pending_norm = 1.0 + 4.0 * f64::EPSILON;
+
+    for (state, label) in [
+        (&ground, "p1=0"),
+        (&tiny_excited, "p1=1e-16"),
+        (&excited, "p1=1"),
+        (&rounded, "p1>1"),
+    ] {
+        for br in [
+            ThermalBranches::new(0.2, 0.1, 0.0),
+            ThermalBranches::new(0.2, 0.1, 0.35),
+            ThermalBranches::new(0.2, 0.1, 1e-15),
+        ] {
+            for r in [0.0, 1.0 - f64::EPSILON] {
+                let mut backend = copy_of(state);
+                thermal_host_decided(&mut backend, 0, &br, r).unwrap();
+                let amps = backend.export_statevector().unwrap();
+                assert!(
+                    amps.iter().all(|a| a.re.is_finite() && a.im.is_finite()),
+                    "{label} r={r} produced non-finite amplitude"
+                );
+                let norm: f64 = amps.iter().map(|a| a.norm_sqr()).sum();
+                assert!((norm - 1.0).abs() < 1e-10, "{label} r={r} norm={norm}");
+            }
+        }
+    }
+}
+
+#[test]
+fn one_op_cptp_custom_lowers_to_unitary1q_without_rdm_or_rng() {
+    use crate::backend::statevector::sweeps::take_ticks;
+    use crate::sim::noise::{GateFilter, NoiseBuilder};
+
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::Rx(0.7), &[0]);
+    circuit.add_gate(Gate::Ry(0.4), &[1]);
+    let built = NoiseBuilder::new()
+        .over_rotation(GateFilter::all(), 0.1)
+        .build(&circuit)
+        .unwrap();
+
+    for slot in &built.after_gate {
+        for ev in slot {
+            assert!(matches!(
+                PreparedChannel::new(&ev.channel),
+                PreparedChannel::Unitary1q(_)
+            ));
+        }
+    }
+
+    // Non-CPTP 1-op and 2-op Custom remain on PreparedChannel::Custom.
+    let scaled_id = [
+        [Complex64::new(0.5, 0.0), Complex64::default()],
+        [Complex64::default(), Complex64::new(0.5, 0.0)],
+    ];
+    assert!(matches!(
+        PreparedChannel::new(&NoiseChannel::Custom {
+            kraus: vec![scaled_id],
+        }),
+        PreparedChannel::Custom(_)
+    ));
+    let half = Complex64::new(0.5_f64.sqrt(), 0.0);
+    let zero = Complex64::default();
+    let k0 = [[half, zero], [zero, half]];
+    let k1 = [[zero, half], [half, zero]];
+    assert!(matches!(
+        PreparedChannel::new(&NoiseChannel::Custom {
+            kraus: vec![k0, k1],
+        }),
+        PreparedChannel::Custom(_)
+    ));
+
+    let event = PreparedEvent::with_sources(&built.after_gate[0][0], &[]);
+    let [state, _] = damping_states();
+    let mut fast = copy_of(&state);
+    let mut host = copy_of(&state);
+    let mut rng_fast = noise_rng(42);
+    let rng_expected = rng_fast.clone();
+    let mut rng_host = noise_rng(42);
+
+    take_ticks();
+    apply_noise_event(&mut fast, &event, &mut rng_fast).unwrap();
+    assert_eq!(take_ticks(), 1);
+    assert_eq!(rng_fast, rng_expected);
+
+    let NoiseChannel::Custom { kraus } = &built.after_gate[0][0].channel else {
+        unreachable!();
+    };
+    let prepared_kraus = [Kraus1q::new(&kraus[0])];
+    kraus_host_decided(&mut host, 0, &prepared_kraus, &mut rng_host).unwrap();
+    assert_states_close(&fast, &host, "Unitary1q vs kraus_host_decided");
+}
+
+#[test]
+fn empty_quasi_static_weights_lower_to_identity_and_skip_memory() {
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.measure_all();
+
+    let empty_qs = NoiseChannel::QuasiStatic {
+        axis: PauliAxis::Z,
+        weights: Vec::new(),
+    };
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    noise.after_gate[0] = vec![NoiseEvent {
+        channel: empty_qs.clone(),
+        qubits: smallvec![0],
+    }];
+
+    let (prepared, memory) = PreparedNoise::with_memory(&noise);
+    assert!(memory.is_none());
+    assert!(matches!(
+        prepared.slot(0)[0].channel,
+        PreparedChannel::Identity
+    ));
+
+    let mut sv = StatevectorBackend::new(42);
+    sv.init(2, 0).unwrap();
+    let mut rng = noise_rng(42);
+    apply_noise_event(
+        &mut sv,
+        &PreparedEvent {
+            channel: PreparedChannel::QuasiStatic {
+                axis: PauliAxis::Z,
+                weights: Box::new([]),
+            },
+            qubits: [0, 0],
+        },
+        &mut rng,
+    )
+    .unwrap();
+
+    let mut baseline = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    baseline.after_gate[0].clear();
+    let got = per_shot(&circuit, &noise, 32, 42);
+    let want = per_shot(&circuit, &baseline, 32, 42);
+    assert_same_records(&got, &want, "empty quasi-static matches baseline");
+
+    let mut damped = NoiseModel::with_amplitude_damping(&circuit, 0.05);
+    damped.after_gate[0].push(NoiseEvent {
+        channel: empty_qs,
+        qubits: smallvec![0],
+    });
+    let shared = shared_prefix(&circuit, &damped, 32, 42)
+        .expect("empty quasi-static does not block shared prefix");
+    assert_same_records(
+        &shared,
+        &per_shot(&circuit, &damped, 32, 42),
+        "empty quasi-static shared prefix",
+    );
+}
+
+#[test]
+fn large_quasi_static_source_ids_compact_and_preserve_correlations() {
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::H, &[1]);
+    circuit.measure_all();
+
+    let model_with_sources = |s0: usize, s1: usize| {
+        let mut model = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+        model.after_gate[0].push(NoiseEvent {
+            channel: NoiseChannel::QuasiStatic {
+                axis: PauliAxis::X,
+                weights: vec![(s0, 0.3), (s1, -0.2)],
+            },
+            qubits: smallvec![0],
+        });
+        model.after_gate[1].push(NoiseEvent {
+            channel: NoiseChannel::QuasiStatic {
+                axis: PauliAxis::Y,
+                weights: vec![(s0, -0.15)],
+            },
+            qubits: smallvec![1],
+        });
+        model
+    };
+
+    let dense = model_with_sources(0, 1);
+    let huge = model_with_sources(1_000_000_000_000, usize::MAX);
+
+    let (_, memory) = PreparedNoise::with_memory(&huge);
+    let memory = memory.expect("active quasi-static sources need memory");
+    assert_eq!(memory.sources, 2);
+
+    let factory = |s| -> Box<dyn Backend> { Box::new(StatevectorBackend::new(s)) };
+    for force_serial in [true, false] {
+        let got = run_trajectories(
+            factory,
+            &circuit,
+            &huge,
+            64,
+            42,
+            force_serial,
+            crate::sim::ResolvedBackend::Statevector,
+        )
+        .unwrap();
+        let want = run_trajectories(
+            factory,
+            &circuit,
+            &dense,
+            64,
+            42,
+            force_serial,
+            crate::sim::ResolvedBackend::Statevector,
+        )
+        .unwrap();
+        assert_same_records(&got, &want, &format!("force_serial={force_serial}"));
+    }
+}

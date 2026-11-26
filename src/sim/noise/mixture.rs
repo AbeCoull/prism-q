@@ -69,8 +69,21 @@ fn phase_damping_kraus(gamma: f64) -> [[[Complex64; 2]; 2]; 2] {
 /// [`NoiseChannel::validate`] enforces; the clamp only absorbs rounding at the
 /// boundary.
 pub(crate) fn thermal_relaxation_rates(t1: f64, t2: f64, gate_time: f64) -> (f64, f64) {
+    if !(gate_time > 0.0 && t1 > 0.0 && t2 > 0.0) {
+        return (0.0, 0.0);
+    }
     let gad = 1.0 - (-gate_time / t1).exp();
-    let gpd = (1.0 - (gate_time / t1 - 2.0 * gate_time / t2).exp()).clamp(0.0, 1.0);
+    let gpd = if 0.5 * t2 >= t1 {
+        0.0
+    } else {
+        let a = gate_time / t1;
+        let b = 2.0 * (gate_time / t2);
+        if a.is_infinite() && b.is_infinite() {
+            1.0
+        } else {
+            (1.0 - (a - b).exp()).clamp(0.0, 1.0)
+        }
+    };
     (gad, gpd)
 }
 
@@ -142,6 +155,7 @@ pub(crate) fn kraus_1q(channel: &NoiseChannel) -> Vec<[[Complex64; 2]; 2]> {
         | NoiseChannel::LeakageTransport { .. } => {
             unreachable!("two-qubit channels have no single-qubit Kraus lowering")
         }
+        NoiseChannel::QuasiStatic { weights, .. } if weights.is_empty() => vec![id],
         NoiseChannel::Leakage { .. }
         | NoiseChannel::Seepage { .. }
         | NoiseChannel::QuasiStatic { .. } => {

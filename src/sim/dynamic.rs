@@ -202,9 +202,7 @@ impl ProgramNoise {
     /// Compile `rules` for `program`, also returning every event in one model
     /// for the route to read.
     fn compile(program: &DynamicProgram, rules: &NoiseBuilder) -> Result<(Self, NoiseModel)> {
-        let mut blocks = Vec::with_capacity(program.blocks().len());
-        let mut actions = Vec::with_capacity(program.blocks().len());
-        let mut channels = Vec::new();
+        let mut built = Vec::with_capacity(program.blocks().len());
         let mut readout = Vec::new();
         for block in program.blocks() {
             let mut model = rules.build(&block.circuit)?;
@@ -217,13 +215,24 @@ impl ProgramNoise {
                     Action::Assign { .. } | Action::WriteBits { .. } => Vec::new(),
                 });
             }
+            readout = std::mem::take(&mut model.readout);
             let rotations = NoiseModel {
                 after_gate: rotations,
                 readout: Vec::new(),
             };
-            blocks.push(PreparedNoise::new(&model));
-            actions.push(PreparedNoise::new(&rotations));
-            readout = std::mem::take(&mut model.readout);
+            built.push((model, rotations));
+        }
+        let sources = PreparedNoise::compact_sources(
+            built
+                .iter()
+                .flat_map(|(model, rotations)| [model, rotations]),
+        );
+        let mut blocks = Vec::with_capacity(built.len());
+        let mut actions = Vec::with_capacity(built.len());
+        let mut channels = Vec::new();
+        for (model, rotations) in built {
+            blocks.push(PreparedNoise::from_model(&model, &sources));
+            actions.push(PreparedNoise::from_model(&rotations, &sources));
             channels.extend(model.after_gate);
             channels.extend(rotations.after_gate);
         }
@@ -235,7 +244,7 @@ impl ProgramNoise {
             blocks,
             actions,
             readout: trajectory::flippable_readout(&readout),
-            memory: MemorySpec::of(&channels),
+            memory: MemorySpec::with_sources(channels.has_leakage(), sources.len()),
         };
         Ok((compiled, channels))
     }

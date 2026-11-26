@@ -7,7 +7,9 @@
 # result: a PASS, or a FAIL on disjoint rows. RERUN, NO DATA, host-busy and a
 # missing report leave it standing. A FAIL report carries a second verdict line
 # below the first, as a report with a follow-up section does, so the gate must
-# read the first. The stub exits 99 unless the gate passes --no-confirm.
+# read the first. The stub exits 99 unless the gate passes --no-confirm. A
+# regression on a `report` row alone passes without a second run, and each case
+# checks the outcome file the CI verdict job reads.
 #
 # Usage: scripts/bench_ci_test.sh
 
@@ -34,10 +36,12 @@ report() {
 
 # Cases name the first and second run as `exit/report`; report `none` writes no file.
 check() {
-    local label="$1" first="$2" second="$3" want="$4" want_runs="$5"
+    local label="$1" first="$2" second="$3" want="$4" want_runs="$5" want_outcome="$6"
     local tree="$SCRATCH/$label"
     mkdir -p "$tree/scripts" "$tree/bench_results"
     cp "$SCRIPT_DIR/bench_ci.sh" "$tree/scripts/bench_ci.sh"
+    printf '%s\n' 'a/1 wall -' 'b/2 wall -' '# a comment' 'r/1 report -' 'i/1 ir twin/x' \
+        > "$tree/scripts/bench_gate_rows.txt"
     cat > "$tree/scripts/bench_ab.sh" <<'STUB'
 #!/usr/bin/env bash
 dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -58,37 +62,42 @@ STUB
     report "${first#*/}" > "$tree/scripts/report1"
     report "${second#*/}" > "$tree/scripts/report2"
 
-    local got runs
+    local got runs outcome
     PRISM_BENCH_REF=stub bash "$tree/scripts/bench_ci.sh" > "$tree/log" 2>&1
     got=$?
     runs="$(cat "$tree/scripts/runs" 2>/dev/null || echo 0)"
+    outcome="$(cat "$tree/bench_results/ci-outcome.txt" 2>/dev/null || echo none)"
+    if [[ -f "$tree/bench_results/ci-regressed.txt" ]]; then
+        outcome+=":$(paste -sd, "$tree/bench_results/ci-regressed.txt")"
+    fi
 
-    if [[ "$got" == "$want" && "$runs" == "$want_runs" ]]; then
+    if [[ "$got" == "$want" && "$runs" == "$want_runs" && "$outcome" == "$want_outcome" ]]; then
         PASS=$((PASS + 1))
-        printf 'ok    %-44s exit %s, %s run(s)\n' "$label" "$got" "$runs"
+        printf 'ok    %-44s exit %s, %s run(s), %s\n' "$label" "$got" "$runs" "$outcome"
     else
         FAIL=$((FAIL + 1))
-        printf 'FAIL  %-44s want exit %s/%s run(s), got %s/%s\n' "$label" "$want" "$want_runs" "$got" "$runs"
+        printf 'FAIL  %-44s want %s/%s/%s, got %s/%s/%s\n' "$label" "$want" "$want_runs" "$want_outcome" "$got" "$runs" "$outcome"
         sed 's/^/      /' "$tree/log"
     fi
 }
 
 echo "=== bench_ci FAIL confirmation ==="
 
-check first-pass                     0/pass            0/none            0 1
-check first-rerun-blocks             3/rerun           0/none            1 1
-check first-host-busy-blocks         2/none            0/none            1 1
-check first-smoke-test-blocks        4/none            0/none            1 1
-check confirm-pass-clears            1/fail:a/1        0/pass            0 2
-check confirm-same-code-clears       1/fail:a/1        0/control         0 2
-check confirm-same-row-blocks        1/fail:a/1        1/fail:a/1        1 2
-check confirm-disjoint-rows-clear    1/fail:a/1        1/fail:b/2        0 2
-check confirm-rerun-blocks           1/fail:a/1        3/rerun           1 2
-check confirm-nodata-blocks          1/fail:a/1        5/nodata          1 2
-check confirm-host-busy-blocks       1/fail:a/1        2/none            1 2
-check confirm-missing-report-blocks  1/fail:a/1        1/none            1 2
-check confirm-pass-without-report    1/fail:a/1        0/none            1 2
-check confirm-fail-without-rows      1/fail:a/1        1/failnorow       1 2
+check first-pass                     0/pass            0/none            0 1 pass
+check first-rerun-blocks             3/rerun           0/none            1 1 invalid
+check first-host-busy-blocks         2/none            0/none            1 1 invalid
+check first-smoke-test-blocks        4/none            0/none            1 1 invalid
+check first-report-row-passes        1/fail:r/1        0/none            0 1 pass
+check confirm-pass-clears            1/fail:a/1        0/pass            0 2 pass
+check confirm-same-code-clears       1/fail:a/1        0/control         0 2 pass
+check confirm-same-row-blocks        1/fail:a/1        1/fail:a/1        1 2 fail:a/1
+check confirm-disjoint-rows-clear    1/fail:a/1        1/fail:b/2        0 2 pass
+check confirm-rerun-blocks           1/fail:a/1        3/rerun           1 2 fail:a/1
+check confirm-nodata-blocks          1/fail:a/1        5/nodata          1 2 fail:a/1
+check confirm-host-busy-blocks       1/fail:a/1        2/none            1 2 fail:a/1
+check confirm-missing-report-blocks  1/fail:a/1        1/none            1 2 fail:a/1
+check confirm-pass-without-report    1/fail:a/1        0/none            1 2 fail:a/1
+check confirm-fail-without-rows      1/fail:a/1        1/failnorow       1 2 fail:a/1
 
 echo
 echo "$PASS passed, $FAIL failed"

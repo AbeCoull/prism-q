@@ -1,0 +1,72 @@
+# Benchmark gate rows: the wall-clock rows scripts/bench_ci.sh measures and how a
+# regression on each counts. scripts/bench_gate_verdict.py reads the same file.
+#
+#   wall         a regression in both runs blocks.
+#   corroborate  a regression in both runs blocks only when the callgrind twin in
+#                benches/iai_twins.rs also executes more instructions; with the twin flat
+#                it is a warning, since code layout and host noise move time alone.
+#   report       measured and reported, never blocks; the same-code control spread
+#                exceeds the gate on most hosted runners.
+#   ir           not timed; its twin in benches/iai.rs holds the instruction-count gate.
+#
+# A row moves to corroborate when it confirmed a regression on a change that cannot
+# reach it, or moved past the gate under a shuffled function order of identical source.
+# Columns: row, policy, twin (iai `function/id`, or - for none).
+
+# Dense statevector. Above the parallel floor, where callgrind on one thread cannot see
+# a threading change, so these keep the wall clock. Layout shuffles moved them 3.4% at most.
+statevector/scalability_d5/18                        wall         -
+statevector/qft_textbook/20                          wall         -
+statevector/qpe_t_gate/16q                           wall         -
+statevector/qaoa_l3/16                               wall         -
+statevector/diag_mixed_l6/20                         wall         -
+
+# Clifford tableau and block split. The CNOT wall collapses every qubit at random and
+# its control spread exceeded the gate in 41 of 46 hosted reports.
+stabilizer/scaling/500                               wall         -
+stabilizer/measurement/wall_measure_all/1000         report       -
+factored_stabilizer/local_blocks/10x5/50             wall         -
+
+# Compiled shot sampling. Both confirmed +45% to +62% on a change outside the sampler.
+compiled_sampler/noiseless/noiseless_500q_10k        corroborate  compiled_sampler_noiseless/q500_10k
+compiled_sampler/noisy/noisy_500q_10k                corroborate  compiled_sampler_noisy/q500_10k
+
+# MPS and sparse. sparse/sampling/32 confirmed +7% to +9% on four changes, with no
+# layout sensitivity of its own (2.3% at most), so its twin decides.
+mps/random_d10/16                                    wall         -
+mps/sampling/32                                      wall         -
+sparse/random_d10/20                                 wall         -
+sparse/sampling/32                                   corroborate  sparse_sampling/q32_20k
+
+# Density matrix.
+density_matrix/rzz_layers_fused/10                   wall         -
+density_matrix/noisy_channels/kraus_amp_damp/10      wall         -
+
+# Split state and tensor network.
+factored/partial_independence/factored/20            wall         -
+tn/linear_chain/12                                   wall         -
+tn/midmeasure_chain/20                               corroborate  tn_midmeasure_chain/q20
+
+# Product state.
+product/scaling_d10/64                               wall         -
+
+# Clifford+T. The 6 us SPD row moved -7.4% to +16.3% on function order alone and is
+# counted instead of timed. spp_10k/10q exceeded the gate on its own control in about
+# half of all hosted reports.
+clifford_t/spd/10q_12t                               ir           clifford_t_spd/q10_t12
+clifford_t/spp_10k/10q_12t                           report       -
+stabilizer_rank/approx_1024/10q_20t                  wall         -
+
+# Analytic terminals. pauli_sum/18 confirmed three times and reached +5.5% on layout.
+gradient/qaoa_l1/adjoint/18                          wall         -
+expectation/pauli_sum/18                             corroborate  expectation_pauli_sum/q18
+auto/expectation/brickwork_d4/20                     corroborate  auto_expectation/brickwork_d4_q20
+
+# Noise. pauli_path/50 reached -5.2% and +5.6% on layout.
+noisy_sampling/trajectory_pauli/non_clifford_12q_512 corroborate  trajectory_pauli/non_clifford_q12_512
+noisy_sampling/compiled_pauli/clifford_100q_10k      wall         -
+pauli_path/noisy_expectation/path/50                 corroborate  pauli_path_noisy_expectation/q50
+
+# Circuit level paths no backend row reaches.
+dynamic/guarded_region/20                            wall         -
+vqe/bind/16                                          wall         -

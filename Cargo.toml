@@ -237,3 +237,7 @@ harness = false
 [[bench]]
 name = "iai"
 harness = false
+
+[[bench]]
+name = "iai_twins"
+harness = false

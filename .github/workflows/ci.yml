@@ -64,7 +64,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Correctness tooling tests
-        run: python3 -m unittest discover -s scripts -p 'test_correctness_tools.py'
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
       # A new public Rust item needs a decision in bindings/python/parity.toml. The
       # wheel jobs run this too, but only after a full extension build.
@@ -752,7 +752,9 @@ jobs:
               cat bench_results/ci-ab-confirm.md
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-          exit "$status"
+          # The verdict job decides from the outcome file; only a run that wrote
+          # none fails here.
+          [[ -f bench_results/ci-outcome.txt ]] || exit "$status"
 
       - name: Upload benchmark artifacts
         if: always() && steps.scope.outputs.run == 'true'
@@ -763,6 +765,43 @@ jobs:
           path: |
             head/bench_results/ci-ab.md
             head/bench_results/ci-ab-confirm.md
+            head/bench_results/ci-outcome.txt
+            head/bench_results/ci-regressed.txt
+
+  # Combines the wall-clock gate with the callgrind twins: a row that regressed in
+  # both wall-clock runs blocks when its policy in scripts/bench_gate_rows.txt is
+  # `wall`, or when it is `corroborate` and its twin also executes more
+  # instructions. Advisory, like the gate it reads.
+  benchmark-verdict:
+    name: Benchmark verdict
+    runs-on: ubuntu-latest
+    needs: [benchmark-regression, instruction-counts]
+    if: always() && github.event_name == 'pull_request' && needs.benchmark-regression.result != 'skipped'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: benchmark-regression
+          path: bench
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: instruction-counts
+          path: iai-home
+      - name: Decide
+        run: |
+          set +e
+          python3 scripts/bench_gate_verdict.py --rows scripts/bench_gate_rows.txt \
+            --results bench --iai-home iai-home > verdict.md
+          status=$?
+          { echo "## Benchmark verdict"; echo ""; cat verdict.md; } >> "$GITHUB_STEP_SUMMARY"
+          cat verdict.md
+          exit "$status"
 
   # The instrumented suite is the longest Linux job, and the badge it feeds is read
   # from main only, so it runs on pushes to main rather than on every pull request.
@@ -1027,6 +1066,9 @@ jobs:
           git worktree add --detach "$RUNNER_TEMP/base" "${{ steps.base.outputs.sha }}"
           cd "$RUNNER_TEMP/base"
           cargo bench --bench iai --features "$CI_FEATURES" -- --save-baseline=base
+          if [[ -f benches/iai_twins.rs ]]; then
+            cargo bench --bench iai_twins --features "$CI_FEATURES" -- --save-baseline=base
+          fi
 
       # The runner exits 3 when a row's Ir grows past the limit.
       - name: Count the head and compare
@@ -1045,6 +1087,19 @@ jobs:
             python3 scripts/iai_summary.py "$IAI_CALLGRIND_HOME" --threshold "$REGRESSION_THRESHOLD"
           } | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$status"
+
+      # Twins of wall-clock gate rows, counted without a limit: the Benchmark verdict
+      # job reads them to tell a change in executed work from a timing-only move. A
+      # failure here leaves those rows on the wall clock alone, never fails this job.
+      - name: Count the wall-clock twins
+        if: always() && steps.base.outputs.run == 'true'
+        continue-on-error: true
+        run: |
+          args=(--save-summary=json)
+          if [[ -d "$RUNNER_TEMP/base" && -f "$RUNNER_TEMP/base/benches/iai_twins.rs" ]]; then
+            args+=(--baseline=base)
+          fi
+          cargo bench --bench iai_twins --features "$CI_FEATURES" -- "${args[@]}"
 
       - name: Upload the callgrind profiles
         if: always() && steps.base.outputs.run == 'true'

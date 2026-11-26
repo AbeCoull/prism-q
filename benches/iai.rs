@@ -11,6 +11,7 @@ use prism_q::circuits;
 use std::hint::black_box;
 
 mod common;
+use common::fixtures::random_t_insertion_circuit;
 use common::{SEED, run_shots_with, run_with};
 
 fn measured(mut circuit: Circuit) -> Circuit {
@@ -61,6 +62,12 @@ fn mps_random_d10(circuit: Circuit) {
 }
 
 #[library_benchmark]
+#[bench::q10_t12(random_t_insertion_circuit(10, 12, SEED))]
+fn clifford_t_spd(circuit: Circuit) {
+    black_box(prism_q::run_spd(&circuit, 0.0, 0).unwrap());
+}
+
+#[library_benchmark]
 #[bench::qaoa_q16(circuits::qaoa_circuit(16, 3, SEED))]
 fn fuse_circuit_qaoa_l3(circuit: Circuit) {
     black_box(fuse_circuit(&circuit, true).into_owned());
@@ -76,6 +83,7 @@ library_benchmark_group!(
         compiled_sampler,
         density_matrix_random_d10,
         mps_random_d10,
+        clifford_t_spd,
         fuse_circuit_qaoa_l3
 );
 

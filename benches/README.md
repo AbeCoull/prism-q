@@ -170,8 +170,10 @@ grows with segments times dimension cubed.
 
 ### Instruction counts (iai)
 
-Eight single-thread rows under callgrind, one kernel each, for the deterministic CI
-gate described under [Instruction-count gate](#instruction-count-gate). Linux only.
+Nine single-thread rows under callgrind, one kernel each, for the deterministic CI
+gate described under [Instruction-count gate](#instruction-count-gate). A second target,
+`iai_twins`, counts eight wall-clock gate rows for the [benchmark verdict](#benchmark-verdict).
+Linux only.
 
 ### Python binding timings
 
@@ -699,22 +701,9 @@ safe as a required check. The reference worktree sits beside the checkout becaus
 `/target/` in `.gitignore` is anchored to the repository root: a nested worktree's build
 output would read as an untracked change and abort the A/B.
 
-CI workloads, one or two rows per simulation path (`scripts/bench_ci.sh` lists every row
-and the reason for it):
-
-| Path | Rows |
-|------|------|
-| Dense statevector | `statevector/{scalability_d5/18, qft_textbook/20, qpe_t_gate/16q, qaoa_l3/16, diag_mixed_l6/20}` |
-| Stabilizer | `stabilizer/scaling/500`, `stabilizer/measurement/wall_measure_all/1000`, `factored_stabilizer/local_blocks/10x5/50` |
-| Compiled sampler | `compiled_sampler/noiseless/noiseless_500q_10k`, `compiled_sampler/noisy/noisy_500q_10k` |
-| MPS and sparse | `mps/random_d10/16`, `mps/sampling/32`, `sparse/random_d10/20`, `sparse/sampling/32` |
-| Density matrix | `density_matrix/rzz_layers_fused/10`, `density_matrix/noisy_channels/kraus_amp_damp/10` |
-| Factored and tensor network | `factored/partial_independence/factored/20`, `tn/linear_chain/12`, `tn/midmeasure_chain/20` |
-| Product state | `product/scaling_d10/64` |
-| Clifford+T | `clifford_t/spd/10q_12t`, `spp/spp_10k/20q_8t`, `stabilizer_rank/approx_1024/10q_20t` |
-| Analytic terminals | `gradient/qaoa_l1/adjoint/18`, `expectation/pauli_sum/18`, `auto/expectation/brickwork_d4/20` |
-| Noise | `noisy_sampling/trajectory_pauli/non_clifford_12q_512`, `noisy_sampling/compiled_pauli/clifford_100q_10k`, `pauli_path/noisy_expectation/path/50` |
-| Circuit level | `dynamic/guarded_region/20`, `vqe/bind/16` |
+CI workloads are one or two rows per simulation path. `scripts/bench_gate_rows.txt` lists
+every row with the policy a regression on it follows (see
+[Benchmark verdict](#benchmark-verdict)), and `scripts/bench_ci.sh` explains the sizes.
 
 The sizes are the smallest that still exercise the pipeline that ships:
 `MIN_QUBITS_FOR_DIAG_BATCH = 14` and `MIN_QUBITS_FOR_POST_PHASE_BATCH = 18` in
@@ -737,6 +726,32 @@ against a 4.2% control spread; their worst same-code control spreads were 20.6%,
 21.8% and 18.3%. An earlier three-run measurement on the same host read 6.0%, 7.1% and
 5.9%, so the tier's noise floor is not a fixed property of the machine. Confirmation
 costs nothing on a green run and one extra set on a red one.
+
+### Benchmark verdict
+
+Confirmation filters host noise, not the binary. Both runs reuse the same two
+executables, so a timing difference that comes from where the linker placed each function
+repeats in the second run and reads as confirmed. With lld relinking identical source in
+a shuffled function order, `clifford_t/spd/10q_12t` moved from -7.4% to +16.3%, and
+`expectation/pauli_sum/18` and `pauli_path/noisy_expectation/path/50` reached the gate on
+some orders. Aligning every function to 64 bytes on both sides did not remove it.
+
+The `Benchmark verdict` job therefore reads each confirmed row's policy from
+`scripts/bench_gate_rows.txt`:
+
+| Policy | A regression in both runs |
+|--------|---------------------------|
+| `wall` | Blocks. Rows above the parallel floor stay here, since one thread under callgrind cannot see a threading change. |
+| `corroborate` | Blocks when the row's twin in `benches/iai_twins.rs` executes at least 0.5% more instructions, or has no base to compare; otherwise a warning. |
+| `report` | Never blocks, and does not trigger the confirmation run. |
+| `ir` | Not timed. The twin in `benches/iai.rs` holds the instruction-count gate instead. |
+
+Layout moves time without changing the instructions executed, and two builds of the same
+source differ by at most 0.13% in instruction count, so 0.5% separates a change in work
+from a change in placement. A row moves to `corroborate` once it confirms a regression on
+a change that cannot reach it or moves past the gate under a shuffled function order. The
+`Benchmark Regression` job now passes whenever the A/B produced an outcome, and the
+verdict job carries the result; both stay out of the required `CI result` check.
 
 Local reproduction, against `main` as the reference:
 
@@ -761,7 +776,7 @@ row is a control row, the report is this host's noise floor, and a clean run rea
 
 ## Instruction-count gate
 
-The `iai` target (`benches/iai.rs`) counts instructions under callgrind: eight rows, one
+The `iai` target (`benches/iai.rs`) counts instructions under callgrind: nine rows, one
 kernel each, all on a single Rayon thread with the tile budget pinned to 256 KB. A count
 depends on the binary and its input, not the host's load, so the `instruction-counts`
 CI job holds the 5% threshold on a shared runner where the wall-clock gate cannot.
@@ -778,6 +793,7 @@ process: two CI builds of the same source differed by at most 0.13% on
 | `compiled_sampler/q100_1k` | Compiled frame sampler at 100 qubits |
 | `density_matrix_random_d10/q8` | Density-matrix superoperator kernels |
 | `mps_random_d10/q12` | MPS contraction and truncation at bond 64 |
+| `clifford_t_spd/q10_t12` | The deterministic Pauli engine, in place of its wall-clock row |
 | `fuse_circuit_qaoa_l3/qaoa_q16` | The fusion pipeline alone, no simulation |
 
 The gate catches a change in the work a row does: a kernel that executes more per

@@ -12,7 +12,7 @@ use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 use crate::limits::{Limit, LimitKnob, LimitSource, ResolvedLimits};
 use crate::sim::compiled::PackedShots;
-use crate::sim::unified_pauli::{PauliTerm, run_spd_observable_light_cone};
+use crate::sim::unified_pauli::{PauliTerm, PreparedSpd};
 
 /// Strategy for running a QEC program that may contain T gates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -134,17 +134,22 @@ fn run_qec_program_auto(
     program: &QecProgram,
     lowered: &LoweredPauliObservables,
 ) -> Result<QecSampleResult> {
-    run_qec_program_auto_with(program, lowered, spd_on_lowered, camps_on_lowered)
+    run_qec_program_auto_with(program, lowered, spd_on_lowered_checked, camps_on_lowered)
 }
 
 fn run_qec_program_auto_with(
     program: &QecProgram,
     lowered: &LoweredPauliObservables,
-    spd: impl FnOnce(&QecProgram, &LoweredPauliObservables) -> Result<QecSampleResult>,
+    spd: impl FnOnce(&QecProgram, &LoweredPauliObservables) -> Result<(QecSampleResult, f64)>,
     camps: impl FnOnce(&QecProgram, &LoweredPauliObservables) -> Result<QecSampleResult>,
 ) -> Result<QecSampleResult> {
     match spd(program, lowered) {
-        Ok(result) if analytical_result_has_no_truncation(&result) => Ok(result),
+        Ok((result, pi_variance))
+            if analytical_result_has_no_truncation(&result)
+                && pi_variance <= QEC_SPD_NEGLIGIBLE_VARIANCE =>
+        {
+            Ok(result)
+        }
         Ok(_) => run_qec_program_auto_after_camps(
             program,
             lowered,
@@ -429,48 +434,128 @@ struct ConditionalEval {
     discarded_sq: f64,
 }
 
+struct SubsetAccum {
+    pi_mean: f64,
+    pi_err: f64,
+    obs_means: SmallVec<[f64; 4]>,
+    obs_errs: SmallVec<[f64; 4]>,
+}
+
+struct ConditionalExpectations {
+    means: Vec<f64>,
+    discarded: Vec<f64>,
+    accept_rate: f64,
+    pi_variance: f64,
+}
+
 /// Generic conditional-expectation evaluator for the analytical
 /// strategies. Implements `⟨O⟩_post = ⟨O·Π⟩ / ⟨Π⟩` where
 /// `Π = ∏_j (I + ε_j Z(S_j))/2`. Expands the product into a sum over
 /// `2^J` subsets `T ⊆ {1..J}` and evaluates each Pauli-string
 /// expectation via the supplied closure. Returns
-/// `(post_means, per_observable_discarded_sq, accept_rate)`, where the
-/// discarded-weight vector is aligned with `observable_terms_list` so each
-/// observable's truncation error is tracked independently.
+/// [`ConditionalExpectations`] with per-observable means and truncation
+/// variances alongside `accept_rate` and denominator `pi_variance`.
 fn evaluate_conditional_expectations<F>(
     observable_terms_list: &[Vec<PauliTerm>],
     postsel: &[(Vec<usize>, f64)],
-    mut eval: F,
-) -> Result<(Vec<f64>, Vec<f64>, f64)>
+    eval: F,
+) -> Result<ConditionalExpectations>
 where
-    F: FnMut(&[PauliTerm]) -> Result<ConditionalEval>,
+    F: Fn(&[PauliTerm]) -> Result<ConditionalEval> + Sync,
 {
     let j = postsel.len();
     let subset_count = 1usize << j;
     let scale = 1.0 / (1usize << j) as f64;
 
-    let mut pi_sum = 0.0;
-    let mut obs_pi_sums = vec![0.0; observable_terms_list.len()];
-    let mut obs_discarded = vec![0.0; observable_terms_list.len()];
-
-    for mask in 0..subset_count {
+    let eval_subset = |mask: usize| -> Result<SubsetAccum> {
         let mut sign = 1.0;
-        let mut qubit_groups: Vec<&[usize]> = Vec::with_capacity(j);
-        for (j_idx, (qubits, eps)) in postsel.iter().enumerate() {
-            if (mask >> j_idx) & 1 == 1 {
-                sign *= *eps;
-                qubit_groups.push(qubits.as_slice());
+        let pi_pauli = if mask == 0 {
+            Vec::new()
+        } else {
+            let mut qubit_groups: SmallVec<[&[usize]; 8]> = SmallVec::new();
+            for (j_idx, (qubits, eps)) in postsel.iter().enumerate() {
+                if (mask >> j_idx) & 1 == 1 {
+                    sign *= *eps;
+                    qubit_groups.push(qubits.as_slice());
+                }
             }
-        }
-        let pi_pauli = merge_qubit_groups_into_z_terms(qubit_groups.iter().copied());
-        let pi_value = eval(&pi_pauli)?;
-        pi_sum += sign * pi_value.mean;
+            merge_qubit_groups_into_z_terms(qubit_groups.iter().copied())
+        };
 
-        for (obs_idx, obs_terms) in observable_terms_list.iter().enumerate() {
-            let combined_pauli = merge_projector_with_observable(&pi_pauli, obs_terms);
-            let outcome = eval(&combined_pauli)?;
-            obs_pi_sums[obs_idx] += sign * outcome.mean;
-            obs_discarded[obs_idx] += outcome.discarded_sq;
+        let pi_value = if pi_pauli.is_empty() {
+            ConditionalEval {
+                mean: 1.0,
+                discarded_sq: 0.0,
+            }
+        } else {
+            eval(&pi_pauli)?
+        };
+
+        let mut obs_means = SmallVec::with_capacity(observable_terms_list.len());
+        let mut obs_errs = SmallVec::with_capacity(observable_terms_list.len());
+        for obs_terms in observable_terms_list {
+            let outcome = if pi_pauli.is_empty() {
+                if obs_terms.is_empty() {
+                    ConditionalEval {
+                        mean: 1.0,
+                        discarded_sq: 0.0,
+                    }
+                } else {
+                    eval(obs_terms)?
+                }
+            } else {
+                let combined_pauli = merge_projector_with_observable(&pi_pauli, obs_terms);
+                if combined_pauli.is_empty() {
+                    ConditionalEval {
+                        mean: 1.0,
+                        discarded_sq: 0.0,
+                    }
+                } else {
+                    eval(&combined_pauli)?
+                }
+            };
+            obs_means.push(sign * outcome.mean);
+            obs_errs.push(outcome.discarded_sq.sqrt());
+        }
+
+        Ok(SubsetAccum {
+            pi_mean: sign * pi_value.mean,
+            pi_err: pi_value.discarded_sq.sqrt(),
+            obs_means,
+            obs_errs,
+        })
+    };
+
+    #[cfg(feature = "parallel")]
+    let subsets: Vec<SubsetAccum> = {
+        use rayon::prelude::*;
+        (0..subset_count)
+            .into_par_iter()
+            .map(eval_subset)
+            .collect::<Result<Vec<_>>>()?
+    };
+
+    #[cfg(not(feature = "parallel"))]
+    let subsets: Vec<SubsetAccum> = (0..subset_count)
+        .map(eval_subset)
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut pi_sum = 0.0;
+    let mut pi_err_sum = 0.0;
+    let mut obs_pi_sums = vec![0.0; observable_terms_list.len()];
+    let mut obs_err_sums = vec![0.0; observable_terms_list.len()];
+
+    for subset in subsets {
+        pi_sum += subset.pi_mean;
+        pi_err_sum += subset.pi_err;
+        for (obs_idx, (&mean, &err)) in subset
+            .obs_means
+            .iter()
+            .zip(subset.obs_errs.iter())
+            .enumerate()
+        {
+            obs_pi_sums[obs_idx] += mean;
+            obs_err_sums[obs_idx] += err;
         }
     }
 
@@ -487,7 +572,25 @@ where
         .iter()
         .map(|s| (s * scale) / accept_rate)
         .collect();
-    Ok((post_means, obs_discarded, accept_rate))
+    let pi_err = pi_err_sum * scale;
+    let denom = (accept_rate - pi_err).max(1e-12);
+    let pi_bound = pi_err / denom;
+    let pi_variance = pi_bound * pi_bound;
+    let obs_discarded: Vec<f64> = post_means
+        .iter()
+        .zip(obs_err_sums.iter())
+        .map(|(&post_mean, &obs_err_sum)| {
+            let obs_err = obs_err_sum * scale;
+            let bound = (obs_err + post_mean.abs().max(1.0) * pi_err) / denom;
+            bound * bound
+        })
+        .collect();
+    Ok(ConditionalExpectations {
+        means: post_means,
+        discarded: obs_discarded,
+        accept_rate,
+        pi_variance,
+    })
 }
 
 fn build_qec_result_from_observable_means(
@@ -639,14 +742,16 @@ fn lower_pauli_observables(program: &QecProgram) -> Result<LoweredPauliObservabl
 /// means directly or routing through the conditional-expectation combiner
 /// when postselection rows exist. `discarded_sq` from `eval` lands in
 /// `QecObservableEstimate::variance` on both paths; `EXP_VAL` estimates
-/// are scaled by the op coefficient (mean by `c`, variance by `c²`).
+/// are scaled by the op coefficient (mean by `c`, variance by `c²`). Also
+/// returns `pi_variance` so 0-observable postselected programs still report
+/// denominator truncation.
 fn evaluate_observable_program<F>(
     program: &QecProgram,
     lowered: &LoweredPauliObservables,
-    mut eval: F,
-) -> Result<QecSampleResult>
+    eval: F,
+) -> Result<(QecSampleResult, f64)>
 where
-    F: FnMut(&[PauliTerm]) -> Result<ConditionalEval>,
+    F: Fn(&[PauliTerm]) -> Result<ConditionalEval> + Sync,
 {
     if lowered.postsel_rows.is_empty() {
         let mut means = Vec::with_capacity(lowered.observable_terms_list.len());
@@ -670,25 +775,26 @@ where
             });
         }
         let result = build_qec_result_from_observable_means(program, means, estimates)?;
-        return Ok(if exp_estimates.is_empty() {
+        let result = if exp_estimates.is_empty() {
             result
         } else {
             result.with_expectation_values(exp_estimates)
-        });
+        };
+        return Ok((result, 0.0));
     }
 
     let postsel = lower_postselection_rows(&lowered.postsel_rows, &lowered.record_to_qubit)?;
     let num_observables = lowered.observable_terms_list.len();
     let mut all_terms: Vec<Vec<PauliTerm>> = lowered.observable_terms_list.clone();
     all_terms.extend(lowered.exp_vals.iter().map(|ev| ev.terms.clone()));
-    let (mut means, mut discarded, accept_rate) =
-        evaluate_conditional_expectations(&all_terms, &postsel, eval)?;
-    let exp_means = means.split_off(num_observables);
-    let exp_discarded = discarded.split_off(num_observables);
-    let estimate_shots = accepted_shots_for_rate(program.options().shots, accept_rate);
-    let estimates: Vec<_> = means
+    let mut cond = evaluate_conditional_expectations(&all_terms, &postsel, eval)?;
+    let exp_means = cond.means.split_off(num_observables);
+    let exp_discarded = cond.discarded.split_off(num_observables);
+    let estimate_shots = accepted_shots_for_rate(program.options().shots, cond.accept_rate);
+    let estimates: Vec<_> = cond
+        .means
         .iter()
-        .zip(discarded.iter())
+        .zip(cond.discarded.iter())
         .map(|(&mean, &discarded_sq)| QecObservableEstimate {
             mean,
             variance: discarded_sq,
@@ -705,12 +811,14 @@ where
             num_shots: estimate_shots,
         })
         .collect();
-    let result = build_qec_result_with_acceptance(program, means, estimates, accept_rate)?;
-    Ok(if exp_estimates.is_empty() {
+    let result =
+        build_qec_result_with_acceptance(program, cond.means, estimates, cond.accept_rate)?;
+    let result = if exp_estimates.is_empty() {
         result
     } else {
         result.with_expectation_values(exp_estimates)
-    })
+    };
+    Ok((result, cond.pi_variance))
 }
 
 /// Default MPS bond-dimension cap for CAMPS. Matches the
@@ -780,6 +888,7 @@ fn camps_on_lowered(
             discarded_sq: 0.0,
         })
     })
+    .map(|(result, _)| result)
 }
 
 /// Turn slicing off unless the slice budget was set explicitly. The fallback runs after
@@ -806,6 +915,7 @@ fn tensor_network_on_lowered(
             discarded_sq: 0.0,
         })
     })
+    .map(|(result, _)| result)
 }
 
 /// Tolerance on `⟨ψ|S|ψ⟩ = +1` for a rerouting stabilizer.
@@ -817,7 +927,7 @@ const REROUTE_STABILIZER_TOL: f64 = 1e-6;
 /// when `S |ψ⟩ = +|ψ⟩`. The reroute module has no state to check that against; SPD on
 /// `S` alone is cheap here. An empty `S` means no reroute happened.
 fn verify_reroute_is_state_stabilizer(
-    circuit: &Circuit,
+    prepared: &PreparedSpd<'_>,
     original_support: &[usize],
     rerouted_support: &[usize],
 ) -> Result<()> {
@@ -826,8 +936,7 @@ fn verify_reroute_is_state_stabilizer(
         return Ok(());
     }
     let stab_terms: Vec<PauliTerm> = stab_support.iter().copied().map(PauliTerm::z).collect();
-    let stab =
-        run_spd_observable_light_cone(circuit, &stab_terms, QEC_SPD_EPSILON, QEC_SPD_MAX_TERMS)?;
+    let stab = prepared.eval_light_cone(&stab_terms, QEC_SPD_EPSILON, QEC_SPD_MAX_TERMS)?;
     if (stab.mean - 1.0).abs() > REROUTE_STABILIZER_TOL {
         return Err(PrismError::InvalidParameter {
             message: format!(
@@ -913,6 +1022,7 @@ pub fn run_qec_program_spd_rerouted(
         *slot = Some(reroute);
     }
 
+    let prepared = PreparedSpd::new(&circuit, "light-cone SPD observable")?;
     let mut means = Vec::with_capacity(observable_terms_list.len());
     let mut estimates = Vec::with_capacity(observable_terms_list.len());
     for (observable, terms) in observable_terms_list.iter().enumerate() {
@@ -920,7 +1030,7 @@ pub fn run_qec_program_spd_rerouted(
         if let Some(reroute) = reroute_by_observable[observable] {
             let support: Vec<usize> = terms.iter().map(|term| term.qubit).collect();
             let route = min_cone_z_representative(&circuit, &support, &reroute.stabilizers)?;
-            verify_reroute_is_state_stabilizer(&circuit, &support, &route.rerouted_support)?;
+            verify_reroute_is_state_stabilizer(&prepared, &support, &route.rerouted_support)?;
             terms = route
                 .rerouted_support
                 .iter()
@@ -928,8 +1038,7 @@ pub fn run_qec_program_spd_rerouted(
                 .map(PauliTerm::z)
                 .collect();
         }
-        let result =
-            run_spd_observable_light_cone(&circuit, &terms, QEC_SPD_EPSILON, QEC_SPD_MAX_TERMS)?;
+        let result = prepared.eval_light_cone(&terms, QEC_SPD_EPSILON, QEC_SPD_MAX_TERMS)?;
         means.push(result.mean);
         estimates.push(QecObservableEstimate {
             mean: result.mean,
@@ -956,10 +1065,16 @@ fn spd_on_lowered(
     program: &QecProgram,
     lowered: &LoweredPauliObservables,
 ) -> Result<QecSampleResult> {
-    let circuit = &lowered.circuit;
+    spd_on_lowered_checked(program, lowered).map(|(result, _)| result)
+}
+
+fn spd_on_lowered_checked(
+    program: &QecProgram,
+    lowered: &LoweredPauliObservables,
+) -> Result<(QecSampleResult, f64)> {
+    let prepared = PreparedSpd::new(&lowered.circuit, "light-cone SPD observable")?;
     evaluate_observable_program(program, lowered, |terms| {
-        let result =
-            run_spd_observable_light_cone(circuit, terms, QEC_SPD_EPSILON, QEC_SPD_MAX_TERMS)?;
+        let result = prepared.eval_light_cone(terms, QEC_SPD_EPSILON, QEC_SPD_MAX_TERMS)?;
         Ok(ConditionalEval {
             mean: result.mean,
             discarded_sq: result.total_discarded * result.total_discarded,

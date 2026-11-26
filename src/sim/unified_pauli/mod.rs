@@ -28,12 +28,12 @@ mod spp;
 pub(crate) use pauli_path::run_pauli_path_weighted_observable;
 pub use pauli_path::{PauliPathResult, run_pauli_path_observable};
 pub(super) use spd::propagate_register_rotations;
+pub(crate) use spd::{
+    PreparedSpd, run_spd_exact_within, run_spd_observable_with, run_spd_weighted_observable_with,
+};
 pub use spd::{
     SpdObservableResult, SpdResult, SpdTruncation, inverse_light_cone, run_spd, run_spd_observable,
     run_spd_observable_budgeted, run_spd_observable_light_cone, run_spd_with,
-};
-pub(crate) use spd::{
-    run_spd_exact_within, run_spd_observable_with, run_spd_weighted_observable_with,
 };
 pub(crate) use spp::Welford;
 pub use spp::{SppObservableResult, SppResult, run_spp, run_spp_observable};
@@ -86,6 +86,23 @@ fn zz_rotation_angle(gate: &Gate) -> Option<f64> {
         Gate::Rzz(theta) => Some(*theta),
         _ => None,
     }
+}
+
+#[inline(always)]
+pub(super) fn snap_trig_pair(sin: f64, cos: f64) -> (f64, f64) {
+    if sin.abs() <= crate::gates::IDENTITY_EPS {
+        (0.0, cos.signum())
+    } else if cos.abs() <= crate::gates::IDENTITY_EPS {
+        (sin.signum(), 0.0)
+    } else {
+        (sin, cos)
+    }
+}
+
+#[inline(always)]
+pub(super) fn snapped_sin_cos(theta: f64) -> (f64, f64) {
+    let (sin, cos) = theta.sin_cos();
+    snap_trig_pair(sin, cos)
 }
 
 /// Validate the circuit and lower every gate `native` rejects in one walk.

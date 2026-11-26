@@ -702,3 +702,155 @@ fn analytical_strategies_reject_detectors() {
         );
     }
 }
+
+#[test]
+fn multi_row_postselection_matches_closed_form_and_is_deterministic() {
+    use prism_q::QecPauli;
+
+    // 4 postselection qubits (J = 4 => 16 subsets) plus 2 measured observable qubits + 1 live EXP_VAL qubit.
+    // j=0: H -> T -> H => P(0) = cos^2(pi/8)
+    // j=1: H -> Tdg -> H => P(0) = cos^2(pi/8)
+    // j=2: X -> H -> T -> H => P(0) = sin^2(pi/8)
+    // j=3: H -> T -> H -> T -> H => <Z> = 0.5, P(0) = (1 + 0.5)/2 = 0.75
+    // On qubit 4: H -> T -> H -> measure_z -> observable 0, <Z_4> = cos(pi/4).
+    // On qubit 5: H -> Z -> T -> H -> measure_z -> observable 1 uses m4^m5, <Z_5> = -cos(pi/4).
+    // On qubit 6 (live): H -> Z -> T -> H -> EXP_VAL(Z_6, 1.5), <Z_6> = -cos(pi/4).
+    let mut program = QecProgram::with_options(7, options(8_000));
+    let mut expected_accept = 1.0f64;
+
+    // j=0
+    program.push_gate(Gate::H, &[0]).unwrap();
+    program.push_gate(Gate::T, &[0]).unwrap();
+    program.push_gate(Gate::H, &[0]).unwrap();
+    let m0 = program.measure_z(0).unwrap();
+    program
+        .postselect(&[QecRecordRef::absolute(m0)], false)
+        .unwrap();
+    expected_accept *= (std::f64::consts::PI / 8.0).cos().powi(2);
+
+    // j=1
+    program.push_gate(Gate::H, &[1]).unwrap();
+    program.push_gate(Gate::Tdg, &[1]).unwrap();
+    program.push_gate(Gate::H, &[1]).unwrap();
+    let m1 = program.measure_z(1).unwrap();
+    program
+        .postselect(&[QecRecordRef::absolute(m1)], false)
+        .unwrap();
+    expected_accept *= (std::f64::consts::PI / 8.0).cos().powi(2);
+
+    // j=2
+    program.push_gate(Gate::X, &[2]).unwrap();
+    program.push_gate(Gate::H, &[2]).unwrap();
+    program.push_gate(Gate::T, &[2]).unwrap();
+    program.push_gate(Gate::H, &[2]).unwrap();
+    let m2 = program.measure_z(2).unwrap();
+    program
+        .postselect(&[QecRecordRef::absolute(m2)], false)
+        .unwrap();
+    expected_accept *= (std::f64::consts::PI / 8.0).sin().powi(2);
+
+    // j=3
+    program.push_gate(Gate::H, &[3]).unwrap();
+    program.push_gate(Gate::T, &[3]).unwrap();
+    program.push_gate(Gate::H, &[3]).unwrap();
+    program.push_gate(Gate::T, &[3]).unwrap();
+    program.push_gate(Gate::H, &[3]).unwrap();
+    let m3 = program.measure_z(3).unwrap();
+    program
+        .postselect(&[QecRecordRef::absolute(m3)], false)
+        .unwrap();
+    expected_accept *= 0.75;
+
+    program.push_gate(Gate::H, &[4]).unwrap();
+    program.push_gate(Gate::T, &[4]).unwrap();
+    program.push_gate(Gate::H, &[4]).unwrap();
+    let m4 = program.measure_z(4).unwrap();
+    program
+        .observable_include(0, &[QecRecordRef::absolute(m4)])
+        .unwrap();
+
+    program.push_gate(Gate::H, &[5]).unwrap();
+    program.push_gate(Gate::Z, &[5]).unwrap();
+    program.push_gate(Gate::T, &[5]).unwrap();
+    program.push_gate(Gate::H, &[5]).unwrap();
+    let m5 = program.measure_z(5).unwrap();
+    program
+        .observable_include(1, &[QecRecordRef::absolute(m4), QecRecordRef::absolute(m5)])
+        .unwrap();
+
+    program.push_gate(Gate::H, &[6]).unwrap();
+    program.push_gate(Gate::Z, &[6]).unwrap();
+    program.push_gate(Gate::T, &[6]).unwrap();
+    program.push_gate(Gate::H, &[6]).unwrap();
+    program.expectation_value(&[QecPauli::z(6)], 1.5).unwrap();
+
+    let expected_z4 = std::f64::consts::FRAC_1_SQRT_2;
+    let expected_z5 = -std::f64::consts::FRAC_1_SQRT_2;
+    let expected_z4z5 = expected_z4 * expected_z5;
+
+    for strategy in [QecTStrategy::Spd, QecTStrategy::Camps, QecTStrategy::Auto] {
+        let first = run_qec_program_with_strategy(&program, strategy).unwrap();
+        let second = run_qec_program_with_strategy(&program, strategy).unwrap();
+
+        let obs1 = first.observable_expectations.as_ref().unwrap();
+        let obs2 = second.observable_expectations.as_ref().unwrap();
+        let ev1 = first.expectation_values.as_ref().unwrap();
+        let ev2 = second.expectation_values.as_ref().unwrap();
+
+        assert_eq!(first.accepted_shots, second.accepted_shots);
+        assert_eq!(obs1[0].mean.to_bits(), obs2[0].mean.to_bits());
+        assert_eq!(obs1[0].variance.to_bits(), obs2[0].variance.to_bits());
+        assert_eq!(obs1[1].mean.to_bits(), obs2[1].mean.to_bits());
+        assert_eq!(ev1[0].mean.to_bits(), ev2[0].mean.to_bits());
+        assert_eq!(ev1[0].variance.to_bits(), ev2[0].variance.to_bits());
+
+        assert!((obs1[0].mean - expected_z4).abs() < 1e-10);
+        assert!((obs1[1].mean - expected_z4z5).abs() < 1e-10);
+        assert!((ev1[0].mean - 1.5 * expected_z5).abs() < 1e-10);
+        assert!(obs1.iter().all(|e| e.variance < 1e-12));
+        assert!(ev1.iter().all(|e| e.variance < 1e-12));
+
+        let expected_shots = ((8_000.0 * expected_accept).round() as usize).min(8_000);
+        assert_eq!(first.accepted_shots, expected_shots);
+    }
+
+    let reference = run_qec_program_reference(&program).unwrap();
+    let ref_accept = reference.accepted_shots as f64 / reference.total_shots as f64;
+    assert!((ref_accept - expected_accept).abs() < 0.03);
+}
+
+#[test]
+fn postselected_spd_handles_clifford_angle_rotations_without_truncation() {
+    let mut program = QecProgram::with_options(2, options(1_024));
+    program.push_gate(Gate::H, &[0]).unwrap();
+    for _ in 0..24 {
+        program
+            .push_gate(Gate::Rz(std::f64::consts::PI), &[0])
+            .unwrap();
+    }
+    program.push_gate(Gate::T, &[0]).unwrap();
+    program.push_gate(Gate::H, &[0]).unwrap();
+    let m0 = program.measure_z(0).unwrap();
+    program
+        .postselect(&[QecRecordRef::absolute(m0)], false)
+        .unwrap();
+
+    program.push_gate(Gate::H, &[1]).unwrap();
+    program
+        .push_gate(Gate::Rz(std::f64::consts::FRAC_PI_2), &[1])
+        .unwrap();
+    program.push_gate(Gate::T, &[1]).unwrap();
+    program.push_gate(Gate::H, &[1]).unwrap();
+    let m1 = program.measure_z(1).unwrap();
+    program
+        .observable_include(0, &[QecRecordRef::absolute(m1)])
+        .unwrap();
+
+    let spd = run_qec_program_with_strategy(&program, QecTStrategy::Spd).unwrap();
+    let auto = run_qec_program_with_strategy(&program, QecTStrategy::Auto).unwrap();
+    let est_spd = spd.observable_expectations.as_ref().unwrap()[0];
+    let est_auto = auto.observable_expectations.as_ref().unwrap()[0];
+    assert_eq!(est_spd.variance, 0.0);
+    assert_eq!(est_auto.variance, 0.0);
+    assert!((est_spd.mean - est_auto.mean).abs() < 1e-12);
+}

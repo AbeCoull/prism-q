@@ -911,6 +911,14 @@ impl Backend for StabilizerBackend {
         crate::sim::ResolvedBackend::Stabilizer
     }
 
+    fn placement(&self) -> crate::sim::Placement {
+        if !self.host_rows_live() {
+            crate::sim::Placement::Device
+        } else {
+            crate::sim::Placement::Host
+        }
+    }
+
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         let n = num_qubits;
         let nw = n.div_ceil(64);

@@ -123,8 +123,10 @@ pub(crate) struct LauncherScratch {
     pub(crate) f64_a: Option<GpuBuffer<f64>>,
     pub(crate) u64_a: Option<GpuBuffer<u64>>,
     pub(crate) u64_b: Option<GpuBuffer<u64>>,
-    /// Per-block partials for [`super::dense::measure_prob_one`]. Sized by the
-    /// number of grid blocks at the largest qubit count seen so far.
+    /// Per-block partials for [`super::dense::measure_prob_one`],
+    /// [`super::dense::pauli_sums`], and [`super::density::pauli_sums`]. Grow-only,
+    /// with `dense::pauli_sums` bounded by `PAULI_MAX_BLOCKS` and
+    /// `PAULI_MAX_PARTIAL_BYTES`.
     pub(crate) measure_partials: Option<GpuBuffer<f64>>,
     /// One-element output for the measure-prob finalize reduction.
     pub(crate) measure_result: Option<GpuBuffer<f64>>,
@@ -407,7 +409,8 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "bts_compact_counts_upto8",
     "bts_transpose_meas_to_shot",
     "bts_apply_noise_masks_meas_major",
-    "bts_generate_and_apply_noise_meas_major_by_row",
+    "bts_generate_noise_masks",
+    "bts_apply_noise_row_major",
     "bts_apply_readout_meas_major",
     // Density-matrix sweeps over the embedded 2n-qubit buffer.
     "dm_diagonal",

@@ -4,8 +4,8 @@ use crate::error::Result;
 
 use super::compiled::{FlatNoiseSensitivity, RecordReadout};
 
-/// Pack `(px, py, pz)` per event into three `u64` thresholds for the fused
-/// noise kernel. Each threshold is `p * 2^64` rounded down, so a uniform
+/// Pack `(px, py, pz)` per event into three `u64` thresholds for the device
+/// noise mask generator. Each threshold is `p * 2^64` rounded down, so a uniform
 /// `u64` random compares below it with probability `p`. Returns the flat
 /// buffer along with `false` when any event's probabilities are out of range
 /// (negative, NaN, or sum greater than 1). The caller then falls back to the
@@ -63,7 +63,7 @@ fn flatten_readout_thresholds_u64(readout: &[RecordReadout]) -> Vec<u64> {
 /// the events that touch it, packed as `event << 2 | flag`: flag bit 0 for
 /// an X contribution, bit 1 for Z, both set for a Y contribution. Lets the
 /// per-(row, batch) kernel accumulate XORs in a register without atomics.
-/// Paired with `bts_generate_and_apply_noise_meas_major_by_row`.
+/// Paired with `bts_apply_noise_row_major`.
 fn transpose_events_to_row_major(
     events: &FlatNoiseSensitivity,
     num_meas: usize,
@@ -162,8 +162,8 @@ pub(super) struct GpuNoiseCache {
     pub(super) z_masks_dev: crate::gpu::GpuBuffer<u64>,
     pub(super) x_masks_host: Vec<u64>,
     pub(super) z_masks_host: Vec<u64>,
-    /// Precomputed per-event thresholds for the fused generator. Three u64s
-    /// per event hold `[px, px+py, px+py+pz]` scaled to `2^64`, so the
+    /// Precomputed per-event thresholds for `bts_generate_noise_masks`. Three
+    /// u64s per event hold `[px, px+py, px+py+pz]` scaled to `2^64`, so the
     /// kernel's inner loop replaces a floating-point multiply and branch per
     /// shot with a `u64 <` compare. Stays resident across sampling calls.
     pub(super) event_thresholds_dev: crate::gpu::GpuBuffer<u64>,
@@ -171,11 +171,11 @@ pub(super) struct GpuNoiseCache {
     /// threshold. A NaN or a sum greater than 1 flips this to false and
     /// routes the caller to the host mask path.
     pub(super) event_thresholds_valid: bool,
-    /// Row-major event CSR for the per-(row, batch) fused kernel. Each entry
-    /// packs `event << 2 | flag`, where bit 0 means the event contributes X
-    /// to this row and bit 1 means Z. The row-major layout lets one thread
-    /// accumulate every XOR for its output word in a register instead of
-    /// broadcasting `(event, batch)` writes across rows with atomics.
+    /// Row-major event CSR for `bts_apply_noise_row_major`. Each entry packs
+    /// `event << 2 | flag`, where bit 0 means the event contributes X to this
+    /// row and bit 1 means Z. The row-major layout lets one thread accumulate
+    /// every XOR for its output word in a register instead of broadcasting
+    /// `(event, batch)` writes across rows with atomics.
     pub(super) row_event_offsets_dev: crate::gpu::GpuBuffer<u32>,
     pub(super) row_event_entries_dev: crate::gpu::GpuBuffer<u32>,
     /// Readout entries packed by [`flatten_readout_thresholds_u64`].
@@ -224,7 +224,7 @@ impl GpuNoiseCache {
             event_thresholds_dev.copy_from_host(device, &thresholds_host)?;
         }
 
-        // Row-major transpose for the per-(row, batch) fused kernel. Cheap
+        // Row-major transpose for bts_apply_noise_row_major. Cheap
         // bit-scan over events.x_data | events.z_data at cache init time.
         let (row_event_offsets_host, row_event_entries_host) =
             transpose_events_to_row_major(events, events.m_words * 64);
@@ -264,7 +264,7 @@ impl GpuNoiseCache {
         })
     }
 
-    pub(super) fn ensure_mask_capacity(&mut self, len: usize) -> Result<()> {
+    pub(super) fn ensure_device_mask_capacity(&mut self, len: usize) -> Result<()> {
         let needed = len.max(1);
         let device = self.context.device();
         if self.x_masks_dev.len() < needed {
@@ -273,6 +273,12 @@ impl GpuNoiseCache {
         if self.z_masks_dev.len() < needed {
             self.z_masks_dev = crate::gpu::GpuBuffer::<u64>::alloc_zeros(device, needed)?;
         }
+        Ok(())
+    }
+
+    pub(super) fn ensure_mask_capacity(&mut self, len: usize) -> Result<()> {
+        self.ensure_device_mask_capacity(len)?;
+        let needed = len.max(1);
         if self.x_masks_host.len() < needed {
             self.x_masks_host.resize(needed, 0);
         }

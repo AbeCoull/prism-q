@@ -13,11 +13,26 @@ use super::super::{
 use super::BLOCK_SIZE;
 use super::tiles::launch_apply_multi_fused_nondiag;
 
+/// Grid block count per mask for `sv_pauli_expect`, capped by `PAULI_MAX_BLOCKS`
+/// and the `PAULI_MAX_PARTIAL_BYTES` scratch budget.
+pub(super) fn pauli_blocks_per_mask(dim: u64, num_masks: usize) -> u32 {
+    let pairs = (dim >> 1).max(1);
+    let elems_per_block = (PAULI_AMPS_PER_THREAD * BLOCK_SIZE as usize) as u64;
+    let bytes_per_block = 2 * size_of::<f64>() * num_masks.max(1);
+    let budget_blocks = (PAULI_MAX_PARTIAL_BYTES / bytes_per_block).max(1) as u64;
+    pairs
+        .div_ceil(elems_per_block)
+        .min(PAULI_MAX_BLOCKS)
+        .min(budget_blocks)
+        .max(1) as u32
+}
+
 /// `sum_j conj(psi[j ^ xmask]) psi[j] (-1)^{popcount(j & zmask)}` per
 /// `(xmask, zmask)` pair with `pending_norm²` applied: the complex accumulator
 /// behind `<P>` before the `i^{num_y}` factor and the norm. Two launches and a
 /// `16 * masks.len()` byte readback replace a full-state export. Masks sharing an
-/// `xmask` run in groups of up to [`PAULI_GROUP_MASKS`], one state pass per group.
+/// `xmask` run in groups of up to [`PAULI_GROUP_MASKS`], one grid-stride pass
+/// per group with bounded `measure_partials` scratch.
 pub(crate) fn pauli_sums(
     ctx: &GpuContext,
     state: &GpuState,
@@ -27,8 +42,7 @@ pub(crate) fn pauli_sums(
         return Ok(Vec::new());
     }
     let dim: u64 = 1u64 << state.num_qubits();
-    let elems_per_block = (PAULI_AMPS_PER_THREAD * BLOCK_SIZE as usize) as u64;
-    let blocks_per_mask = dim.div_ceil(elems_per_block).max(1) as u32;
+    let blocks_per_mask = pauli_blocks_per_mask(dim, masks.len());
     let num_masks = require_u32("sv_pauli_expect", "masks", masks.len())?;
     let device = ctx.device();
     let stream = device.stream()?;
@@ -84,14 +98,14 @@ pub(crate) fn pauli_sums(
             .arg(scratch.u64_b.as_ref().unwrap().raw())
             .arg(&num_masks)
             .arg(partials.raw_mut());
-        // SAFETY: signature matches the kernel. `blocks_per_mask` blocks of
-        // `PAULI_AMPS_PER_THREAD` amplitudes per thread cover the `dim` amplitudes
-        // of each of the `launch_groups` groups from `group_base`, which end at or
-        // below `num_groups` and hold at most `PAULI_GROUP_MASKS` members each,
-        // every partner read `j ^ x` stays below `dim` because
-        // `x < dim` (masks are built from validated qubit indices), and every
-        // member slot is a distinct mask index, so `partials` holds two f64s per
-        // (slot, block). All buffers are held by the scratch guard.
+        // SAFETY: signature matches the kernel. For `x == 0`, `blocks_per_mask` blocks of
+        // `BLOCK_SIZE` threads grid-stride over all `dim` amplitudes; for `x != 0`, they
+        // grid-stride over `dim / 2` pairs mapped via `insert_zero_bit_u64(k, tz(x))` so
+        // `i0 < dim` and `i1 = i0 ^ x < dim` because `0 < x < dim` (masks are built from
+        // validated qubit indices). Each of the `launch_groups` groups from `group_base`
+        // ends at or below `num_groups` and holds at most `PAULI_GROUP_MASKS` members, and
+        // every member slot is a distinct mask index, so `partials` holds two f64s per
+        // (slot, block) within `partial_len`. All buffers are held by the scratch guard.
         unsafe {
             launch_counted(
                 builder,
@@ -325,8 +339,14 @@ pub(crate) fn operator_moments(
 /// Grid cap for `sv_group_moments`; warps stride over the remaining 64-index blocks.
 const MOMENT_MAX_BLOCKS: u64 = 1024;
 
+/// Grid cap per mask for `sv_pauli_expect`; threads grid-stride over remaining pairs.
+pub(super) const PAULI_MAX_BLOCKS: u64 = 1024;
+
+/// Byte ceiling for `LauncherScratch::measure_partials` in `pauli_sums` (16 MiB).
+pub(super) const PAULI_MAX_PARTIAL_BYTES: usize = 16 * 1024 * 1024;
+
 /// Masks one `sv_pauli_expect` block reduces per state pass.
 pub(super) const PAULI_GROUP_MASKS: usize = 8;
 
-/// Amplitudes each `sv_pauli_expect` thread reads before the block reduction.
-pub(super) const PAULI_AMPS_PER_THREAD: usize = 16;
+/// Target pairs per `sv_pauli_expect` thread before capping at `PAULI_MAX_BLOCKS`.
+pub(super) const PAULI_AMPS_PER_THREAD: usize = 1;

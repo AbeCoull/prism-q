@@ -1513,6 +1513,34 @@ mod gpu_scaffold {
         assert_eq!(cloned.xz, backend.xz);
         assert_eq!(cloned.phase, backend.phase);
     }
+
+    #[test]
+    fn placement_is_host_on_uninitialized_failed_or_soft_fallback_gpu() {
+        let mut hard = StabilizerBackend::new(42).with_gpu(GpuContext::stub_for_tests());
+        assert_eq!(hard.placement(), crate::sim::Placement::Host);
+        let _ = hard.init(4, 0).unwrap_err();
+        assert_eq!(hard.placement(), crate::sim::Placement::Host);
+
+        let mut soft = StabilizerBackend::new(42).with_gpu_auto(GpuContext::stub_for_tests());
+        assert_eq!(soft.placement(), crate::sim::Placement::Host);
+        soft.init(4, 0).unwrap();
+        assert_eq!(soft.placement(), crate::sim::Placement::Host);
+
+        if let Some(ctx) = crate::test_support::gpu_context_or_skip() {
+            let mut real = StabilizerBackend::new(42).with_gpu(ctx);
+            assert_eq!(real.placement(), crate::sim::Placement::Host);
+            real.init(4, 0).unwrap();
+            assert_eq!(real.placement(), crate::sim::Placement::Device);
+        }
+    }
+}
+
+#[test]
+fn placement_is_host_on_cpu() {
+    let mut backend = StabilizerBackend::new(42);
+    assert_eq!(backend.placement(), crate::sim::Placement::Host);
+    backend.init(4, 0).unwrap();
+    assert_eq!(backend.placement(), crate::sim::Placement::Host);
 }
 
 fn statevector_expectations(

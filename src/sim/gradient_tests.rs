@@ -611,3 +611,136 @@ fn a_full_light_cone_borrows_the_circuit_it_was_cut_from() {
         .collect();
     assert!(matches!(gates.as_slice(), [Gate::Rx(_), Gate::Ry(_)]));
 }
+
+fn assert_gradients_close(label: &str, got: &ExpectationGradient, want: &ExpectationGradient) {
+    assert!((got.value - want.value).abs() < 1e-10, "{label} value");
+    assert_eq!(got.gradient.len(), want.gradient.len(), "{label} length");
+    for (slot, (g, w)) in got.gradient.iter().zip(&want.gradient).enumerate() {
+        assert!((g - w).abs() < 1e-10, "{label} slot {slot}: {g} vs {w}");
+    }
+}
+
+fn split_cone_tensor_circuit(n: usize) -> (Circuit, Parameters, Vec<f64>) {
+    let mut c = Circuit::new(n, 0);
+    // Shallow 2-qubit component on qubits 0..2 so <Z(0)> stays well under the TN peak cap.
+    c.add_gate(Gate::Ry(0.41), &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::Rz(0.73), &[1]);
+    // Deep brickwork on qubits 2..n so wide observables exceed AUTO_EXPECTATION_PEAK_BOUND.
+    for layer in 0..8 {
+        for q in 2..n {
+            c.add_gate(Gate::Ry(0.31 + 0.05 * q as f64), &[q]);
+            c.add_gate(Gate::Rz(0.57), &[q]);
+        }
+        for q in (2 + (layer % 2)..n - 1).step_by(2) {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    let mut params = Parameters::new(3);
+    params.link(0, 0);
+    params.link(2, 1);
+    let mut extra_links = 0usize;
+    for (idx, inst) in c.instructions.iter().enumerate().skip(3) {
+        if matches!(
+            inst,
+            Instruction::Gate {
+                gate: Gate::Ry(_),
+                ..
+            }
+        ) && extra_links < 4
+        {
+            params.link(idx, 2);
+            extra_links += 1;
+        }
+    }
+    let values = vec![0.41, 0.73, 0.31];
+    (c, params, values)
+}
+
+#[test]
+fn prepared_shift_caches_tensor_vs_sv_verdict_once_per_call() {
+    let n = super::super::route::TENSOR_ROUTE_MIN_QUBITS.max(18);
+    let (template, params, values) = split_cone_tensor_circuit(n);
+    let dense_obs =
+        PauliObservable::from_terms([(1.0, (2..n).map(PauliTerm::z).collect::<Vec<_>>())]).unwrap();
+    let shallow_obs = PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)])]).unwrap();
+
+    let mut auto_prep = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+    let mut sv_prep =
+        PreparedCircuit::with_backend(template, params, BackendKind::Statevector).unwrap();
+
+    super::super::batch::TENSOR_EXPECTATION_DECISIONS.with(|c| c.set(0));
+    let dense_auto = auto_prep
+        .expectation_gradient_shift(&values, &dense_obs, 42)
+        .unwrap();
+    let decisions = super::super::batch::TENSOR_EXPECTATION_DECISIONS.with(|c| c.get());
+    assert_eq!(
+        decisions, 1,
+        "held SV fallback must decide TN vs SV only once per prepared_shift call"
+    );
+    let dense_sv = sv_prep
+        .expectation_gradient_shift(&values, &dense_obs, 42)
+        .unwrap();
+    assert_gradients_close("dense fallback", &dense_auto, &dense_sv);
+
+    // The next call on the same PreparedCircuit with a shallow observable must not be stuck on UseHeld.
+    super::super::batch::TENSOR_EXPECTATION_DECISIONS.with(|c| c.set(0));
+    let shallow_auto = auto_prep
+        .expectation_gradient_shift(&values, &shallow_obs, 42)
+        .unwrap();
+    let tn_decisions = super::super::batch::TENSOR_EXPECTATION_DECISIONS.with(|c| c.get());
+    assert!(
+        tn_decisions > 1,
+        "shallow observable on the same PreparedCircuit must re-enter TN path"
+    );
+    let shallow_sv = sv_prep
+        .expectation_gradient_shift(&values, &shallow_obs, 42)
+        .unwrap();
+    assert_gradients_close("shallow tn", &shallow_auto, &shallow_sv);
+}
+
+#[test]
+fn prepared_shift_split_workers_matches_sequential_at_tensor_width() {
+    let n = super::super::route::TENSOR_ROUTE_MIN_QUBITS.max(18);
+    let (template, params, _) = split_cone_tensor_circuit(n);
+    let sites = slot_per_link(&params);
+    let base = sites.values(&template).unwrap();
+    let mut seq_prep = PreparedCircuit::new(template.clone(), sites.clone()).unwrap();
+    let mut par_prep = PreparedCircuit::new(template, sites).unwrap();
+
+    for (label, obs) in [
+        (
+            "dense_held",
+            PauliObservable::from_terms([(1.0, (2..n).map(PauliTerm::z).collect::<Vec<_>>())])
+                .unwrap(),
+        ),
+        (
+            "shallow_tn",
+            PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)])]).unwrap(),
+        ),
+    ] {
+        let seq = prepared_shift(
+            &mut seq_prep,
+            &base,
+            params.links(),
+            params.num_slots(),
+            obs.terms(),
+            42,
+            false,
+            false,
+        )
+        .unwrap();
+        let par = prepared_shift(
+            &mut par_prep,
+            &base,
+            params.links(),
+            params.num_slots(),
+            obs.terms(),
+            42,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_gradients_close(label, &par, &seq);
+    }
+}

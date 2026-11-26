@@ -189,6 +189,11 @@ fn native_metadata(backend: &dyn Backend) -> RunMetadata {
     backend_metadata(backend).with_reason(RouteRule::NativeSampling)
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static NATIVE_SHOT_SOURCE_EXECUTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Select and prepare the sampling source for `circuit`.
 ///
 /// Preparation is real work: compiling a sampler, building and running a
@@ -201,8 +206,8 @@ pub(super) fn prepare_shot_source(
     seed: u64,
     limits: &ResolvedLimits,
 ) -> Result<ShotSource> {
-    match decide_shots(kind, circuit, num_shots, limits)? {
-        ShotRoute::Compiled(deferred) => {
+    match decide_shots_with_probe(kind, circuit, num_shots, limits)? {
+        (ShotRoute::Compiled(deferred), _) => {
             let source = deferred.as_ref().unwrap_or(circuit);
             Ok(ShotSource::Compiled {
                 sampler: Box::new(compile_measurements_for_kind(kind, source, seed)?),
@@ -210,9 +215,9 @@ pub(super) fn prepare_shot_source(
                 deferred: deferred.is_some(),
             })
         }
-        ShotRoute::Guarded(deferred) => Ok(ShotSource::Guarded(deferred)),
-        ShotRoute::StabilizerRank => Ok(ShotSource::StabilizerRank),
-        ShotRoute::TerminalStatevector(terminal) => {
+        (ShotRoute::Guarded(deferred), _) => Ok(ShotSource::Guarded(deferred)),
+        (ShotRoute::StabilizerRank, _) => Ok(ShotSource::StabilizerRank),
+        (ShotRoute::TerminalStatevector(terminal), _) => {
             let (backend, meas_map, expected_device) =
                 prepare_terminal_statevector_backend(kind, terminal, seed, limits)?;
             Ok(ShotSource::TerminalStatevector {
@@ -221,19 +226,27 @@ pub(super) fn prepare_shot_source(
                 meas_map,
             })
         }
-        ShotRoute::Native(plan, terminal) => {
-            let mut backend = plan.build(seed, limits);
-            execute(
-                &mut *backend,
-                &terminal.circuit,
-                &SimOptions::classical_only(),
-            )?;
+        (ShotRoute::Native(plan, terminal), sparse_probe) => {
+            let backend: Box<dyn Backend> = match sparse_probe {
+                Some(sparse) => Box::new(sparse),
+                None => {
+                    #[cfg(test)]
+                    NATIVE_SHOT_SOURCE_EXECUTIONS.with(|c| c.set(c.get() + 1));
+                    let mut backend = plan.build(seed, limits);
+                    execute(
+                        &mut *backend,
+                        &terminal.circuit,
+                        &SimOptions::classical_only(),
+                    )?;
+                    backend
+                }
+            };
             Ok(ShotSource::Native {
                 backend,
                 meas_map: terminal.meas_map,
             })
         }
-        ShotRoute::TerminalProbabilities(terminal) => {
+        (ShotRoute::TerminalProbabilities(terminal), _) => {
             let result = run_with_internal(
                 kind.clone(),
                 &terminal.circuit,
@@ -250,7 +263,7 @@ pub(super) fn prepare_shot_source(
                 None => ShotSource::PerShot,
             })
         }
-        ShotRoute::PerShot => Ok(ShotSource::PerShot),
+        (ShotRoute::PerShot, _) => Ok(ShotSource::PerShot),
     }
 }
 

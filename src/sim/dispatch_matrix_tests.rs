@@ -468,3 +468,16 @@ fn above_cap_tensor_route_takes_rcs_brickworks_from_128_qubits() {
         .collect();
     assert!(!takes_tensor(&su4_brickwork(64, 4), &two_local));
 }
+
+#[test]
+fn auto_selects_cpu_statevector_skips_sparse_probe_above_cap() {
+    let limits = ResolvedLimits::resolve(Some(&crate::Limits::new().max_statevector_qubits(8)));
+    let w_state = crate::circuits::w_state_circuit(16);
+    SPARSE_PROBES.with(|c| c.set(0));
+    assert!(!auto_selects_cpu_statevector(&w_state, false, &limits));
+    assert!(
+        !crate::sim::route::auto_terminal_statevector_candidate(&w_state, &limits),
+        "above-cap auto terminal check must short-circuit before probing"
+    );
+    assert_eq!(SPARSE_PROBES.with(|c| c.get()), 0);
+}

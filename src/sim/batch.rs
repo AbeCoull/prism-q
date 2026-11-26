@@ -49,6 +49,47 @@ pub(super) enum PreparedObservable {
     Simulate,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ShiftTensorVerdict {
+    Undecided,
+    UseTensor,
+    UseHeld,
+}
+
+thread_local! {
+    static SHIFT_TENSOR_VERDICT: std::cell::Cell<Option<ShiftTensorVerdict>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static TENSOR_EXPECTATION_DECISIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(super) struct ShiftTensorScope {
+    previous: Option<ShiftTensorVerdict>,
+}
+
+impl ShiftTensorScope {
+    pub(super) fn enter() -> Self {
+        Self::enter_with(Some(ShiftTensorVerdict::Undecided))
+    }
+
+    pub(super) fn enter_with(verdict: Option<ShiftTensorVerdict>) -> Self {
+        let previous = SHIFT_TENSOR_VERDICT.with(|cell| cell.replace(verdict));
+        Self { previous }
+    }
+
+    pub(super) fn current() -> Option<ShiftTensorVerdict> {
+        SHIFT_TENSOR_VERDICT.with(|cell| cell.get())
+    }
+}
+
+impl Drop for ShiftTensorScope {
+    fn drop(&mut self) {
+        SHIFT_TENSOR_VERDICT.with(|cell| cell.set(self.previous));
+    }
+}
+
 impl PreparedRoute {
     /// True when the chosen backend accepts fused gates, so the caller should
     /// hand `run` a fused stream rather than the bound template.
@@ -88,8 +129,22 @@ impl PreparedRoute {
         match self.values {
             PreparedValues::Simulate => return None,
             PreparedValues::TensorFirst => {
-                if let Some(result) = decide_tensor_expectations(bound, observables, &self.limits) {
-                    return Some(result.and_then(|planned| planned.contract(&self.limits)));
+                let cached = ShiftTensorScope::current();
+                if cached != Some(ShiftTensorVerdict::UseHeld) {
+                    #[cfg(test)]
+                    TENSOR_EXPECTATION_DECISIONS.with(|c| c.set(c.get() + 1));
+                    if let Some(result) =
+                        decide_tensor_expectations(bound, observables, &self.limits)
+                    {
+                        if cached == Some(ShiftTensorVerdict::Undecided) {
+                            SHIFT_TENSOR_VERDICT
+                                .with(|c| c.set(Some(ShiftTensorVerdict::UseTensor)));
+                        }
+                        return Some(result.and_then(|planned| planned.contract(&self.limits)));
+                    }
+                    if cached == Some(ShiftTensorVerdict::Undecided) {
+                        SHIFT_TENSOR_VERDICT.with(|c| c.set(Some(ShiftTensorVerdict::UseHeld)));
+                    }
                 }
             }
             PreparedValues::Held => {}

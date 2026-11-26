@@ -267,3 +267,30 @@ fn a_wide_qft_stays_on_the_statevector() {
         assert_eq!(marginals.metadata.backend, ResolvedBackend::Statevector);
     }
 }
+
+#[test]
+fn above_the_cap_eight_layer_brickwork_switches_from_mps_at_64_to_tensor_at_128() {
+    let circuit_64 = brickwork_circuit(64, 8, SEED);
+    assert_eq!(
+        auto_backend(&circuit_64, &z_and_adjacent_zz(64)),
+        ResolvedBackend::Mps
+    );
+
+    let circuit_128 = brickwork_circuit(128, 8, SEED);
+    let observables_128 = z_and_adjacent_zz(128);
+    let auto = simulate(&circuit_128)
+        .backend(BackendKind::Auto)
+        .seed(42)
+        .expectation_values_reported(&observables_128)
+        .unwrap();
+    assert_eq!(auto.metadata.backend, ResolvedBackend::TensorNetwork);
+
+    let mps = simulate(&circuit_128)
+        .backend(BackendKind::Mps { max_bond_dim: 256 })
+        .seed(42)
+        .expectation_values(&observables_128)
+        .unwrap();
+    for (got, want) in auto.values.iter().zip(&mps) {
+        assert!((got - want).abs() < 1e-9, "{got} vs {want}");
+    }
+}

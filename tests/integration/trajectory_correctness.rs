@@ -1025,3 +1025,150 @@ fn the_named_lowering_clears_a_guarded_wide_gate_under_noise() {
         assert_eq!(shots.shots.len(), 4, "{kind:?}");
     }
 }
+
+#[test]
+fn over_rotation_trajectories_match_density_matrix() {
+    let mut unitary = Circuit::new(2, 0);
+    unitary.add_gate(Gate::Rx(0.7), &[0]);
+    unitary.add_gate(Gate::Ry(0.5), &[1]);
+    unitary.add_gate(Gate::Cx, &[0, 1]);
+    unitary.add_gate(Gate::Rz(0.3), &[0]);
+    unitary.add_gate(Gate::P(0.4), &[1]);
+
+    let mut measured = unitary.clone();
+    measured.num_classical_bits = 2;
+    measured.add_measure(0, 0);
+    measured.add_measure(1, 1);
+
+    let builder = NoiseBuilder::new().over_rotation(GateFilter::all(), 0.15);
+    let unitary_noise = builder.build(&unitary).unwrap();
+    let measured_noise = builder.build(&measured).unwrap();
+
+    let observables = vec![vec![PauliTerm::z(0)], vec![PauliTerm::z(1)]];
+    let exact = density_matrix_expectation_values(&unitary, &observables, Some(&unitary_noise), 42)
+        .unwrap();
+
+    let num_shots = 4000;
+    for kind in [
+        BackendKind::Statevector,
+        BackendKind::Mps { max_bond_dim: 8 },
+    ] {
+        let shots =
+            run_shots_with_noise(kind.clone(), &measured, &measured_noise, num_shots, 42).unwrap();
+        for q in 0..2 {
+            let ones = shots.shots.iter().filter(|record| record[q]).count();
+            let measured_z = 1.0 - 2.0 * (ones as f64 / num_shots as f64);
+            let p_exact = (1.0 - exact[q]) / 2.0;
+            let sigma = (2.0 * (p_exact * (1.0 - p_exact) / num_shots as f64).sqrt()).max(1e-9);
+            assert!(
+                (measured_z - exact[q]).abs() <= 5.0 * sigma,
+                "{kind:?} qubit {q}: trajectory <Z> = {measured_z}, exact = {}",
+                exact[q]
+            );
+        }
+    }
+}
+
+#[test]
+fn empty_quasi_static_weights_simulate_without_panic() {
+    let mut unitary = Circuit::new(2, 0);
+    unitary.add_gate(Gate::H, &[0]);
+    unitary.add_gate(Gate::Cx, &[0, 1]);
+    let measured = measured(unitary.clone());
+
+    let add_empty_qs = |circuit: &Circuit| {
+        let mut model = NoiseModel::uniform_depolarizing(circuit, 0.0);
+        model.after_gate[0].push(NoiseEvent {
+            channel: NoiseChannel::QuasiStatic {
+                axis: PauliAxis::Z,
+                weights: Vec::new(),
+            },
+            qubits: SmallVec::from_slice(&[0]),
+        });
+        model
+    };
+
+    let obs = vec![
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::x(0), PauliTerm::x(1)],
+    ];
+    let exact_empty =
+        density_matrix_expectation_values(&unitary, &obs, Some(&add_empty_qs(&unitary)), 42)
+            .unwrap();
+    let exact_ideal = density_matrix_expectation_values(&unitary, &obs, None, 42).unwrap();
+    assert_eq!(exact_empty, exact_ideal);
+
+    let noisy_shots = run_shots_with_noise(
+        BackendKind::Statevector,
+        &measured,
+        &add_empty_qs(&measured),
+        32,
+        42,
+    )
+    .unwrap();
+    let mut baseline_noise = NoiseModel::uniform_depolarizing(&measured, 0.0);
+    baseline_noise.after_gate[0].push(NoiseEvent {
+        channel: NoiseChannel::ThermalRelaxation {
+            t1: 10.0,
+            t2: 10.0,
+            gate_time: 0.0,
+            excited_population: 0.0,
+        },
+        qubits: SmallVec::from_slice(&[0]),
+    });
+    let baseline_shots =
+        run_shots_with_noise(BackendKind::Statevector, &measured, &baseline_noise, 32, 42).unwrap();
+    assert_eq!(noisy_shots.shots, baseline_shots.shots);
+    assert!(noisy_shots.shots.iter().all(|s| s[0] == s[1]));
+
+    let dm_shots = run_shots_with_noise(
+        BackendKind::DensityMatrix,
+        &measured,
+        &add_empty_qs(&measured),
+        32,
+        42,
+    )
+    .unwrap();
+    assert_eq!(dm_shots.shots.len(), 32);
+    assert!(dm_shots.shots.iter().all(|s| s[0] == s[1]));
+}
+
+#[test]
+fn large_and_max_quasi_static_sources_preserve_correlations_without_oom() {
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::H, &[1]);
+    circuit.add_measure(0, 0);
+    circuit.add_measure(1, 1);
+
+    let model_for = |s0: usize, s1: usize| {
+        let mut model = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+        model.after_gate[0].push(NoiseEvent {
+            channel: NoiseChannel::QuasiStatic {
+                axis: PauliAxis::X,
+                weights: vec![(s0, 0.25), (s1, 0.15)],
+            },
+            qubits: SmallVec::from_slice(&[0]),
+        });
+        model.after_gate[1].push(NoiseEvent {
+            channel: NoiseChannel::QuasiStatic {
+                axis: PauliAxis::Y,
+                weights: vec![(s0, -0.2)],
+            },
+            qubits: SmallVec::from_slice(&[1]),
+        });
+        model
+    };
+
+    let dense =
+        run_shots_with_noise(BackendKind::Statevector, &circuit, &model_for(0, 1), 64, 42).unwrap();
+    let huge = run_shots_with_noise(
+        BackendKind::Statevector,
+        &circuit,
+        &model_for(1_000_000_000_000, usize::MAX),
+        64,
+        42,
+    )
+    .unwrap();
+    assert_eq!(huge.shots, dense.shots);
+}

@@ -2579,3 +2579,187 @@ fn noisy_blocks_sharing_classical_bits_keep_the_filtered_compile() {
         .sample_bulk(64);
     assert_eq!(whole, filtered);
 }
+
+#[test]
+fn empty_quasi_static_weights_are_memoryless_identity() {
+    use crate::PauliTerm;
+
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+
+    let empty_qs = NoiseChannel::QuasiStatic {
+        axis: PauliAxis::Z,
+        weights: Vec::new(),
+    };
+    assert!(empty_qs.validate().is_ok());
+
+    let id = [
+        [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+        [Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0)],
+    ];
+    assert_eq!(kraus_1q(&empty_qs), vec![id]);
+
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    noise.after_gate[0].push(NoiseEvent {
+        channel: empty_qs,
+        qubits: smallvec![0],
+    });
+    assert!(noise.validate_for(&circuit).is_ok());
+    assert!(!noise.has_quasi_static());
+    assert_eq!(noise.quasi_static_sources(), 0);
+    assert!(noise.ensure_memoryless("density_matrix").is_ok());
+
+    let obs = vec![
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::x(0), PauliTerm::x(1)],
+    ];
+    let noisy_exp = density_matrix_expectation_values(&circuit, &obs, Some(&noise), 42).unwrap();
+    let ideal_exp = density_matrix_expectation_values(&circuit, &obs, None, 42).unwrap();
+    assert_eq!(noisy_exp, ideal_exp);
+
+    let zero_noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    let limits = ResolvedLimits::process_default();
+    let noisy_probs = density_matrix_probabilities(
+        &BackendKind::DensityMatrix,
+        &circuit,
+        &noise,
+        None,
+        42,
+        &limits,
+    )
+    .unwrap();
+    let ideal_probs = density_matrix_probabilities(
+        &BackendKind::DensityMatrix,
+        &circuit,
+        &zero_noise,
+        None,
+        42,
+        &limits,
+    )
+    .unwrap();
+    assert_eq!(noisy_probs, ideal_probs);
+}
+
+#[test]
+fn max_quasi_static_source_does_not_overflow_or_wrap() {
+    let mut circuit = Circuit::new(1, 0);
+    circuit.add_gate(Gate::H, &[0]);
+
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    noise.after_gate[0].push(NoiseEvent {
+        channel: NoiseChannel::QuasiStatic {
+            axis: PauliAxis::X,
+            weights: vec![(usize::MAX, 0.1)],
+        },
+        qubits: smallvec![0],
+    });
+
+    assert!(noise.has_quasi_static());
+    assert_eq!(noise.quasi_static_sources(), usize::MAX);
+    assert!(matches!(
+        noise.ensure_memoryless("density_matrix"),
+        Err(crate::error::PrismError::IncompatibleBackend { .. })
+    ));
+}
+
+#[test]
+fn extreme_thermal_relaxation_preserves_trace_and_populations() {
+    use crate::PauliTerm;
+
+    for (t1, t2, gate_time, excited_population) in
+        [(1e-200, 1.5e-200, 1e150, 0.3), (1e-200, 2e-200, 1e150, 0.0)]
+    {
+        let ch = NoiseChannel::ThermalRelaxation {
+            t1,
+            t2,
+            gate_time,
+            excited_population,
+        };
+        assert!(ch.validate().is_ok());
+
+        let (gad, gpd) = thermal_relaxation_rates(t1, t2, gate_time);
+        assert_eq!(gad, 1.0);
+        if t2 < 2.0 * t1 {
+            assert_eq!(gpd, 1.0);
+        } else {
+            assert_eq!(gpd, 0.0);
+        }
+
+        let mut circuit = Circuit::new(1, 0);
+        circuit.add_gate(Gate::H, &[0]);
+
+        let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+        noise.after_gate[0].push(NoiseEvent {
+            channel: ch,
+            qubits: smallvec![0],
+        });
+
+        let limits = ResolvedLimits::process_default();
+        let dm_probs = density_matrix_probabilities(
+            &BackendKind::DensityMatrix,
+            &circuit,
+            &noise,
+            None,
+            42,
+            &limits,
+        )
+        .unwrap();
+        let trace: f64 = dm_probs.iter().sum();
+        assert!(
+            (trace - 1.0).abs() < 1e-12,
+            "trace={trace}, probs={dm_probs:?}"
+        );
+        assert!((dm_probs[0] - (1.0 - excited_population)).abs() < 1e-12);
+        assert!((dm_probs[1] - excited_population).abs() < 1e-12);
+
+        let pp = crate::sim::unified_pauli::run_pauli_path_observable(
+            &circuit,
+            &noise,
+            &[PauliTerm::z(0)],
+            0.0,
+            0,
+        )
+        .unwrap();
+        let expected_z = 1.0 - 2.0 * excited_population;
+        assert!(
+            (pp.mean - expected_z).abs() < 1e-12,
+            "PauliPath <Z>={} != {expected_z}",
+            pp.mean
+        );
+        let pp_x = crate::sim::unified_pauli::run_pauli_path_observable(
+            &circuit,
+            &noise,
+            &[PauliTerm::x(0)],
+            0.0,
+            0,
+        )
+        .unwrap();
+        assert!(pp_x.mean.abs() < 1e-12, "PauliPath <X>={} != 0", pp_x.mean);
+
+        let mut measured = circuit.clone();
+        measured.num_classical_bits = 1;
+        measured.add_measure(0, 0);
+        let mut measured_noise = NoiseModel::uniform_depolarizing(&measured, 0.0);
+        measured_noise.after_gate[0].push(NoiseEvent {
+            channel: NoiseChannel::ThermalRelaxation {
+                t1,
+                t2,
+                gate_time,
+                excited_population,
+            },
+            qubits: smallvec![0],
+        });
+        let sv_shots = crate::sim::simulate(&measured)
+            .backend(BackendKind::Statevector)
+            .noise(&measured_noise)
+            .seed(42)
+            .shots(200)
+            .unwrap();
+        let p1 = sv_shots.shots.iter().filter(|s| s[0]).count() as f64 / 200.0;
+        assert!(
+            (p1 - excited_population).abs() < 0.15,
+            "Statevector P(1)={p1} vs expected {excited_population}"
+        );
+    }
+}

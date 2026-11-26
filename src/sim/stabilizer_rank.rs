@@ -45,6 +45,29 @@ use super::clifford_register::{
     register_price,
 };
 
+const PHASE_LUT: [Complex64; 4] = [
+    Complex64::new(1.0, 0.0),
+    Complex64::new(0.0, 1.0),
+    Complex64::new(-1.0, 0.0),
+    Complex64::new(0.0, -1.0),
+];
+
+#[derive(Clone, Copy, Debug)]
+struct BasisAction {
+    x_mask: usize,
+    z_mask: usize,
+    base_phase4: u8,
+}
+
+impl BasisAction {
+    #[inline(always)]
+    fn act_on_basis(self, input: usize) -> (Complex64, usize) {
+        let z_parity = (((input & self.z_mask).count_ones() & 1) as u8) << 1;
+        let phase4 = (self.base_phase4 ^ z_parity) & 3;
+        (PHASE_LUT[phase4 as usize], input ^ self.x_mask)
+    }
+}
+
 /// Letter-level signed Pauli string. Each qubit's `(x, z)` bit pair encodes
 /// the Pauli letter directly: (0,0)=I, (1,0)=X, (0,1)=Z, (1,1)=Y. `phase4` is
 /// the extra `i^{phase4}` global factor multiplying the product, so `Y_q` is
@@ -229,11 +252,37 @@ impl SignedPauli {
         }
     }
 
+    fn basis_action(&self) -> BasisAction {
+        debug_assert!(self.x.len() <= usize::BITS as usize);
+        let mut x_mask = 0usize;
+        let mut z_mask = 0usize;
+        for q in 0..self.x.len() {
+            if self.x[q] {
+                x_mask |= 1usize << q;
+            }
+            if self.z[q] {
+                z_mask |= 1usize << q;
+            }
+        }
+        let y_count = (x_mask & z_mask).count_ones();
+        let base_phase4 = ((self.phase4 as u32 + y_count) & 3) as u8;
+        BasisAction {
+            x_mask,
+            z_mask,
+            base_phase4,
+        }
+    }
+
     /// `P|input⟩ = phase · |x_out⟩`. Returns `(phase, x_out)`.
+    #[cfg(test)]
     fn act_on_basis(&self, input: usize) -> (Complex64, usize) {
+        if self.x.len() <= usize::BITS as usize {
+            return self.basis_action().act_on_basis(input);
+        }
         let mut x_out = input;
         let mut phase4 = self.phase4 as u32;
-        for q in 0..self.x.len() {
+        let active_bits = self.x.len().min(usize::BITS as usize);
+        for q in 0..active_bits {
             let xq = self.x[q];
             let zq = self.z[q];
             let bit = (input >> q) & 1 == 1;
@@ -390,6 +439,7 @@ struct WeightedBranch {
 struct WeightedMpsBranch {
     weight: Complex64,
     state: MpsBackend,
+    unit_norm: bool,
 }
 
 /// Result of stabilizer rank probability computation.
@@ -567,32 +617,38 @@ fn accumulate_probabilities(
     #[cfg(feature = "parallel")]
     if branches.len() >= MIN_TERMS_FOR_PAR {
         use rayon::prelude::*;
+        let chunk_size = branches
+            .len()
+            .div_ceil(rayon::current_num_threads().max(1))
+            .max(1);
         let total_amps = branches
-            .par_iter()
-            .map(|b| {
+            .par_chunks(chunk_size)
+            .map(|chunk| {
                 let mut partial = vec![zero; dim];
-                for (y, amp) in psi0.iter().enumerate() {
-                    let (phase, x_out) = b.offset.act_on_basis(y);
-                    partial[x_out] += b.weight * phase * amp;
+                for b in chunk {
+                    let action = b.offset.basis_action();
+                    for (y, amp) in psi0.iter().enumerate() {
+                        let (phase, x_out) = action.act_on_basis(y);
+                        partial[x_out] += b.weight * phase * amp;
+                    }
                 }
                 partial
             })
-            .reduce(
-                || vec![zero; dim],
-                |mut a, b| {
-                    for (ai, bi) in a.iter_mut().zip(b.iter()) {
-                        *ai += bi;
-                    }
-                    a
-                },
-            );
+            .reduce_with(|mut a, b| {
+                for (ai, bi) in a.iter_mut().zip(b.iter()) {
+                    *ai += bi;
+                }
+                a
+            })
+            .unwrap_or_else(|| vec![zero; dim]);
         return Ok(total_amps.iter().map(|a| a.norm_sqr()).collect());
     }
 
     let mut total_amps = vec![zero; dim];
     for b in branches {
+        let action = b.offset.basis_action();
         for (y, amp) in psi0.iter().enumerate() {
-            let (phase, x_out) = b.offset.act_on_basis(y);
+            let (phase, x_out) = action.act_on_basis(y);
             total_amps[x_out] += b.weight * phase * amp;
         }
     }
@@ -868,6 +924,7 @@ fn initial_mps_branches(circuit: &Circuit, seed: u64) -> Result<Vec<WeightedMpsB
     Ok(vec![WeightedMpsBranch {
         weight: Complex64::new(1.0, 0.0),
         state,
+        unit_norm: true,
     }])
 }
 
@@ -886,6 +943,7 @@ fn apply_mps_gate(
             };
             for branch in branches {
                 branch.state.apply(&inst)?;
+                branch.unit_norm = branch.unit_norm && branch.state.truncation_discarded() == 0.0;
             }
             Ok(())
         }
@@ -932,6 +990,7 @@ fn expand_t_mps(
         let mut z_branch = branch.clone();
         z_branch.weight *= beta;
         z_branch.state.apply(&z_inst)?;
+        z_branch.unit_norm = z_branch.unit_norm && z_branch.state.truncation_discarded() == 0.0;
         new_branches.push(z_branch);
         branch.weight *= alpha;
     }
@@ -952,9 +1011,12 @@ fn weighted_mps_norm_sq(branches: &[WeightedMpsBranch]) -> Result<f64> {
     let mut next_env = Vec::new();
     for (i, left) in branches.iter().enumerate() {
         let left_weight = left.weight.conj();
-        let diag = left
-            .state
-            .inner_product_with_scratch(&left.state, &mut tmp, &mut next_env)?;
+        let diag = if left.unit_norm {
+            Complex64::new(1.0, 0.0)
+        } else {
+            left.state
+                .inner_product_with_scratch(&left.state, &mut tmp, &mut next_env)?
+        };
         total += left_weight * left.weight * diag;
         for right in &branches[i + 1..] {
             let overlap =
@@ -986,11 +1048,17 @@ fn project_mps_branches(
     let mut projected = Vec::with_capacity(branches.len());
     for branch in branches {
         let mut next = branch.clone();
+        let norm_sq = if branch.unit_norm {
+            1.0
+        } else {
+            branch.state.inner_product(&branch.state)?.re
+        };
         let prob = next.state.project_z_outcome(qubit, outcome)?;
         if prob <= crate::backend::NORM_CLAMP_MIN {
             continue;
         }
-        next.weight *= prob.sqrt();
+        next.weight *= (prob * norm_sq).sqrt();
+        next.unit_norm = true;
         projected.push(next);
     }
     Ok(projected)
@@ -1009,11 +1077,64 @@ fn normalize_mps_branches(branches: &mut [WeightedMpsBranch], norm_sq: f64) -> R
     Ok(())
 }
 
+#[cfg(test)]
 fn sample_mps_measurement(
     branches: &mut Vec<WeightedMpsBranch>,
     qubit: usize,
     rng: &mut ChaCha8Rng,
 ) -> Result<bool> {
+    sample_mps_measurement_with_total(branches, qubit, rng, None)
+}
+
+fn sample_mps_measurement_with_total(
+    branches: &mut Vec<WeightedMpsBranch>,
+    qubit: usize,
+    rng: &mut ChaCha8Rng,
+    known_total: Option<f64>,
+) -> Result<bool> {
+    if let Some(total) = known_total {
+        if !total.is_finite() || total <= crate::backend::NORM_CLAMP_MIN {
+            return Err(PrismError::InvalidParameter {
+                message: format!("invalid stabilizer-rank measurement total norm {total}"),
+            });
+        }
+        let mut zero = project_mps_branches(branches, qubit, false)?;
+        let norm_zero = weighted_mps_norm_sq(&zero)?;
+        if norm_zero <= crate::backend::NORM_CLAMP_MIN {
+            let mut one = project_mps_branches(branches, qubit, true)?;
+            let norm_one = weighted_mps_norm_sq(&one)?;
+            if norm_one <= crate::backend::NORM_CLAMP_MIN {
+                return Err(PrismError::InvalidParameter {
+                    message: "stabilizer-rank measurement has zero total probability".to_string(),
+                });
+            }
+            normalize_mps_branches(&mut one, norm_one)?;
+            *branches = one;
+            return Ok(true);
+        }
+        if norm_zero >= total {
+            normalize_mps_branches(&mut zero, norm_zero)?;
+            *branches = zero;
+            return Ok(false);
+        }
+        let prob_zero = (norm_zero / total).clamp(0.0, 1.0);
+        if rng.random::<f64>() < prob_zero {
+            normalize_mps_branches(&mut zero, norm_zero)?;
+            *branches = zero;
+            return Ok(false);
+        }
+        let mut one = project_mps_branches(branches, qubit, true)?;
+        let norm_one = weighted_mps_norm_sq(&one)?;
+        if norm_one <= crate::backend::NORM_CLAMP_MIN {
+            normalize_mps_branches(&mut zero, norm_zero)?;
+            *branches = zero;
+            return Ok(false);
+        }
+        normalize_mps_branches(&mut one, norm_one)?;
+        *branches = one;
+        return Ok(true);
+    }
+
     let mut zero = project_mps_branches(branches, qubit, false)?;
     let mut one = project_mps_branches(branches, qubit, true)?;
     let norm_zero = weighted_mps_norm_sq(&zero)?;
@@ -1048,7 +1169,7 @@ fn apply_reset_mps(
     qubit: usize,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
-    let measured_one = sample_mps_measurement(branches, qubit, rng)?;
+    let measured_one = sample_mps_measurement_with_total(branches, qubit, rng, Some(1.0))?;
     if measured_one {
         apply_mps_gate(branches, &Gate::X, &[qubit])?;
     }
@@ -1067,7 +1188,7 @@ fn process_mps_instruction(
             qubit,
             classical_bit,
         } => {
-            let outcome = sample_mps_measurement(branches, *qubit, rng)?;
+            let outcome = sample_mps_measurement_with_total(branches, *qubit, rng, Some(1.0))?;
             classical_bits[*classical_bit] = outcome;
             Ok(())
         }

@@ -360,7 +360,14 @@ impl SplitPlan {
                     (p.x | p.z) & mask != 0
                 })
                 .collect();
-            let walsh_work = walsh_readout_work(rank, excess.len());
+            let walsh_work = walsh_readout_work(
+                width,
+                rank,
+                excess.iter().map(|&i| {
+                    let (p, _) = gauge.excess[i];
+                    (p.x | p.z) & mask
+                }),
+            );
             let dense_work = dense_readout_work(width, rank, excess.len());
             let cut = if width <= limits.whole_width {
                 None
@@ -424,7 +431,17 @@ impl SplitPlan {
             .iter()
             .map(|part| match part.cut {
                 None if part.rank == 0 => 0.0,
-                None if part.walsh => walsh_readout_work(part.rank, part.excess.len()),
+                None if part.walsh => {
+                    let width = part.mask.count_ones() as usize;
+                    walsh_readout_work(
+                        width,
+                        part.rank,
+                        part.excess.iter().map(|&i| {
+                            let (p, _) = self.gauge.excess[i];
+                            (p.x | p.z) & part.mask
+                        }),
+                    )
+                }
                 None => {
                     let width = part.mask.count_ones() as usize;
                     dense_readout_work(width, part.rank, part.excess.len())
@@ -815,11 +832,23 @@ fn dense_readout_work(width: usize, rank: usize, excess: usize) -> f64 {
     (excess + 1 + 3 * (rank + 1)) as f64 * 2f64.powi(width as i32)
 }
 
-/// Register amplitude updates of a [`WalshReadout`] of `2^rank` entries: the fill
-/// evaluates about `1.5^excess` terms per entry, as many as half the rotations splitting
-/// each one in two, and the transform takes `rank` levels.
-fn walsh_readout_work(rank: usize, excess: usize) -> f64 {
-    let terms = 1.5f64.powi(excess as i32);
+/// Register amplitude updates of a [`WalshReadout`] of `2^rank` entries: each entry
+/// pays the base fill cost (`WALSH_TERM_UNITS`) plus half the rotations splitting in two,
+/// scaled at depth `k` by `(3/4)^{u_k}` for the `u_k` blind qubits untouched by the first
+/// `k` excess rotations, and `rank` transform levels.
+fn walsh_readout_work(
+    width: usize,
+    rank: usize,
+    excess_supports: impl IntoIterator<Item = u64>,
+) -> f64 {
+    let mut support = 0u64;
+    let mut sum = 0.0f64;
+    for s in excess_supports {
+        support |= s;
+        let frozen = width - support.count_ones() as usize;
+        sum = sum * 1.5 + 0.75f64.powi(frozen as i32);
+    }
+    let terms = 1.0 + 0.5 * sum;
     2f64.powi(rank as i32) * (WALSH_TERM_UNITS * terms + WALSH_LEVEL_UNITS * rank as f64)
 }
 
@@ -831,6 +860,10 @@ struct WalshReadout {
     rows: Vec<RegisterPauli>,
     /// Bits whose anchor has `<X> = 0`, and those with `<Y> = 0`.
     blind: [u64; 2],
+    /// `blind[0]` masked to bits untouched by `excess[0..k]`, for `k in 0..=excess.len()`.
+    frozen_blind_x: Vec<u64>,
+    /// `blind[1]` masked to bits untouched by `excess[0..k]`, for `k in 0..=excess.len()`.
+    frozen_blind_y: Vec<u64>,
     /// Bits whose anchor has a negative `<X>`, `<Y>` and `<Z>`.
     negative: [u64; 3],
     /// `2^(-w/2)` by weight `w`.
@@ -876,19 +909,32 @@ impl WalshReadout {
             z: compress(z, mask),
             phase4,
         };
+        let excess: Vec<(RegisterPauli, f64, f64)> = excess
+            .iter()
+            .map(|&j| {
+                let (p, theta) = gauge.excess[j];
+                let (sin, cos) = (2.0 * theta).sin_cos();
+                (pack(p.x, p.z, p.phase4), cos, sin)
+            })
+            .collect();
+        let mut frozen_blind_x = Vec::with_capacity(excess.len() + 1);
+        let mut frozen_blind_y = Vec::with_capacity(excess.len() + 1);
+        let mut remaining_support = 0u64;
+        frozen_blind_x.push(blind[0]);
+        frozen_blind_y.push(blind[1]);
+        for &(r, _, _) in &excess {
+            remaining_support |= r.x | r.z;
+            frozen_blind_x.push(blind[0] & !remaining_support);
+            frozen_blind_y.push(blind[1] & !remaining_support);
+        }
         Self {
             rows: basis.iter().map(|&(x, z)| pack(x, z, 0)).collect(),
             blind,
+            frozen_blind_x,
+            frozen_blind_y,
             negative,
             scale,
-            excess: excess
-                .iter()
-                .map(|&j| {
-                    let (p, theta) = gauge.excess[j];
-                    let (sin, cos) = (2.0 * theta).sin_cos();
-                    (pack(p.x, p.z, p.phase4), cos, sin)
-                })
-                .collect(),
+            excess,
         }
     }
 
@@ -935,6 +981,11 @@ impl WalshReadout {
     fn value(&self, q: RegisterPauli, rotations: usize) -> f64 {
         if rotations == 0 {
             return self.product_value(q);
+        }
+        let xs = q.x & !q.z;
+        let ys = q.x & q.z;
+        if (xs & self.frozen_blind_x[rotations]) | (ys & self.frozen_blind_y[rotations]) != 0 {
+            return 0.0;
         }
         let (r, cos, sin) = self.excess[rotations - 1];
         if ((q.x & r.z) ^ (q.z & r.x)).count_ones() & 1 == 0 {

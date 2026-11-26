@@ -3,12 +3,14 @@
 
 use num_complex::Complex64;
 
+use std::borrow::Cow;
 use std::hash::{Hash, Hasher};
 
 use super::{
     PauliAxis, PauliTerm, SPD_MAX_TERMS_CEILING, check_spd_term_ceiling,
     clifford_conjugation_phase, count_branching_gates, is_spd_native, pauli_vec_from_terms,
-    spd_term_ceiling_error, validate_and_lower, z_rotation_angle, zz_rotation_angle,
+    snap_trig_pair, snapped_sin_cos, spd_term_ceiling_error, validate_and_lower, z_rotation_angle,
+    zz_rotation_angle,
 };
 use crate::circuit::{Circuit, Instruction, SmallVec, smallvec};
 use crate::error::{PrismError, Result};
@@ -199,6 +201,17 @@ impl<K: SpdKey> WeightedPauliSum<K> {
         flip: impl Fn(&mut K),
         flipped_coeff: impl Fn(&K, Complex64) -> Complex64,
     ) {
+        let (sin, cos) = snap_trig_pair(sin, cos);
+        if sin == 0.0 {
+            if cos != 1.0 {
+                for (pauli, coeff) in &mut self.terms {
+                    if anticommutes(pauli) {
+                        *coeff *= cos;
+                    }
+                }
+            }
+            return;
+        }
         self.in_support.clear();
         self.in_support.extend(
             self.terms
@@ -207,12 +220,6 @@ impl<K: SpdKey> WeightedPauliSum<K> {
                 .filter(|(_, (pauli, _))| anticommutes(pauli))
                 .map(|(i, _)| i),
         );
-        if sin == 0.0 {
-            for &i in &self.in_support {
-                self.terms[i].1 *= cos;
-            }
-            return;
-        }
 
         self.partner.clear();
         if self.in_support.len() > 1 {
@@ -338,19 +345,18 @@ impl<K: SpdKey> WeightedPauliSum<K> {
     }
 
     /// Pauli-string analogue of [`branch_z_rotation`](Self::branch_z_rotation) for
-    /// `exp(-i θ P / 2)` with `rotation` the key of `P` and `num_y` its Y count: a term
+    /// `exp(-i θ P / 2)` with `(px, pz)` the words of `P` and `num_y` its Y count: a term
     /// `Q` splits when it anticommutes with `P`, and its flip is the key of `Q P`. With
     /// `P = i^num_y X^px Z^pz`, `X^qx Z^qz X^px Z^pz = (-1)^|qz & px| X^(qx^px) Z^(qz^pz)`,
     /// so the flip carries `-i^(num_y + 1) sin` and the sign of the source's z bits
     /// passing the string's x bits.
-    fn branch_pauli_rotation(&mut self, rotation: &K, num_y: u32, sin: f64, cos: f64) {
+    fn branch_pauli_rotation(&mut self, px: &[u64], pz: &[u64], num_y: u32, sin: f64, cos: f64) {
         let flip_weight = match num_y & 3 {
             0 => Complex64::new(0.0, -sin),
             1 => Complex64::new(sin, 0.0),
             2 => Complex64::new(0.0, sin),
             _ => Complex64::new(-sin, 0.0),
         };
-        let (px, pz) = (rotation.x(), rotation.z());
         self.branch_with(
             sin,
             cos,
@@ -390,25 +396,24 @@ impl<K: SpdKey> WeightedPauliSum<K> {
             Gate::Tdg => self.branch_z_rotation_angle(targets[0], -std::f64::consts::FRAC_PI_4),
             Gate::Rz(theta) | Gate::P(theta) => self.branch_z_rotation_angle(targets[0], *theta),
             Gate::Rzz(theta) => {
-                let (sin, cos) = theta.sin_cos();
+                let (sin, cos) = snapped_sin_cos(*theta);
                 self.branch_zz_rotation(targets[0], targets[1], sin, cos);
             }
             Gate::Rx(theta) => {
-                let (sin, cos) = theta.sin_cos();
+                let (sin, cos) = snapped_sin_cos(*theta);
                 self.branch_x_rotation(targets[0], sin, cos);
             }
             Gate::Ry(theta) => {
-                let (sin, cos) = theta.sin_cos();
+                let (sin, cos) = snapped_sin_cos(*theta);
                 self.branch_y_rotation(targets[0], sin, cos);
             }
             Gate::PauliRot(data) => {
                 let Some((first, _)) = self.terms.first() else {
                     return;
                 };
-                let (rotation, num_y) =
-                    pauli_rotation_key::<K>(first.x().len(), targets, data.axes());
-                let (sin, cos) = data.theta().sin_cos();
-                self.branch_pauli_rotation(&rotation, num_y, sin, cos);
+                let (px, pz, num_y) = pauli_rotation_words(first.x().len(), targets, data.axes());
+                let (sin, cos) = snapped_sin_cos(data.theta());
+                self.branch_pauli_rotation(&px, &pz, num_y, sin, cos);
             }
             _ => self.conjugate_all_backward_phased(gate, targets),
         }
@@ -416,7 +421,7 @@ impl<K: SpdKey> WeightedPauliSum<K> {
 
     #[inline(always)]
     fn branch_z_rotation_angle(&mut self, qubit: usize, theta: f64) {
-        let (sin, cos) = theta.sin_cos();
+        let (sin, cos) = snapped_sin_cos(theta);
         self.branch_z_rotation(qubit, sin, cos);
     }
 
@@ -466,13 +471,13 @@ impl<K: SpdKey> WeightedPauliSum<K> {
     }
 }
 
-/// Key of the Pauli string `axes[i]` on `targets[i]` over `num_words` words, and its Y
+/// Words of the Pauli string `axes[i]` on `targets[i]` over `num_words` words, and its Y
 /// count.
-fn pauli_rotation_key<K: SpdKey>(
+fn pauli_rotation_words(
     num_words: usize,
     targets: &[usize],
     axes: &[PauliAxis],
-) -> (K, u32) {
+) -> (SmallVec<[u64; 2]>, SmallVec<[u64; 2]>, u32) {
     let mut x: SmallVec<[u64; 2]> = smallvec![0; num_words];
     let mut z: SmallVec<[u64; 2]> = smallvec![0; num_words];
     let mut num_y = 0;
@@ -487,7 +492,7 @@ fn pauli_rotation_key<K: SpdKey>(
             }
         }
     }
-    (K::from_words(&x, &z), num_y)
+    (x, z, num_y)
 }
 
 /// `U† P U` as weighted one-word Pauli strings in the letter convention of the Clifford
@@ -509,7 +514,7 @@ pub(in crate::sim) fn propagate_register_rotations(
     sum.insert(InlinePauli { x: [x], z: [z] }, Complex64::new(1.0, 0.0));
     for (rx, rz, phase4, theta) in rotations.rev() {
         // One rotation `E` sends `P` anticommuting with `R` to `cos 2θ P + i sin 2θ R P`.
-        let (sin, cos) = (2.0 * theta).sin_cos();
+        let (sin, cos) = snapped_sin_cos(2.0 * theta);
         sum.branch_with(
             sin,
             cos,
@@ -827,6 +832,155 @@ fn run_spd_bounded(
     with_spd_key!(circuit.num_qubits, K => run_spd_lowered::<K>(circuit, truncation, work_budget))
 }
 
+enum PrecomputedRot {
+    Single {
+        sin: f64,
+        cos: f64,
+    },
+    Pair {
+        sin: f64,
+        cos: f64,
+    },
+    X {
+        sin: f64,
+        cos: f64,
+    },
+    Y {
+        sin: f64,
+        cos: f64,
+    },
+    String {
+        x: SmallVec<[u64; 2]>,
+        z: SmallVec<[u64; 2]>,
+        num_y: u32,
+        sin: f64,
+        cos: f64,
+    },
+}
+
+fn precompute_rotations(circuit: &Circuit) -> (Vec<Option<PrecomputedRot>>, usize) {
+    let num_words = circuit.num_qubits.div_ceil(64).max(1);
+    let mut t_count = 0usize;
+    let rotations = circuit
+        .instructions
+        .iter()
+        .map(|inst| {
+            let Instruction::Gate { gate, targets } = inst else {
+                return None;
+            };
+            let rot = if let Some(theta) = z_rotation_angle(gate) {
+                let (sin, cos) = snapped_sin_cos(theta);
+                Some(PrecomputedRot::Single { sin, cos })
+            } else if let Some(theta) = zz_rotation_angle(gate) {
+                let (sin, cos) = snapped_sin_cos(theta);
+                Some(PrecomputedRot::Pair { sin, cos })
+            } else {
+                match gate {
+                    Gate::Rx(theta) => {
+                        let (sin, cos) = snapped_sin_cos(*theta);
+                        Some(PrecomputedRot::X { sin, cos })
+                    }
+                    Gate::Ry(theta) => {
+                        let (sin, cos) = snapped_sin_cos(*theta);
+                        Some(PrecomputedRot::Y { sin, cos })
+                    }
+                    Gate::PauliRot(data) => {
+                        let (x, z, num_y) = pauli_rotation_words(num_words, targets, data.axes());
+                        let (sin, cos) = snapped_sin_cos(data.theta());
+                        Some(PrecomputedRot::String {
+                            x,
+                            z,
+                            num_y,
+                            sin,
+                            cos,
+                        })
+                    }
+                    _ => None,
+                }
+            };
+            if rot.is_some() {
+                t_count += 1;
+            }
+            rot
+        })
+        .collect();
+    (rotations, t_count)
+}
+
+#[inline(always)]
+fn apply_precomputed_backward<K: SpdKey>(
+    sum: &mut WeightedPauliSum<K>,
+    rot: Option<&PrecomputedRot>,
+    gate: &Gate,
+    targets: &[usize],
+) {
+    match rot {
+        Some(PrecomputedRot::Single { sin, cos }) => {
+            sum.branch_z_rotation(targets[0], *sin, *cos);
+        }
+        Some(PrecomputedRot::Pair { sin, cos }) => {
+            sum.branch_zz_rotation(targets[0], targets[1], *sin, *cos);
+        }
+        Some(PrecomputedRot::X { sin, cos }) => {
+            sum.branch_x_rotation(targets[0], *sin, *cos);
+        }
+        Some(PrecomputedRot::Y { sin, cos }) => {
+            sum.branch_y_rotation(targets[0], *sin, *cos);
+        }
+        Some(PrecomputedRot::String {
+            x,
+            z,
+            num_y,
+            sin,
+            cos,
+        }) => {
+            sum.branch_pauli_rotation(x, z, *num_y, *sin, *cos);
+        }
+        None => sum.conjugate_all_backward_phased(gate, targets),
+    }
+}
+
+/// Circuit lowered once with precomputed rotation trig for repeated light-cone SPD queries.
+pub(crate) struct PreparedSpd<'c> {
+    circuit: Cow<'c, Circuit>,
+    t_count: usize,
+    rotations: Vec<Option<PrecomputedRot>>,
+}
+
+impl<'c> PreparedSpd<'c> {
+    pub(crate) fn new(circuit: &'c Circuit, backend: &'static str) -> Result<Self> {
+        let lowered = validate_and_lower(circuit, backend, is_spd_native)?;
+        let (rotations, t_count) = precompute_rotations(lowered.as_ref());
+        Ok(Self {
+            circuit: lowered,
+            t_count,
+            rotations,
+        })
+    }
+
+    pub(crate) fn eval_light_cone(
+        &self,
+        observable: &[PauliTerm],
+        epsilon: f64,
+        max_terms: usize,
+    ) -> Result<SpdObservableResult> {
+        let circuit = self.circuit.as_ref();
+        let n = circuit.num_qubits;
+        let (obs, obs_coeff) = pauli_vec_from_terms(n, observable)?;
+        let keep = inverse_light_cone(circuit, observable);
+        with_spd_key!(n, K => propagate_light_cone(
+            circuit,
+            &self.rotations,
+            &keep,
+            K::from_words(&obs.x, &obs.z),
+            obs_coeff,
+            epsilon,
+            max_terms,
+            self.t_count,
+        ))
+    }
+}
+
 fn run_spd_lowered<K: SpdKey>(
     circuit: &Circuit,
     truncation: &SpdTruncation,
@@ -834,7 +988,7 @@ fn run_spd_lowered<K: SpdKey>(
 ) -> Result<Option<SpdResult>> {
     let n = circuit.num_qubits;
     let num_words = n.div_ceil(64);
-    let t_count = count_branching_gates(circuit);
+    let (rotations, t_count) = precompute_rotations(circuit);
 
     let zeros = vec![0u64; num_words];
     let identity = K::from_words(&zeros, &zeros);
@@ -842,68 +996,6 @@ fn run_spd_lowered<K: SpdKey>(
     let mut peak_terms = 0usize;
     let mut total_discarded = 0.0;
     let mut work = 0usize;
-
-    enum Rot<K> {
-        Single {
-            sin: f64,
-            cos: f64,
-        },
-        Pair {
-            sin: f64,
-            cos: f64,
-        },
-        X {
-            sin: f64,
-            cos: f64,
-        },
-        Y {
-            sin: f64,
-            cos: f64,
-        },
-        String {
-            rotation: K,
-            num_y: u32,
-            sin: f64,
-            cos: f64,
-        },
-    }
-    let rotations: Vec<Option<Rot<K>>> = circuit
-        .instructions
-        .iter()
-        .map(|inst| match inst {
-            Instruction::Gate { gate, targets } => {
-                if let Some((sin, cos)) = z_rotation_angle(gate).map(f64::sin_cos) {
-                    Some(Rot::Single { sin, cos })
-                } else if let Some((sin, cos)) = zz_rotation_angle(gate).map(f64::sin_cos) {
-                    Some(Rot::Pair { sin, cos })
-                } else {
-                    match gate {
-                        Gate::Rx(theta) => {
-                            let (sin, cos) = theta.sin_cos();
-                            Some(Rot::X { sin, cos })
-                        }
-                        Gate::Ry(theta) => {
-                            let (sin, cos) = theta.sin_cos();
-                            Some(Rot::Y { sin, cos })
-                        }
-                        Gate::PauliRot(data) => {
-                            let (rotation, num_y) =
-                                pauli_rotation_key(num_words, targets, data.axes());
-                            let (sin, cos) = data.theta().sin_cos();
-                            Some(Rot::String {
-                                rotation,
-                                num_y,
-                                sin,
-                                cos,
-                            })
-                        }
-                        _ => None,
-                    }
-                }
-            }
-            _ => None,
-        })
-        .collect();
 
     for q in 0..n {
         let mut sum = WeightedPauliSum::new();
@@ -913,21 +1005,7 @@ fn run_spd_lowered<K: SpdKey>(
 
         for (idx, inst) in circuit.instructions.iter().enumerate().rev() {
             if let Instruction::Gate { gate, targets } = inst {
-                match rotations[idx] {
-                    Some(Rot::Single { sin, cos }) => sum.branch_z_rotation(targets[0], sin, cos),
-                    Some(Rot::Pair { sin, cos }) => {
-                        sum.branch_zz_rotation(targets[0], targets[1], sin, cos)
-                    }
-                    Some(Rot::X { sin, cos }) => sum.branch_x_rotation(targets[0], sin, cos),
-                    Some(Rot::Y { sin, cos }) => sum.branch_y_rotation(targets[0], sin, cos),
-                    Some(Rot::String {
-                        ref rotation,
-                        num_y,
-                        sin,
-                        cos,
-                    }) => sum.branch_pauli_rotation(rotation, num_y, sin, cos),
-                    None => sum.conjugate_all_backward_phased(gate, targets),
-                }
+                apply_precomputed_backward(&mut sum, rotations[idx].as_ref(), gate, targets);
             }
 
             truncation.enforce(&mut sum, &mut total_discarded);
@@ -968,20 +1046,32 @@ fn run_spd_lowered<K: SpdKey>(
 /// cone set at depth `k`, and `U_k` acts as identity outside its targets, so
 /// `U_k^dag P_k U_k = P_k`.
 pub fn inverse_light_cone(circuit: &Circuit, observable: &[PauliTerm]) -> Vec<bool> {
-    let mut cone: std::collections::HashSet<usize> = observable.iter().map(|t| t.qubit).collect();
     let n_inst = circuit.instructions.len();
     let mut keep = vec![false; n_inst];
+    if observable.is_empty() {
+        return keep;
+    }
+    let mut cone = vec![0u64; circuit.num_qubits.div_ceil(64)];
+    for term in observable {
+        if let Some(word) = cone.get_mut(term.qubit / 64) {
+            *word |= 1u64 << (term.qubit % 64);
+        }
+    }
 
     for (idx, inst) in circuit.instructions.iter().enumerate().rev() {
         let targets: &[usize] = match inst {
             Instruction::Gate { targets, .. } => targets,
             _ => continue,
         };
-        let touches = targets.iter().any(|q| cone.contains(q));
+        let touches = targets
+            .iter()
+            .any(|&q| cone.get(q / 64).is_some_and(|&w| (w >> (q % 64)) & 1 != 0));
         if touches {
             keep[idx] = true;
             for &q in targets {
-                cone.insert(q);
+                if let Some(word) = cone.get_mut(q / 64) {
+                    *word |= 1u64 << (q % 64);
+                }
             }
         }
     }
@@ -1001,25 +1091,14 @@ pub fn run_spd_observable_light_cone(
     epsilon: f64,
     max_terms: usize,
 ) -> Result<SpdObservableResult> {
-    let lowered = validate_and_lower(circuit, "light-cone SPD observable", is_spd_native)?;
-    let circuit = lowered.as_ref();
-    let n = circuit.num_qubits;
-    let t_count = count_branching_gates(circuit);
-    let (obs, obs_coeff) = pauli_vec_from_terms(n, observable)?;
-    let keep = inverse_light_cone(circuit, observable);
-    with_spd_key!(n, K => propagate_light_cone(
-        circuit,
-        &keep,
-        K::from_words(&obs.x, &obs.z),
-        obs_coeff,
-        epsilon,
-        max_terms,
-        t_count,
-    ))
+    PreparedSpd::new(circuit, "light-cone SPD observable")?
+        .eval_light_cone(observable, epsilon, max_terms)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn propagate_light_cone<K: SpdKey>(
     circuit: &Circuit,
+    rotations: &[Option<PrecomputedRot>],
     keep: &[bool],
     observable: K,
     coeff: Complex64,
@@ -1037,7 +1116,7 @@ fn propagate_light_cone<K: SpdKey>(
             continue;
         }
         if let Instruction::Gate { gate, targets } = inst {
-            sum.apply_backward(gate, targets);
+            apply_precomputed_backward(&mut sum, rotations[idx].as_ref(), gate, targets);
         }
         if max_terms > 0 && sum.terms.len() > max_terms {
             total_discarded += sum.truncate(epsilon);

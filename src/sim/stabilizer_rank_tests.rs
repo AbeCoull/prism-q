@@ -1636,3 +1636,422 @@ fn probabilities_past_the_route_cap_match_statevector() {
         assert_eq!(sr.num_terms, 1 << width, "{width} qubits left the register");
     }
 }
+
+fn reference_act_on_basis(pauli: &SignedPauli, input: usize) -> (Complex64, usize) {
+    let mut x_out = input;
+    let mut phase4 = pauli.phase4 as u32;
+    for q in 0..pauli.x.len() {
+        let bit = (input >> q) & 1 == 1;
+        match (pauli.x[q], pauli.z[q]) {
+            (false, false) => {}
+            (true, false) => x_out ^= 1usize << q,
+            (false, true) => {
+                if bit {
+                    phase4 += 2;
+                }
+            }
+            (true, true) => {
+                x_out ^= 1usize << q;
+                phase4 += if bit { 3 } else { 1 };
+            }
+        }
+    }
+    let phase = match (phase4 & 3) as u8 {
+        0 => Complex64::new(1.0, 0.0),
+        1 => Complex64::new(0.0, 1.0),
+        2 => Complex64::new(-1.0, 0.0),
+        3 => Complex64::new(0.0, -1.0),
+        _ => unreachable!(),
+    };
+    (phase, x_out)
+}
+
+#[test]
+fn signed_pauli_basis_action_matches_reference_across_letters_phases_and_widths() {
+    // Zero-qubit edge case across all four global phases.
+    for phase4 in 0..4u8 {
+        let mut p = SignedPauli::identity(0);
+        p.phase4 = phase4;
+        let expected = reference_act_on_basis(&p, 0);
+        assert_eq!(p.act_on_basis(0), expected);
+        assert_eq!(p.basis_action().act_on_basis(0), expected);
+    }
+
+    // Exhaustive check for 1..=3 qubits across all Pauli letters, phases, and basis inputs.
+    for n in 1..=3usize {
+        let num_letters = 1usize << (2 * n);
+        let dim = 1usize << n;
+        for letters in 0..num_letters {
+            let mut p = SignedPauli::identity(n);
+            for q in 0..n {
+                let code = (letters >> (2 * q)) & 3;
+                p.x[q] = (code & 1) != 0;
+                p.z[q] = (code & 2) != 0;
+            }
+            for phase4 in 0..4u8 {
+                p.phase4 = phase4;
+                let action = p.basis_action();
+                for input in 0..dim {
+                    let want = reference_act_on_basis(&p, input);
+                    assert_eq!(p.act_on_basis(input), want);
+                    assert_eq!(action.act_on_basis(input), want);
+                }
+            }
+        }
+    }
+
+    // Multi-qubit checks at MAX_STATEVECTOR_QUBITS and usize::BITS, plus mutated offsets.
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    for n in [MAX_STATEVECTOR_QUBITS, usize::BITS as usize] {
+        for _ in 0..32 {
+            let mut p = SignedPauli::identity(n);
+            for q in 0..n {
+                p.x[q] = rng.random_bool(0.5);
+                p.z[q] = rng.random_bool(0.5);
+            }
+            p.phase4 = rng.random_range(0..4);
+            p.mul_z_on_left(0);
+            p.mul_z_on_left(n - 1);
+            if n >= 2 {
+                p.conjugate_by(&Gate::H, &[0]).unwrap();
+                p.conjugate_by(&Gate::S, &[n - 1]).unwrap();
+                p.conjugate_by(&Gate::Cx, &[0, n - 1]).unwrap();
+                p.conjugate_by(&Gate::Cz, &[n - 1, 0]).unwrap();
+                p.conjugate_by(&Gate::SX, &[1]).unwrap();
+                p.conjugate_by(&Gate::Swap, &[0, 1]).unwrap();
+            }
+            let action = p.basis_action();
+            for _ in 0..16 {
+                let input = if n == usize::BITS as usize {
+                    rng.random::<u64>() as usize
+                } else {
+                    (rng.random::<u64>() as usize) & ((1usize << n) - 1)
+                };
+                let want = reference_act_on_basis(&p, input);
+                assert_eq!(p.act_on_basis(input), want);
+                assert_eq!(action.act_on_basis(input), want);
+            }
+        }
+    }
+
+    // Fallback check when qubit count exceeds usize::BITS with active qubits in low bits.
+    let mut wide = SignedPauli::identity(usize::BITS as usize + 4);
+    wide.x[0] = true;
+    wide.z[0] = true;
+    wide.z[5] = true;
+    wide.phase4 = 3;
+    assert_eq!(
+        wide.act_on_basis(0b10_0001),
+        (Complex64::new(1.0, 0.0), 0b10_0000)
+    );
+}
+
+#[test]
+fn accumulate_probabilities_y_producing_clifford_t_matches_statevector() {
+    let mut c = Circuit::new(4, 0);
+    for q in 0..4 {
+        c.add_gate(Gate::H, &[q]);
+    }
+    c.add_gate(Gate::T, &[0]);
+    c.add_gate(Gate::S, &[0]);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::T, &[1]);
+    c.add_gate(Gate::SX, &[1]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::Tdg, &[2]);
+    c.add_gate(Gate::Sdg, &[2]);
+    c.add_gate(Gate::Cz, &[1, 2]);
+    c.add_gate(Gate::T, &[3]);
+    c.add_gate(Gate::S, &[3]);
+    c.add_gate(Gate::T, &[0]);
+    c.add_gate(Gate::H, &[2]);
+    c.add_gate(Gate::Cx, &[2, 3]);
+    c.add_gate(Gate::Tdg, &[1]);
+
+    // Register cap of 2 forces the branch accumulation path with 64 terms (>= MIN_TERMS_FOR_PAR).
+    let sr = exact_probabilities(&c, 42, 2).unwrap();
+    assert_eq!(sr.num_terms, 64);
+
+    let sv = crate::sim::run_with(
+        crate::sim::BackendKind::Statevector,
+        &c,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
+    let sv_probs = sv.probabilities.unwrap().to_vec();
+    for (i, (got, want)) in sr.probabilities.iter().zip(sv_probs.iter()).enumerate() {
+        assert!(
+            (got - want).abs() < 1e-12,
+            "prob[{i}]: got={got}, want={want}"
+        );
+    }
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn accumulate_probabilities_parallel_matches_sequential_across_term_counts() {
+    for t_gates in [3usize, 4, 6] {
+        let mut c = Circuit::new(4, 0);
+        for q in 0..4 {
+            c.add_gate(Gate::H, &[q]);
+        }
+        for k in 0..t_gates {
+            let q = k % 4;
+            c.add_gate(Gate::T, &[q]);
+            c.add_gate(Gate::S, &[q]);
+            c.add_gate(Gate::Cx, &[q, (q + 1) % 4]);
+        }
+        let expected_terms = 1usize << t_gates;
+        assert_eq!(expected_terms >= MIN_TERMS_FOR_PAR, t_gates >= 4);
+
+        let run_with_threads = |threads: usize| {
+            crate::ThreadPool::with_threads(threads)
+                .unwrap()
+                .install(|| exact_probabilities(&c, 42, 2).unwrap())
+        };
+        let one = run_with_threads(1);
+        assert_eq!(one.num_terms, expected_terms);
+
+        let sv = crate::sim::run_with(
+            crate::sim::BackendKind::Statevector,
+            &c,
+            42,
+            &ResolvedLimits::process_default(),
+        )
+        .unwrap();
+        let sv_probs = sv.probabilities.unwrap().to_vec();
+        for (i, (&p1, &psv)) in one.probabilities.iter().zip(&sv_probs).enumerate() {
+            assert!(
+                (p1 - psv).abs() < 1e-12,
+                "t={t_gates} prob[{i}]: {p1} vs {psv}"
+            );
+        }
+
+        for threads in [3usize, 4, 6] {
+            let par = run_with_threads(threads);
+            assert_eq!(par.num_terms, expected_terms);
+            for (i, (&p1, &pp)) in one.probabilities.iter().zip(&par.probabilities).enumerate() {
+                assert!(
+                    (p1 - pp).abs() < 1e-12,
+                    "t={t_gates} threads={threads} prob[{i}]: {p1} vs {pp}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn weighted_mps_norm_sq_handles_unit_and_non_unit_branches() {
+    assert_eq!(weighted_mps_norm_sq(&[]).unwrap(), 0.0);
+
+    // Truncated MPS state has inner_product < 1.0 and sets unit_norm = false.
+    let mut trunc = MpsBackend::new(42, 1);
+    trunc.init(2, 0).unwrap();
+    let mut branches = vec![WeightedMpsBranch {
+        weight: Complex64::new(1.5, -0.5),
+        state: trunc,
+        unit_norm: true,
+    }];
+    apply_mps_gate(&mut branches, &Gate::H, &[0]).unwrap();
+    apply_mps_gate(&mut branches, &Gate::Cx, &[0, 1]).unwrap();
+    assert!(branches[0].state.truncation_discarded() > 0.0);
+    assert!(!branches[0].unit_norm);
+
+    let full_diag = branches[0]
+        .state
+        .inner_product(&branches[0].state)
+        .unwrap()
+        .re;
+    assert!(full_diag < 0.9);
+    let expected = branches[0].weight.norm_sqr() * full_diag;
+    let got = weighted_mps_norm_sq(&branches).unwrap();
+    assert!(
+        (got - expected).abs() < 1e-12,
+        "got={got}, expected={expected}"
+    );
+
+    // Cancelling identical branches yield zero norm.
+    let mut base = MpsBackend::new_exact(42);
+    base.init(1, 0).unwrap();
+    let cancel = vec![
+        WeightedMpsBranch {
+            weight: Complex64::new(1.0, 0.0),
+            state: base.clone(),
+            unit_norm: true,
+        },
+        WeightedMpsBranch {
+            weight: Complex64::new(-1.0, 0.0),
+            state: base.clone(),
+            unit_norm: true,
+        },
+    ];
+    assert!(weighted_mps_norm_sq(&cancel).unwrap() < 1e-15);
+
+    // Non-finite weight is rejected.
+    let bad = vec![WeightedMpsBranch {
+        weight: Complex64::new(f64::NAN, 0.0),
+        state: base,
+        unit_norm: true,
+    }];
+    assert!(matches!(
+        weighted_mps_norm_sq(&bad),
+        Err(PrismError::InvalidParameter { .. })
+    ));
+}
+
+#[test]
+fn sample_mps_measurement_with_total_handles_deterministic_drift_and_unnormalized_cases() {
+    let mut zero_mps = MpsBackend::new_exact(42);
+    zero_mps.init(1, 0).unwrap();
+    let mut one_mps = zero_mps.clone();
+    one_mps
+        .apply(&Instruction::Gate {
+            gate: Gate::X,
+            targets: SmallVec::from_slice(&[0]),
+        })
+        .unwrap();
+
+    // Certain |0> consumes 0 RNG draws.
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let mut branches = vec![WeightedMpsBranch {
+        weight: Complex64::new(1.0, 0.0),
+        state: zero_mps.clone(),
+        unit_norm: true,
+    }];
+    assert!(!sample_mps_measurement_with_total(&mut branches, 0, &mut rng, Some(1.0)).unwrap());
+    assert_eq!(rng.get_word_pos(), 0);
+
+    // Certain |1> consumes 0 RNG draws.
+    let mut branches = vec![WeightedMpsBranch {
+        weight: Complex64::new(1.0, 0.0),
+        state: one_mps,
+        unit_norm: true,
+    }];
+    assert!(sample_mps_measurement_with_total(&mut branches, 0, &mut rng, Some(1.0)).unwrap());
+    assert_eq!(rng.get_word_pos(), 0);
+
+    // Over-unit norm_zero > total skips RNG and renormalizes back to 1.0.
+    let mut branches = vec![WeightedMpsBranch {
+        weight: Complex64::new((1.0 + 1e-12_f64).sqrt(), 0.0),
+        state: zero_mps.clone(),
+        unit_norm: true,
+    }];
+    assert!(!sample_mps_measurement_with_total(&mut branches, 0, &mut rng, Some(1.0)).unwrap());
+    assert_eq!(rng.get_word_pos(), 0);
+    assert!((weighted_mps_norm_sq(&branches).unwrap() - 1.0).abs() < 1e-12);
+
+    // Float-drift guard: true P(1) == 0 with norm_zero < total falls back to |0> even when u >= norm_zero.
+    let mut drift_rng = ChaCha8Rng::seed_from_u64(7);
+    let mut branches = vec![WeightedMpsBranch {
+        weight: Complex64::new(0.1_f64.sqrt(), 0.0),
+        state: zero_mps.clone(),
+        unit_norm: true,
+    }];
+    assert!(
+        !sample_mps_measurement_with_total(&mut branches, 0, &mut drift_rng, Some(1.0)).unwrap()
+    );
+    assert!((weighted_mps_norm_sq(&branches).unwrap() - 1.0).abs() < 1e-12);
+
+    // Invalid known_total and zero-norm branches return InvalidParameter.
+    for bad_total in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let mut b = vec![WeightedMpsBranch {
+            weight: Complex64::new(1.0, 0.0),
+            state: zero_mps.clone(),
+            unit_norm: true,
+        }];
+        assert!(matches!(
+            sample_mps_measurement_with_total(&mut b, 0, &mut rng, Some(bad_total)),
+            Err(PrismError::InvalidParameter { .. })
+        ));
+    }
+    let mut empty: Vec<WeightedMpsBranch> = Vec::new();
+    assert!(matches!(
+        sample_mps_measurement_with_total(&mut empty, 0, &mut rng, Some(1.0)),
+        Err(PrismError::InvalidParameter { .. })
+    ));
+
+    // Unnormalized branches (weight = 2.0, weight = 0.5, and truncated unit_norm = false) with known_total = None.
+    let mut plus_mps = zero_mps.clone();
+    plus_mps
+        .apply(&Instruction::Gate {
+            gate: Gate::H,
+            targets: SmallVec::from_slice(&[0]),
+        })
+        .unwrap();
+    for scale in [2.0_f64, 0.5_f64] {
+        let mut ones = 0usize;
+        let mut s_rng = ChaCha8Rng::seed_from_u64(99);
+        for _ in 0..400 {
+            let mut b = vec![WeightedMpsBranch {
+                weight: Complex64::new(scale, 0.0),
+                state: plus_mps.clone(),
+                unit_norm: true,
+            }];
+            if sample_mps_measurement(&mut b, 0, &mut s_rng).unwrap() {
+                ones += 1;
+            }
+            assert!((weighted_mps_norm_sq(&b).unwrap() - 1.0).abs() < 1e-12);
+        }
+        let p1 = ones as f64 / 400.0;
+        assert!((p1 - 0.5).abs() < 0.1, "scale={scale}, p1={p1}");
+    }
+
+    // Truncated non-unit input branch compensates project_z_outcome share accurately.
+    let mut trunc = MpsBackend::new(42, 1);
+    trunc.init(2, 0).unwrap();
+    trunc
+        .apply(&Instruction::Gate {
+            gate: Gate::H,
+            targets: SmallVec::from_slice(&[0]),
+        })
+        .unwrap();
+    trunc
+        .apply(&Instruction::Gate {
+            gate: Gate::Cx,
+            targets: SmallVec::from_slice(&[0, 1]),
+        })
+        .unwrap();
+    trunc
+        .apply(&Instruction::Gate {
+            gate: Gate::H,
+            targets: SmallVec::from_slice(&[0]),
+        })
+        .unwrap();
+    let trunc_norm = trunc.inner_product(&trunc).unwrap().re;
+    let trunc_branch = vec![WeightedMpsBranch {
+        weight: Complex64::new(1.0, 0.0),
+        state: trunc,
+        unit_norm: false,
+    }];
+    let proj_zero = project_mps_branches(&trunc_branch, 0, false).unwrap();
+    let p_zero_norm = weighted_mps_norm_sq(&proj_zero).unwrap();
+    assert!((p_zero_norm - 0.5 * trunc_norm).abs() < 1e-12);
+    assert!(proj_zero[0].unit_norm);
+
+    // Non-deferrable mid-circuit conditional-T circuit matches dilated distribution.
+    let mut c = Circuit::new(2, 2);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::T, &[0]);
+    c.add_gate(Gate::H, &[0]);
+    c.add_measure(0, 0);
+    conditional(&mut c, ClassicalCondition::BitIsOne(0), Gate::T, 1);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::T, &[1]);
+    c.add_gate(Gate::H, &[1]);
+    c.add_measure(1, 1);
+
+    let shots = 2000;
+    let sampled = sample_mps_branches_online(&c, shots, 42).unwrap();
+    let counts = sampled.counts();
+    let want = dilated_distribution(&c);
+    for (idx, &p_want) in want.iter().enumerate() {
+        let key = vec![idx as u64];
+        let p_got = counts.get(&key).copied().unwrap_or(0) as f64 / shots as f64;
+        let bound = 5.0 * (p_want * (1.0 - p_want) / shots as f64).sqrt() + 1.0 / shots as f64;
+        assert!(
+            (p_got - p_want).abs() <= bound,
+            "idx={idx}: got={p_got}, want={p_want}"
+        );
+    }
+}

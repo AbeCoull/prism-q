@@ -78,6 +78,7 @@ impl PauliVec {
         }
     }
 
+    #[cfg(test)]
     pub fn z_on_qubit(num_words: usize, qubit: usize) -> Self {
         let mut pv = Self::new(num_words);
         pv.z[qubit / 64] |= 1u64 << (qubit % 64);

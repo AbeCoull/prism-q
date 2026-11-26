@@ -7,10 +7,10 @@
 //! claimed to sit inside its own discarded mass.
 
 use num_complex::Complex64;
-use prism_q::sim::unified_pauli::run_pauli_path_observable;
+use prism_q::sim::unified_pauli::{run_pauli_path_observable, run_spp_observable};
 use prism_q::{
-    BackendKind, Circuit, Instruction, NoiseChannel, NoiseEvent, NoiseModel, PauliTerm, circuits,
-    sim,
+    BackendKind, Circuit, Gate, Instruction, NoiseChannel, NoiseEvent, NoiseModel, PauliTerm,
+    circuits, sim,
 };
 
 use crate::common::SEED;
@@ -365,4 +365,95 @@ fn term_count_is_width_independent_at_unit_weight() {
          weight decides the regime no longer holds",
         got.total_discarded
     );
+}
+
+fn build_embedded_spp_circuit(n: usize, qubits: &[usize; 5]) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    c.add_gate(Gate::H, &[qubits[0]]);
+    c.add_gate(Gate::S, &[qubits[1]]);
+    c.add_gate(Gate::Cx, &[qubits[0], qubits[2]]);
+    c.add_gate(Gate::T, &[qubits[0]]);
+    c.add_gate(Gate::Rz(0.37), &[qubits[1]]);
+    c.add_gate(Gate::Rzz(-0.41), &[qubits[2], qubits[4]]);
+    c.add_gate(Gate::Rx(0.29), &[qubits[3]]);
+    c.add_gate(Gate::Ry(-0.19), &[qubits[4]]);
+    c.add_pauli_rotation(
+        0.53,
+        &[
+            PauliTerm::x(qubits[0]),
+            PauliTerm::y(qubits[2]),
+            PauliTerm::z(qubits[4]),
+        ],
+    );
+    c.add_gate(Gate::H, &[qubits[2]]);
+    c.add_gate(Gate::H, &[qubits[4]]);
+    c
+}
+
+#[test]
+fn spp_multi_word_observable_and_marginals_match_single_word_embedding() {
+    let small_qubits = [0usize, 1, 2, 3, 4];
+    let wide_qubits = [0usize, 63, 64, 65, 129];
+    let small = build_embedded_spp_circuit(5, &small_qubits);
+    let wide = build_embedded_spp_circuit(130, &wide_qubits);
+
+    let obs_small = [PauliTerm::x(1), PauliTerm::y(2), PauliTerm::z(4)];
+    let obs_wide = [PauliTerm::x(63), PauliTerm::y(64), PauliTerm::z(129)];
+
+    let res_small = run_spp_observable(&small, &obs_small, 2048, SEED).unwrap();
+    let res_wide = run_spp_observable(&wide, &obs_wide, 2048, SEED).unwrap();
+    assert_eq!(res_small.mean.to_bits(), res_wide.mean.to_bits());
+    assert_eq!(res_small.variance.to_bits(), res_wide.variance.to_bits());
+    assert_eq!(
+        res_small.nonzero_fraction.to_bits(),
+        res_wide.nonzero_fraction.to_bits()
+    );
+
+    let marg = sim::simulate(&wide)
+        .backend(BackendKind::StochasticPauli { num_samples: 512 })
+        .seed(SEED)
+        .marginals()
+        .unwrap();
+    for untouched in [1usize, 62, 66, 128] {
+        assert_eq!(marg.marginals[untouched], (1.0, 0.0));
+    }
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn spp_is_thread_count_deterministic_with_parallel_scratch() {
+    let circuit = build_embedded_spp_circuit(70, &[0, 17, 63, 64, 69]);
+    let observables = vec![
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::x(63), PauliTerm::z(64)],
+        vec![PauliTerm::y(17), PauliTerm::z(69)],
+    ];
+
+    let run = |threads: usize| {
+        let pool = prism_q::ThreadPool::with_threads(threads).unwrap();
+        pool.install(|| {
+            let marg = sim::simulate(&circuit)
+                .backend(BackendKind::StochasticPauli { num_samples: 1024 })
+                .seed(SEED)
+                .marginals()
+                .unwrap();
+            let exps = sim::simulate(&circuit)
+                .backend(BackendKind::StochasticPauli { num_samples: 1024 })
+                .seed(SEED)
+                .expectation_values(&observables)
+                .unwrap();
+            (marg.marginals, exps)
+        })
+    };
+
+    let (m1, e1) = run(1);
+    let (m4, e4) = run(4);
+    assert_eq!(m1.len(), m4.len());
+    for ((p0_a, p1_a), (p0_b, p1_b)) in m1.iter().zip(&m4) {
+        assert_eq!(p0_a.to_bits(), p0_b.to_bits());
+        assert_eq!(p1_a.to_bits(), p1_b.to_bits());
+    }
+    for (a, b) in e1.iter().zip(&e4) {
+        assert_eq!(a.to_bits(), b.to_bits());
+    }
 }

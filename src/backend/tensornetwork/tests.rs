@@ -1303,3 +1303,387 @@ fn rdm_with_idle_and_disconnected_qubits() {
         }
     }
 }
+
+#[test]
+fn test_double_cone_prunes_inactive_unitary_components() {
+    let mut circuit = Circuit::new(10, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    for q in 2..10 {
+        circuit.add_gate(Gate::Ry(0.3 + q as f64 * 0.1), &[q]);
+    }
+    for q in 2..9 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+
+    let tn = loaded_backend(&circuit);
+    // Component {0, 1} has 2 kets + H(0) + Cx(0, 1) = 4 tensors (8 doubled).
+    let partial = tn.double_for_partial_trace(&[0]);
+    assert_eq!(partial.len(), 8);
+    assert!(partial.len() < tn.tensors.len() * 2);
+
+    let mut axes = [None; 10];
+    axes[1] = Some(PauliAxis::Z);
+    let sandwich = tn.double_cone(|q| axes[q].is_some());
+    assert_eq!(sandwich.len(), 8);
+}
+
+#[test]
+fn test_pauli_expectations_skips_norm_when_unitary_and_handles_identity_and_empty() {
+    let circuit = crate::circuits::cz_chain_circuit(6, 3, 42);
+    let tn = loaded_backend(&circuit);
+
+    let before = planner_calls();
+    let exps = tn
+        .pauli_expectations(&[vec![PauliTerm::z(0)], vec![PauliTerm::x(3)]])
+        .unwrap();
+    assert_eq!(planner_calls() - before, 2);
+
+    let mut sv = StatevectorBackend::new(42);
+    sv.init(6, 0).unwrap();
+    for inst in &circuit.instructions {
+        sv.apply(inst).unwrap();
+    }
+    let sv_exps = sv
+        .pauli_expectations(&[vec![PauliTerm::z(0)], vec![PauliTerm::x(3)]])
+        .unwrap();
+    for (got, want) in exps.iter().zip(&sv_exps) {
+        assert!((got - want).abs() < EPS, "{got} vs {want}");
+    }
+
+    let before = planner_calls();
+    let id_exp = tn.pauli_expectations(&[Vec::new()]).unwrap();
+    assert_eq!(planner_calls() - before, 0);
+    assert!((id_exp[0] - 1.0).abs() < EPS);
+
+    let mut empty = TensorNetworkBackend::new(42);
+    empty.init(0, 0).unwrap();
+    let before = planner_calls();
+    let empty_exp = empty.pauli_expectations(&[Vec::new()]).unwrap();
+    assert_eq!(planner_calls() - before, 0);
+    assert!((empty_exp[0] - 1.0).abs() < EPS);
+}
+
+#[test]
+fn test_non_unitary_reset_after_entangler_is_never_pruned() {
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_reset(0);
+
+    for seed in [42u64, 7, 99] {
+        let mut sv = StatevectorBackend::new(seed);
+        sv.init(2, 0).unwrap();
+        let mut tn = TensorNetworkBackend::new(seed);
+        tn.init(2, 0).unwrap();
+        for inst in &circuit.instructions {
+            sv.apply(inst).unwrap();
+            tn.apply(inst).unwrap();
+        }
+        assert!(!tn.is_unitary[0]);
+        assert!(tn.is_unitary[1]);
+
+        let sv_rdm = sv.reduced_density_matrix_1q(1).unwrap();
+        let tn_rdm = tn.reduced_density_matrix_1q(1).unwrap();
+        for (row_a, row_b) in tn_rdm.iter().zip(&sv_rdm) {
+            for (a, b) in row_a.iter().zip(row_b) {
+                assert!((a - b).norm() < EPS, "seed {seed}: {a} vs {b}");
+            }
+        }
+
+        let obs = [vec![PauliTerm::x(1)], vec![PauliTerm::z(1)]];
+        let sv_exp = sv.pauli_expectations(&obs).unwrap();
+        let tn_exp = tn.pauli_expectations(&obs).unwrap();
+        for (a, b) in tn_exp.iter().zip(&sv_exp) {
+            assert!((a - b).abs() < EPS, "seed {seed}: {a} vs {b}");
+        }
+    }
+}
+
+#[test]
+fn test_downstream_unitary_pruned_after_measure_closes_internal_leg() {
+    let mut circuit = Circuit::new(6, 1);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_measure(0, 0);
+    circuit.add_gate(Gate::H, &[1]);
+    circuit.add_gate(Gate::Rz(0.5), &[1]);
+    circuit.add_gate(Gate::H, &[2]);
+    circuit.add_gate(Gate::Cx, &[2, 3]);
+    circuit.add_gate(Gate::Ry(0.8), &[4]);
+    circuit.add_gate(Gate::Cx, &[4, 5]);
+
+    for seed in [42u64, 17] {
+        let mut sv = StatevectorBackend::new(seed);
+        sv.init(6, 1).unwrap();
+        let mut tn = TensorNetworkBackend::new(seed);
+        tn.init(6, 1).unwrap();
+        for inst in &circuit.instructions {
+            sv.apply(inst).unwrap();
+            tn.apply(inst).unwrap();
+        }
+        assert!(!tn.is_unitary[0]);
+        assert!(tn.is_unitary[1]);
+
+        // Only |0>_0, |0>_1, H(0), Cx(0, 1)+Measure(0) are in the doubled cone;
+        // H(1), Rz(0.5, 1), and qubits 2..6 are pruned.
+        let doubled = tn.double_for_partial_trace(&[0]);
+        assert_eq!(doubled.len(), 8);
+
+        let mut leg_counts = std::collections::HashMap::<LegId, usize>::new();
+        for tensor in &doubled {
+            for &leg in &tensor.legs {
+                *leg_counts.entry(leg).or_insert(0) += 1;
+            }
+        }
+        let open_ket = tn.output_legs[0];
+        let open_bra = open_ket + tn.next_leg;
+        for (leg, count) in leg_counts {
+            let expected_count = if leg == open_ket || leg == open_bra {
+                1
+            } else {
+                2
+            };
+            assert_eq!(count, expected_count, "leg {leg} count");
+        }
+
+        let obs = [vec![PauliTerm::z(0)], vec![PauliTerm::z(1)]];
+        let sv_exp = sv.pauli_expectations(&obs).unwrap();
+        let tn_exp = tn.pauli_expectations(&obs).unwrap();
+        for (a, b) in tn_exp.iter().zip(&sv_exp) {
+            assert!((a - b).abs() < EPS, "seed {seed}: {a} vs {b}");
+        }
+    }
+}
+
+#[test]
+fn test_apply_1q_matrix_shrink_entangled_and_disconnected() {
+    let proj_half = [
+        [Complex64::new(0.5, 0.0), Complex64::new(0.0, 0.0)],
+        [Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0)],
+    ];
+
+    // Entangled: H(0) -> Cx(0, 1) -> shrink(0)
+    let mut tn = TensorNetworkBackend::new(42);
+    tn.init(2, 0).unwrap();
+    tn.apply(&Instruction::Gate {
+        gate: Gate::H,
+        targets: smallvec::smallvec![0],
+    })
+    .unwrap();
+    tn.apply(&Instruction::Gate {
+        gate: Gate::Cx,
+        targets: smallvec::smallvec![0, 1],
+    })
+    .unwrap();
+    tn.apply_1q_matrix(0, &proj_half).unwrap();
+    assert!(!tn.is_unitary[0]);
+    assert!(tn.is_unitary[1]);
+
+    let exps = tn
+        .pauli_expectations(&[vec![PauliTerm::z(0)], vec![PauliTerm::z(1)]])
+        .unwrap();
+    assert!((exps[0] - 1.0).abs() < EPS, "{}", exps[0]);
+    assert!((exps[1] - 1.0).abs() < EPS, "{}", exps[1]);
+    let rdm1 = tn.reduced_density_matrix(&[1]).unwrap();
+    assert!((rdm1[0].re - 1.0).abs() < EPS);
+    assert!(rdm1[3].re.abs() < EPS);
+
+    // Disconnected: shrink(0), H(1), and unitary component (2, 3)
+    let mut disc = TensorNetworkBackend::new(42);
+    disc.init(4, 0).unwrap();
+    disc.apply_1q_matrix(0, &proj_half).unwrap();
+    disc.apply(&Instruction::Gate {
+        gate: Gate::H,
+        targets: smallvec::smallvec![1],
+    })
+    .unwrap();
+    disc.apply(&Instruction::Gate {
+        gate: Gate::H,
+        targets: smallvec::smallvec![2],
+    })
+    .unwrap();
+    disc.apply(&Instruction::Gate {
+        gate: Gate::Cx,
+        targets: smallvec::smallvec![2, 3],
+    })
+    .unwrap();
+
+    // Querying X(1) keeps non-unitary qubit 0 (2 tensors) and open qubit 1 (2 tensors),
+    // pruning (2, 3), so 4 ket tensors double to 8.
+    let mut axes = [None; 4];
+    axes[1] = Some(PauliAxis::X);
+    assert_eq!(disc.double_cone(|q| axes[q].is_some()).len(), 8);
+
+    let disc_exps = disc
+        .pauli_expectations(&[vec![PauliTerm::x(1)], vec![PauliTerm::z(1)]])
+        .unwrap();
+    assert!((disc_exps[0] - 1.0).abs() < EPS, "{}", disc_exps[0]);
+    assert!(disc_exps[1].abs() < EPS, "{}", disc_exps[1]);
+}
+
+#[test]
+fn test_non_unitary_gate_variants_track_unitarity() {
+    use crate::gates::{BatchPhaseData, DiagEntry, DiagonalBatchData, McuData, Multi2qData};
+
+    let zero = Complex64::new(0.0, 0.0);
+    let one = Complex64::new(1.0, 0.0);
+
+    // Non-unitary Gate::Fused2q (Kraus 2q style) on (0, 1), entangled with qubit 2.
+    let mut tn = TensorNetworkBackend::new(42);
+    tn.init(3, 0).unwrap();
+    tn.apply(&Instruction::Gate {
+        gate: Gate::H,
+        targets: smallvec::smallvec![0],
+    })
+    .unwrap();
+    tn.apply(&Instruction::Gate {
+        gate: Gate::H,
+        targets: smallvec::smallvec![1],
+    })
+    .unwrap();
+    tn.apply(&Instruction::Gate {
+        gate: Gate::Cx,
+        targets: smallvec::smallvec![1, 2],
+    })
+    .unwrap();
+    let kraus_2q = [
+        [Complex64::new(0.6, 0.0), zero, zero, zero],
+        [zero, Complex64::new(0.6, 0.0), zero, zero],
+        [zero, zero, zero, zero],
+        [zero, zero, zero, zero],
+    ];
+    tn.apply(&Instruction::Gate {
+        gate: Gate::Fused2q(Box::new(kraus_2q)),
+        targets: smallvec::smallvec![0, 1],
+    })
+    .unwrap();
+    assert!(!tn.is_unitary[0]);
+    assert!(!tn.is_unitary[1]);
+    assert!(tn.is_unitary[2]);
+
+    // After projecting qubit 0 to |0>, qubit 1 stays in |0>+|1> and qubit 2 is
+    // maximally mixed via Cx(1, 2): <Z(0)> = 1, <Z(1)> = 0, <Z(2)> = 0, <Z(1)Z(2)> = 1.
+    let exps = tn
+        .pauli_expectations(&[
+            vec![PauliTerm::z(0)],
+            vec![PauliTerm::z(1)],
+            vec![PauliTerm::z(2)],
+            vec![PauliTerm::z(1), PauliTerm::z(2)],
+        ])
+        .unwrap();
+    assert!((exps[0] - 1.0).abs() < EPS, "{}", exps[0]);
+    assert!(exps[1].abs() < EPS, "{}", exps[1]);
+    assert!(exps[2].abs() < EPS, "{}", exps[2]);
+    assert!((exps[3] - 1.0).abs() < EPS, "{}", exps[3]);
+
+    // Check remaining matrix/phase variants including NaN handling.
+    let mut variants = TensorNetworkBackend::new(42);
+    variants.init(11, 0).unwrap();
+    let nan_mat_2 = [[Complex64::new(f64::NAN, 0.0), zero], [zero, one]];
+    let bad_mat_2 = [[Complex64::new(0.5, 0.0), zero], [zero, one]];
+    let mut bad_mat_4 = Gate::Cx.matrix_4x4();
+    bad_mat_4[0][0] = Complex64::new(0.5, 0.0);
+
+    // Unitary Fused & Cu keep unitarity true.
+    variants
+        .apply(&Instruction::Gate {
+            gate: Gate::Fused(Box::new(Gate::H.matrix_2x2())),
+            targets: smallvec::smallvec![10],
+        })
+        .unwrap();
+    variants
+        .apply(&Instruction::Gate {
+            gate: Gate::Cu(Box::new(Gate::X.matrix_2x2())),
+            targets: smallvec::smallvec![9, 10],
+        })
+        .unwrap();
+    assert!(variants.is_unitary[9] && variants.is_unitary[10]);
+
+    // Non-unitary / NaN payloads clear only their affected qubits.
+    variants
+        .apply(&Instruction::Gate {
+            gate: Gate::Fused(Box::new(nan_mat_2)),
+            targets: smallvec::smallvec![0],
+        })
+        .unwrap();
+    variants
+        .apply(&Instruction::Gate {
+            gate: Gate::Cu(Box::new(bad_mat_2)),
+            targets: smallvec::smallvec![1, 2],
+        })
+        .unwrap();
+    variants
+        .apply(&Instruction::Gate {
+            gate: Gate::Mcu(Box::new(McuData::new(bad_mat_2, 2))),
+            targets: smallvec::smallvec![3, 4, 5],
+        })
+        .unwrap();
+    variants
+        .apply(&Instruction::Gate {
+            gate: Gate::MultiFused(Box::new(MultiFusedData::new(vec![
+                (6, Gate::H.matrix_2x2()),
+                (7, bad_mat_2),
+            ]))),
+            targets: smallvec::smallvec![6, 7],
+        })
+        .unwrap();
+    variants
+        .apply(&Instruction::Gate {
+            gate: Gate::Multi2q(Box::new(Multi2qData::new(vec![(8, 9, bad_mat_4)]))),
+            targets: smallvec::smallvec![8, 9],
+        })
+        .unwrap();
+    assert!(!variants.is_unitary[0]);
+    assert!(!variants.is_unitary[1] && !variants.is_unitary[2]);
+    assert!(!variants.is_unitary[3] && !variants.is_unitary[4] && !variants.is_unitary[5]);
+    assert!(variants.is_unitary[6]);
+    assert!(!variants.is_unitary[7]);
+    assert!(!variants.is_unitary[8] && !variants.is_unitary[9]);
+    assert!(variants.is_unitary[10]);
+
+    let mut diag = TensorNetworkBackend::new(42);
+    diag.init(5, 0).unwrap();
+    diag.apply(&Instruction::Gate {
+        gate: Gate::BatchPhase(Box::new(BatchPhaseData::new([
+            (1, Complex64::new(0.0, 1.0)),
+            (2, Complex64::new(2.0, 0.0)),
+        ]))),
+        targets: smallvec::smallvec![0],
+    })
+    .unwrap();
+    assert!(!diag.is_unitary[0] && diag.is_unitary[1] && !diag.is_unitary[2]);
+
+    diag.apply(&Instruction::Gate {
+        gate: Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(vec![
+            DiagEntry::Phase1q {
+                qubit: 3,
+                d0: one,
+                d1: Complex64::new(0.0, -1.0),
+            },
+            DiagEntry::Parity2q {
+                q0: 1,
+                q1: 4,
+                same: one,
+                diff: Complex64::new(f64::NAN, 0.0),
+            },
+        ]))),
+        targets: smallvec::smallvec![1, 3, 4],
+    })
+    .unwrap();
+    assert!(diag.is_unitary[3]);
+    assert!(!diag.is_unitary[1] && !diag.is_unitary[4]);
+}
+
+#[test]
+fn test_sample_native_restores_is_unitary_across_shots() {
+    let n = 8;
+    let mut tn = loaded_backend(&crate::circuits::cz_chain_circuit(n, 3, 42));
+    assert!(tn.is_unitary.iter().all(|&u| u));
+
+    let before = planner_calls();
+    let _ = tn.sample_native(4, 42).unwrap();
+    assert_eq!(planner_calls() - before, n);
+    assert!(tn.is_unitary.iter().all(|&u| u));
+}

@@ -121,3 +121,144 @@ fn tn_bell_pairs_4q_sv() {
 fn tn_bell_pairs_12q_sv() {
     check_sv_cross("bell_pairs 12q sv", &circuits::independent_bell_pairs(6));
 }
+
+#[test]
+fn tn_pauli_expectations_and_identity_match_sv() {
+    use num_complex::Complex64;
+    use prism_q::backend::Backend;
+    use prism_q::backend::statevector::StatevectorBackend;
+    use prism_q::gates::Gate;
+    use prism_q::sim::unified_pauli::PauliTerm;
+
+    let mut circuit = Circuit::new(8, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_gate(Gate::Ry(0.6), &[2]);
+    circuit.add_gate(Gate::Cx, &[2, 3]);
+    circuit.add_gate(Gate::H, &[4]);
+    circuit.add_gate(Gate::Cz, &[4, 5]);
+    circuit.add_gate(Gate::Rx(1.1), &[6]);
+    circuit.add_gate(Gate::Cx, &[6, 7]);
+
+    let observables = vec![
+        Vec::new(),
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::x(0), PauliTerm::x(1)],
+        vec![PauliTerm::z(2), PauliTerm::y(5)],
+        vec![PauliTerm::z(7)],
+    ];
+
+    let mut sv = StatevectorBackend::new(SEED);
+    sv.init(8, 0).unwrap();
+    for inst in &circuit.instructions {
+        sv.apply(inst).unwrap();
+    }
+    let sv_exp = sv.pauli_expectations(&observables).unwrap();
+
+    let mut tn = TensorNetworkBackend::new(SEED);
+    tn.init(8, 0).unwrap();
+    for inst in &circuit.instructions {
+        tn.apply(inst).unwrap();
+    }
+    let tn_exp = tn.pauli_expectations(&observables).unwrap();
+
+    assert!((tn_exp[0] - 1.0).abs() < TN_EPS);
+    for (got, want) in tn_exp.iter().zip(&sv_exp) {
+        assert!((got - want).abs() < TN_EPS, "{got} vs {want}");
+    }
+
+    // Non-unitary Kraus-style 2q gate and 1q shrink still match expected normalized state.
+    let zero = Complex64::new(0.0, 0.0);
+    let kraus_2q = [
+        [Complex64::new(0.5, 0.0), zero, zero, zero],
+        [zero, Complex64::new(0.5, 0.0), zero, zero],
+        [zero, zero, zero, zero],
+        [zero, zero, zero, zero],
+    ];
+    let mut kraus_tn = TensorNetworkBackend::new(SEED);
+    kraus_tn.init(3, 0).unwrap();
+    kraus_tn
+        .apply(&prism_q::circuit::Instruction::Gate {
+            gate: Gate::H,
+            targets: smallvec::smallvec![0],
+        })
+        .unwrap();
+    kraus_tn
+        .apply(&prism_q::circuit::Instruction::Gate {
+            gate: Gate::H,
+            targets: smallvec::smallvec![1],
+        })
+        .unwrap();
+    kraus_tn
+        .apply(&prism_q::circuit::Instruction::Gate {
+            gate: Gate::Cx,
+            targets: smallvec::smallvec![1, 2],
+        })
+        .unwrap();
+    kraus_tn
+        .apply(&prism_q::circuit::Instruction::Gate {
+            gate: Gate::Fused2q(Box::new(kraus_2q)),
+            targets: smallvec::smallvec![0, 1],
+        })
+        .unwrap();
+    let k_exp = kraus_tn
+        .pauli_expectations(&[
+            vec![PauliTerm::z(0)],
+            vec![PauliTerm::z(1)],
+            vec![PauliTerm::z(1), PauliTerm::z(2)],
+        ])
+        .unwrap();
+    assert!((k_exp[0] - 1.0).abs() < TN_EPS);
+    assert!(k_exp[1].abs() < TN_EPS);
+    assert!((k_exp[2] - 1.0).abs() < TN_EPS);
+}
+
+#[test]
+fn tn_mid_circuit_measure_reset_rdm_and_expectations_match_sv() {
+    use prism_q::backend::Backend;
+    use prism_q::backend::statevector::StatevectorBackend;
+    use prism_q::gates::Gate;
+    use prism_q::sim::unified_pauli::PauliTerm;
+
+    let mut circuit = Circuit::new(6, 1);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_reset(0);
+    circuit.add_gate(Gate::H, &[2]);
+    circuit.add_gate(Gate::Cx, &[2, 3]);
+    circuit.add_measure(2, 0);
+    circuit.add_gate(Gate::H, &[3]);
+    circuit.add_gate(Gate::Ry(0.7), &[4]);
+    circuit.add_gate(Gate::Cx, &[4, 5]);
+
+    for seed in [SEED, 7] {
+        let mut sv = StatevectorBackend::new(seed);
+        sv.init(6, 1).unwrap();
+        let mut tn = TensorNetworkBackend::new(seed);
+        tn.init(6, 1).unwrap();
+        for inst in &circuit.instructions {
+            sv.apply(inst).unwrap();
+            tn.apply(inst).unwrap();
+        }
+        assert_eq!(tn.classical_results(), sv.classical_results());
+
+        let obs = vec![
+            vec![PauliTerm::x(1)],
+            vec![PauliTerm::z(2)],
+            vec![PauliTerm::x(3)],
+            vec![PauliTerm::z(5)],
+        ];
+        let sv_exp = sv.pauli_expectations(&obs).unwrap();
+        let tn_exp = tn.pauli_expectations(&obs).unwrap();
+        for (got, want) in tn_exp.iter().zip(&sv_exp) {
+            assert!((got - want).abs() < TN_EPS, "seed {seed}: {got} vs {want}");
+        }
+
+        let sv_rdm = sv.reduced_density_matrix(&[1, 3]).unwrap();
+        let tn_rdm = tn.reduced_density_matrix(&[1, 3]).unwrap();
+        for (got, want) in tn_rdm.iter().zip(&sv_rdm) {
+            assert!((got - want).norm() < TN_EPS, "seed {seed}: {got} vs {want}");
+        }
+    }
+}

@@ -82,7 +82,7 @@ fn a_bounded_contraction_stays_inside_the_bound_it_reports() {
 fn a_bounded_pair_density_is_hermitian_and_inside_its_bound() {
     small_caps();
     let circuit = weak_chain(14, 4);
-    let subsystem = [3usize, 10];
+    let subsystem = [6usize, 7];
 
     let mut tn = loaded(&circuit, 1e-3);
     let rho = tn.reduced_density_matrix(&subsystem).unwrap();
@@ -201,12 +201,12 @@ fn bounded_counts_report_the_cut_the_sweep_made() {
 }
 
 // Each observable truncates its own copy of the network, so listing one
-// observable eight times answers the same query eight times. Twelve qubits,
-// since the fused 14-qubit chain contracts under the cap without a cut.
+// observable eight times answers the same query eight times. Eight layers on
+// twelve qubits ensures the fused backward cone still exceeds the cap and cuts.
 #[test]
 fn a_repeated_observable_keeps_the_bound_of_one() {
     small_caps();
-    let circuit = weak_chain(12, 4);
+    let circuit = weak_chain(12, 8);
     let observable = vec![PauliTerm::z(0), PauliTerm::z(6)];
     let bound = |observables: &[Vec<PauliTerm>]| {
         simulate(&circuit)

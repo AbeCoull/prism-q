@@ -441,34 +441,23 @@ fn fft_stage_par(
     let total = state.len();
     let num_groups = total / block_size;
 
-    let apply_pairs = |lo: &mut [Complex64], hi: &mut [Complex64], k_base: usize| {
-        debug_assert_eq!(lo.len(), hi.len());
-        for j in 0..lo.len() {
-            let k = k_base + j;
-            let w = twiddles_scaled[k * twiddle_step];
-            let (out_lo, out_hi) = radix2_butterfly_values(lo[j], hi[j], w);
-            lo[j] = out_lo;
-            hi[j] = out_hi;
-        }
-    };
-
     if num_groups >= 4 && block_size >= MIN_PAR_ELEMS {
         // Many large groups: split state by group.
         state.par_chunks_mut(block_size).for_each(|group| {
             let (lo, hi) = group.split_at_mut(stride);
-            apply_pairs(lo, hi, 0);
+            apply_radix2_span(lo, hi, 0, twiddle_step, twiddles_scaled);
         });
     } else if block_size < MIN_PAR_ELEMS {
         // Small groups: bundle work so each Rayon job has enough elements.
         let task_size = MIN_PAR_ELEMS;
         state.par_chunks_mut(task_size).for_each(|task_chunk| {
-            let mut g = 0;
-            while g + block_size <= task_chunk.len() {
-                let group = &mut task_chunk[g..g + block_size];
-                let (lo, hi) = group.split_at_mut(stride);
-                apply_pairs(lo, hi, 0);
-                g += block_size;
-            }
+            let usable = task_chunk.len() - (task_chunk.len() % block_size);
+            run_radix2_stage_seq(
+                &mut task_chunk[..usable],
+                stride,
+                twiddles_scaled,
+                twiddle_step,
+            );
         });
     } else {
         // Few groups: split each large group into zipped chunks.
@@ -482,7 +471,7 @@ fn fft_stage_par(
                 .enumerate()
                 .for_each(|(chunk_idx, (lo_c, hi_c))| {
                     let k_base = chunk_idx * sub;
-                    apply_pairs(lo_c, hi_c, k_base);
+                    apply_radix2_span(lo_c, hi_c, k_base, twiddle_step, twiddles_scaled);
                 });
         }
     }
@@ -496,6 +485,325 @@ fn radix2_butterfly_values(a: Complex64, b: Complex64, w: Complex64) -> (Complex
     (lo, hi)
 }
 
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx512f")]
+unsafe fn radix2_span_avx512(
+    pl: *mut f64,
+    ph: *mut f64,
+    pairs: usize,
+    k_base: usize,
+    twiddles: *const Complex64,
+    twiddle_step: usize,
+) -> usize {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::{
+            _mm512_add_pd, _mm512_loadu_pd, _mm512_movedup_pd, _mm512_mul_pd, _mm512_permute_pd,
+            _mm512_set1_pd, _mm512_storeu_pd, _mm512_sub_pd,
+        };
+        let inv_sqrt2_v = _mm512_set1_pd(INV_SQRT2);
+        let end = pairs & !3;
+        for off in (0..end).step_by(4) {
+            let a = _mm512_loadu_pd(pl.add(off * 2));
+            let b = _mm512_loadu_pd(ph.add(off * 2));
+            let w = twiddle_quad_avx512(twiddles, k_base + off, twiddle_step);
+            let w_rr = _mm512_movedup_pd(w);
+            let w_ii = _mm512_permute_pd::<0xFF>(w);
+            _mm512_storeu_pd(
+                pl.add(off * 2),
+                _mm512_mul_pd(_mm512_add_pd(a, b), inv_sqrt2_v),
+            );
+            _mm512_storeu_pd(
+                ph.add(off * 2),
+                simd::complex_mul_avx512(w_rr, w_ii, _mm512_sub_pd(a, b)),
+            );
+        }
+        end
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn radix2_span_avx2fma(
+    pl: *mut f64,
+    ph: *mut f64,
+    start: usize,
+    pairs: usize,
+    k_base: usize,
+    twiddles: *const Complex64,
+    twiddle_step: usize,
+) -> usize {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::{
+            _mm256_add_pd, _mm256_loadu_pd, _mm256_movedup_pd, _mm256_mul_pd, _mm256_permute_pd,
+            _mm256_set1_pd, _mm256_storeu_pd, _mm256_sub_pd,
+        };
+        let end = pairs & !1;
+        if start >= end {
+            return start;
+        }
+        let inv_sqrt2_v = _mm256_set1_pd(INV_SQRT2);
+        for off in (start..end).step_by(2) {
+            let a = _mm256_loadu_pd(pl.add(off * 2));
+            let b = _mm256_loadu_pd(ph.add(off * 2));
+            let w = twiddle_pair_avx2(twiddles, k_base + off, twiddle_step);
+            let w_rr = _mm256_movedup_pd(w);
+            let w_ii = _mm256_permute_pd(w, 0b1111);
+            _mm256_storeu_pd(
+                pl.add(off * 2),
+                _mm256_mul_pd(_mm256_add_pd(a, b), inv_sqrt2_v),
+            );
+            _mm256_storeu_pd(
+                ph.add(off * 2),
+                simd::complex_mul_avx2fma(w_rr, w_ii, _mm256_sub_pd(a, b)),
+            );
+        }
+        end
+    }
+}
+
+#[cfg(any(feature = "parallel", test))]
+#[inline]
+fn apply_radix2_span(
+    lo: &mut [Complex64],
+    hi: &mut [Complex64],
+    k_base: usize,
+    twiddle_step: usize,
+    twiddles_scaled: &[Complex64],
+) {
+    let pairs = lo.len();
+    assert_eq!(pairs, hi.len());
+    if pairs == 0 {
+        return;
+    }
+    assert!((k_base + pairs - 1) * twiddle_step < twiddles_scaled.len());
+
+    #[allow(unused_mut)]
+    let mut done = 0usize;
+    #[cfg(target_arch = "x86_64")]
+    {
+        let tier = simd::simd_tier();
+        let pl = lo.as_mut_ptr() as *mut f64;
+        let ph = hi.as_mut_ptr() as *mut f64;
+        let twiddles = twiddles_scaled.as_ptr();
+        if tier == simd::SimdTier::Avx512 && pairs >= 4 {
+            // SAFETY: AVX-512F detected. `lo` and `hi` hold `pairs` disjoint amplitudes, and
+            // `twiddles` is bounded by the assertion above.
+            done = unsafe { radix2_span_avx512(pl, ph, pairs, k_base, twiddles, twiddle_step) };
+        }
+        if matches!(tier, simd::SimdTier::Avx512 | simd::SimdTier::Avx2Fma) && pairs - done >= 2 {
+            // SAFETY: AVX2 and FMA detected. `lo` and `hi` hold `pairs` disjoint amplitudes,
+            // and `twiddles` is bounded by the assertion above.
+            done =
+                unsafe { radix2_span_avx2fma(pl, ph, done, pairs, k_base, twiddles, twiddle_step) };
+        }
+    }
+    for j in done..pairs {
+        let w = twiddles_scaled[(k_base + j) * twiddle_step];
+        let (out_lo, out_hi) = radix2_butterfly_values(lo[j], hi[j], w);
+        lo[j] = out_lo;
+        hi[j] = out_hi;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn radix2_stride1_avx512(base: *mut f64, groups: usize, w: Complex64) -> usize {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::{
+            _mm512_add_pd, _mm512_loadu_pd, _mm512_mul_pd, _mm512_set1_pd, _mm512_shuffle_f64x2,
+            _mm512_storeu_pd, _mm512_sub_pd,
+        };
+        let inv_sqrt2_v = _mm512_set1_pd(INV_SQRT2);
+        let (w_rr, w_ii) = (_mm512_set1_pd(w.re), _mm512_set1_pd(w.im));
+        let end = groups & !3;
+        for g in (0..end).step_by(4) {
+            let p = base.add(g * 4);
+            let v0 = _mm512_loadu_pd(p);
+            let v1 = _mm512_loadu_pd(p.add(8));
+            let a = _mm512_shuffle_f64x2::<0x88>(v0, v1);
+            let b = _mm512_shuffle_f64x2::<0xDD>(v0, v1);
+            let out_lo = _mm512_mul_pd(_mm512_add_pd(a, b), inv_sqrt2_v);
+            let out_hi = simd::complex_mul_avx512(w_rr, w_ii, _mm512_sub_pd(a, b));
+            let t0 = _mm512_shuffle_f64x2::<0x44>(out_lo, out_hi);
+            let t1 = _mm512_shuffle_f64x2::<0xEE>(out_lo, out_hi);
+            _mm512_storeu_pd(p, _mm512_shuffle_f64x2::<0xD8>(t0, t0));
+            _mm512_storeu_pd(p.add(8), _mm512_shuffle_f64x2::<0xD8>(t1, t1));
+        }
+        end
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn radix2_stride1_avx2fma(
+    base: *mut f64,
+    start: usize,
+    groups: usize,
+    w: Complex64,
+) -> usize {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::{
+            _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_permute2f128_pd, _mm256_set1_pd,
+            _mm256_storeu_pd, _mm256_sub_pd,
+        };
+        let end = groups & !1;
+        if start >= end {
+            return start;
+        }
+        let inv_sqrt2_v = _mm256_set1_pd(INV_SQRT2);
+        let (w_rr, w_ii) = (_mm256_set1_pd(w.re), _mm256_set1_pd(w.im));
+        for g in (start..end).step_by(2) {
+            let p = base.add(g * 4);
+            let v0 = _mm256_loadu_pd(p);
+            let v1 = _mm256_loadu_pd(p.add(4));
+            let a = _mm256_permute2f128_pd::<0x20>(v0, v1);
+            let b = _mm256_permute2f128_pd::<0x31>(v0, v1);
+            let out_lo = _mm256_mul_pd(_mm256_add_pd(a, b), inv_sqrt2_v);
+            let out_hi = simd::complex_mul_avx2fma(w_rr, w_ii, _mm256_sub_pd(a, b));
+            _mm256_storeu_pd(p, _mm256_permute2f128_pd::<0x20>(out_lo, out_hi));
+            _mm256_storeu_pd(p.add(4), _mm256_permute2f128_pd::<0x31>(out_lo, out_hi));
+        }
+        end
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn radix2_stride2_avx512(
+    base: *mut f64,
+    groups: usize,
+    w0: Complex64,
+    w1: Complex64,
+) -> usize {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::{
+            _mm512_add_pd, _mm512_loadu_pd, _mm512_mul_pd, _mm512_set1_pd, _mm512_setr_pd,
+            _mm512_shuffle_f64x2, _mm512_storeu_pd, _mm512_sub_pd,
+        };
+        let inv_sqrt2_v = _mm512_set1_pd(INV_SQRT2);
+        let w_rr = _mm512_setr_pd(w0.re, w0.re, w1.re, w1.re, w0.re, w0.re, w1.re, w1.re);
+        let w_ii = _mm512_setr_pd(w0.im, w0.im, w1.im, w1.im, w0.im, w0.im, w1.im, w1.im);
+        let end = groups & !1;
+        for g in (0..end).step_by(2) {
+            let p = base.add(g * 8);
+            let v0 = _mm512_loadu_pd(p);
+            let v1 = _mm512_loadu_pd(p.add(8));
+            let a = _mm512_shuffle_f64x2::<0x44>(v0, v1);
+            let b = _mm512_shuffle_f64x2::<0xEE>(v0, v1);
+            let out_lo = _mm512_mul_pd(_mm512_add_pd(a, b), inv_sqrt2_v);
+            let out_hi = simd::complex_mul_avx512(w_rr, w_ii, _mm512_sub_pd(a, b));
+            _mm512_storeu_pd(p, _mm512_shuffle_f64x2::<0x44>(out_lo, out_hi));
+            _mm512_storeu_pd(p.add(8), _mm512_shuffle_f64x2::<0xEE>(out_lo, out_hi));
+        }
+        end
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn radix2_stride2_avx2fma(
+    base: *mut f64,
+    start: usize,
+    groups: usize,
+    w0: Complex64,
+    w1: Complex64,
+) -> usize {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::{
+            _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set_pd, _mm256_set1_pd,
+            _mm256_storeu_pd, _mm256_sub_pd,
+        };
+        let inv_sqrt2_v = _mm256_set1_pd(INV_SQRT2);
+        let w_rr = _mm256_set_pd(w1.re, w1.re, w0.re, w0.re);
+        let w_ii = _mm256_set_pd(w1.im, w1.im, w0.im, w0.im);
+        for g in start..groups {
+            let p = base.add(g * 8);
+            let a = _mm256_loadu_pd(p);
+            let b = _mm256_loadu_pd(p.add(4));
+            _mm256_storeu_pd(p, _mm256_mul_pd(_mm256_add_pd(a, b), inv_sqrt2_v));
+            _mm256_storeu_pd(
+                p.add(4),
+                simd::complex_mul_avx2fma(w_rr, w_ii, _mm256_sub_pd(a, b)),
+            );
+        }
+        groups
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn radix2_groups_avx512(
+    base: *mut f64,
+    groups: usize,
+    stride: usize,
+    twiddles_scaled: &[Complex64],
+    twiddle_step: usize,
+) {
+    assert!(stride >= 4);
+    if groups == 0 {
+        return;
+    }
+    assert!((stride - 1) * twiddle_step < twiddles_scaled.len());
+    let twiddles = twiddles_scaled.as_ptr();
+    // SAFETY: same contract as the enclosing unsafe fn; twiddle bounds are asserted above.
+    unsafe {
+        for g in 0..groups {
+            let pl = base.add(g * stride * 4);
+            let ph = pl.add(stride * 2);
+            let done = radix2_span_avx512(pl, ph, stride, 0, twiddles, twiddle_step);
+            let pl_c = pl as *mut Complex64;
+            let ph_c = ph as *mut Complex64;
+            for k in done..stride {
+                let w = *twiddles.add(k * twiddle_step);
+                let (lo, hi) = radix2_butterfly_values(*pl_c.add(k), *ph_c.add(k), w);
+                *pl_c.add(k) = lo;
+                *ph_c.add(k) = hi;
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn radix2_groups_avx2fma(
+    base: *mut f64,
+    groups: usize,
+    stride: usize,
+    twiddles_scaled: &[Complex64],
+    twiddle_step: usize,
+) {
+    assert!(stride >= 2);
+    if groups == 0 {
+        return;
+    }
+    assert!((stride - 1) * twiddle_step < twiddles_scaled.len());
+    let twiddles = twiddles_scaled.as_ptr();
+    // SAFETY: same contract as the enclosing unsafe fn; twiddle bounds are asserted above.
+    unsafe {
+        for g in 0..groups {
+            let pl = base.add(g * stride * 4);
+            let ph = pl.add(stride * 2);
+            let done = radix2_span_avx2fma(pl, ph, 0, stride, 0, twiddles, twiddle_step);
+            let pl_c = pl as *mut Complex64;
+            let ph_c = ph as *mut Complex64;
+            for k in done..stride {
+                let w = *twiddles.add(k * twiddle_step);
+                let (lo, hi) = radix2_butterfly_values(*pl_c.add(k), *ph_c.add(k), w);
+                *pl_c.add(k) = lo;
+                *ph_c.add(k) = hi;
+            }
+        }
+    }
+}
+
 /// Apply one full radix-2 DIF stage in place to `state` at the given stride.
 /// Butterfly `k` takes `twiddles_scaled[k * twiddle_step]`: step `total / (2 * stride)`
 /// on the whole-state table, 1 on a per-stride run.
@@ -506,8 +814,109 @@ fn run_radix2_stage_seq(
     twiddles_scaled: &[Complex64],
     twiddle_step: usize,
 ) {
+    if state.is_empty() || stride == 0 {
+        return;
+    }
     let block_size = stride << 1;
     let total = state.len();
+    debug_assert_eq!(total % block_size, 0);
+    let groups = total / block_size;
+    if groups == 0 {
+        return;
+    }
+    assert!((stride - 1) * twiddle_step < twiddles_scaled.len());
+
+    if stride == 1 {
+        #[allow(unused_mut)]
+        let mut g = 0usize;
+        let w = twiddles_scaled[0];
+        #[cfg(target_arch = "x86_64")]
+        {
+            let tier = simd::simd_tier();
+            let base = state.as_mut_ptr() as *mut f64;
+            if tier == simd::SimdTier::Avx512 && groups >= 4 {
+                // SAFETY: AVX-512F detected. `state` holds `groups` pairs of amplitudes.
+                g = unsafe { radix2_stride1_avx512(base, groups, w) };
+            }
+            if matches!(tier, simd::SimdTier::Avx512 | simd::SimdTier::Avx2Fma) && groups - g >= 2 {
+                // SAFETY: AVX2 and FMA detected. `state` holds `groups` pairs of amplitudes.
+                g = unsafe { radix2_stride1_avx2fma(base, g, groups, w) };
+            }
+        }
+        while g < groups {
+            let i0 = g << 1;
+            let (lo, hi) = radix2_butterfly_values(state[i0], state[i0 + 1], w);
+            state[i0] = lo;
+            state[i0 + 1] = hi;
+            g += 1;
+        }
+        return;
+    }
+
+    if stride == 2 {
+        #[allow(unused_mut)]
+        let mut g = 0usize;
+        let (w0, w1) = (twiddles_scaled[0], twiddles_scaled[twiddle_step]);
+        #[cfg(target_arch = "x86_64")]
+        {
+            let tier = simd::simd_tier();
+            let base = state.as_mut_ptr() as *mut f64;
+            if tier == simd::SimdTier::Avx512 && groups >= 2 {
+                // SAFETY: AVX-512F detected. `state` holds `groups` 4-amplitude groups.
+                g = unsafe { radix2_stride2_avx512(base, groups, w0, w1) };
+            }
+            if matches!(tier, simd::SimdTier::Avx512 | simd::SimdTier::Avx2Fma) && g < groups {
+                // SAFETY: AVX2 and FMA detected. `state` holds `groups` 4-amplitude groups.
+                g = unsafe { radix2_stride2_avx2fma(base, g, groups, w0, w1) };
+            }
+        }
+        while g < groups {
+            let i0 = g << 2;
+            let (lo0, hi0) = radix2_butterfly_values(state[i0], state[i0 + 2], w0);
+            state[i0] = lo0;
+            state[i0 + 2] = hi0;
+            let (lo1, hi1) = radix2_butterfly_values(state[i0 + 1], state[i0 + 3], w1);
+            state[i0 + 1] = lo1;
+            state[i0 + 3] = hi1;
+            g += 1;
+        }
+        return;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        let tier = simd::simd_tier();
+        if tier == simd::SimdTier::Avx512 && stride >= 4 {
+            // SAFETY: AVX-512F detected. `state` holds `groups` contiguous blocks of `2 * stride`
+            // amplitudes, and twiddle bounds are asserted above and inside `radix2_groups_avx512`.
+            unsafe {
+                radix2_groups_avx512(
+                    state.as_mut_ptr() as *mut f64,
+                    groups,
+                    stride,
+                    twiddles_scaled,
+                    twiddle_step,
+                );
+            }
+            return;
+        }
+        if matches!(tier, simd::SimdTier::Avx512 | simd::SimdTier::Avx2Fma) {
+            // SAFETY: AVX2 and FMA detected. `state` holds `groups` contiguous blocks of
+            // `2 * stride` amplitudes, and twiddle bounds are asserted above and inside
+            // `radix2_groups_avx2fma`.
+            unsafe {
+                radix2_groups_avx2fma(
+                    state.as_mut_ptr() as *mut f64,
+                    groups,
+                    stride,
+                    twiddles_scaled,
+                    twiddle_step,
+                );
+            }
+            return;
+        }
+    }
+
     let mut group_start = 0;
     while group_start < total {
         for k in 0..stride {
@@ -667,7 +1076,7 @@ unsafe fn radix4_butterfly_fma(
 /// total). Each load/store is one 256-bit op covering two adjacent complex
 /// values (which are 32 bytes contiguous in memory). Twiddles are loaded
 /// scalar-by-scalar since the inner twiddle step is 2.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", test))]
 #[target_feature(enable = "avx2,fma")]
 #[allow(clippy::too_many_arguments)]
 unsafe fn radix4_butterfly_pair_avx2fma(
@@ -732,9 +1141,8 @@ unsafe fn radix4_butterfly_pair_avx2fma(
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", test))]
 #[target_feature(enable = "avx2,fma")]
-#[cfg_attr(not(feature = "parallel"), allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
 unsafe fn radix4_butterfly_pair_slices_avx2fma(
     a_ptr: *mut f64,
@@ -789,6 +1197,131 @@ unsafe fn radix4_butterfly_pair_slices_avx2fma(
             d_ptr,
             simd::complex_mul_avx2fma(w_s_k_rr, w_s_k_ii, _mm256_sub_pd(t_ac_diff, t_bd_diff)),
         );
+    }
+}
+
+/// Radix-4 DIF butterflies at two consecutive offsets with each twiddle pair packed in one
+/// register, as [`twiddle_pair_avx2`] returns it.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn radix4_butterfly_pair_packed_avx2fma(
+    a_ptr: *mut f64,
+    b_ptr: *mut f64,
+    c_ptr: *mut f64,
+    d_ptr: *mut f64,
+    w_2s_k: std::arch::x86_64::__m256d,
+    w_2s_kps: std::arch::x86_64::__m256d,
+    w_s_k: std::arch::x86_64::__m256d,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::{
+            _mm256_add_pd, _mm256_loadu_pd, _mm256_movedup_pd, _mm256_mul_pd, _mm256_permute_pd,
+            _mm256_set1_pd, _mm256_storeu_pd, _mm256_sub_pd,
+        };
+        macro_rules! parts {
+            ($w:expr) => {
+                (_mm256_movedup_pd($w), _mm256_permute_pd($w, 0b1111))
+            };
+        }
+        let inv_sqrt2_v = _mm256_set1_pd(std::f64::consts::FRAC_1_SQRT_2);
+        let (w_2s_k_rr, w_2s_k_ii) = parts!(w_2s_k);
+        let (w_2s_kps_rr, w_2s_kps_ii) = parts!(w_2s_kps);
+        let (w_s_k_rr, w_s_k_ii) = parts!(w_s_k);
+
+        let a = _mm256_loadu_pd(a_ptr);
+        let b = _mm256_loadu_pd(b_ptr);
+        let c = _mm256_loadu_pd(c_ptr);
+        let d = _mm256_loadu_pd(d_ptr);
+
+        let t_ac_sum = _mm256_mul_pd(_mm256_add_pd(a, c), inv_sqrt2_v);
+        let t_ac_diff = simd::complex_mul_avx2fma(w_2s_k_rr, w_2s_k_ii, _mm256_sub_pd(a, c));
+        let t_bd_sum = _mm256_mul_pd(_mm256_add_pd(b, d), inv_sqrt2_v);
+        let t_bd_diff = simd::complex_mul_avx2fma(w_2s_kps_rr, w_2s_kps_ii, _mm256_sub_pd(b, d));
+
+        _mm256_storeu_pd(
+            a_ptr,
+            _mm256_mul_pd(_mm256_add_pd(t_ac_sum, t_bd_sum), inv_sqrt2_v),
+        );
+        _mm256_storeu_pd(
+            b_ptr,
+            simd::complex_mul_avx2fma(w_s_k_rr, w_s_k_ii, _mm256_sub_pd(t_ac_sum, t_bd_sum)),
+        );
+        _mm256_storeu_pd(
+            c_ptr,
+            _mm256_mul_pd(_mm256_add_pd(t_ac_diff, t_bd_diff), inv_sqrt2_v),
+        );
+        _mm256_storeu_pd(
+            d_ptr,
+            simd::complex_mul_avx2fma(w_s_k_rr, w_s_k_ii, _mm256_sub_pd(t_ac_diff, t_bd_diff)),
+        );
+    }
+}
+
+/// Pack twiddles `k * step` and `(k + 1) * step` into one 256-bit register.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn twiddle_pair_avx2(
+    twiddles: *const Complex64,
+    k: usize,
+    step: usize,
+) -> std::arch::x86_64::__m256d {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::{_mm_loadu_pd, _mm256_loadu_pd, _mm256_set_m128d};
+        if step == 1 {
+            _mm256_loadu_pd(twiddles.add(k).cast())
+        } else {
+            _mm256_set_m128d(
+                _mm_loadu_pd(twiddles.add((k + 1) * step).cast()),
+                _mm_loadu_pd(twiddles.add(k * step).cast()),
+            )
+        }
+    }
+}
+
+/// The pair loop of [`apply_radix4_groups`] over `groups` radix-4 groups of `s` offsets
+/// starting at `base`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn radix4_groups_avx2fma(
+    base: *mut f64,
+    groups: usize,
+    s: usize,
+    k_base: usize,
+    twiddles_scaled: &[Complex64],
+    step_outer: usize,
+    step_inner: usize,
+) {
+    assert!(s >= 2 && s.is_multiple_of(2));
+    if groups == 0 {
+        return;
+    }
+    let len = twiddles_scaled.len();
+    assert!((k_base + 2 * s - 1) * step_outer < len && (k_base + s - 1) * step_inner < len);
+    let twiddles = twiddles_scaled.as_ptr();
+    // SAFETY: the amplitudes follow the enclosing unsafe fn's contract, and the last pair
+    // reads twiddles `(k_base + 2s - 1) * step_outer` and `(k_base + s - 1) * step_inner`,
+    // which the assertion bounds.
+    unsafe {
+        for g in 0..groups {
+            let group_off = g * s * 4;
+            for k_offset in (0..s).step_by(2) {
+                let k = k_base + k_offset;
+                let a = base.add((group_off + k_offset) * 2);
+                radix4_butterfly_pair_packed_avx2fma(
+                    a,
+                    a.add(s * 2),
+                    a.add(2 * s * 2),
+                    a.add(3 * s * 2),
+                    twiddle_pair_avx2(twiddles, k, step_outer),
+                    twiddle_pair_avx2(twiddles, k + s, step_outer),
+                    twiddle_pair_avx2(twiddles, k, step_inner),
+                );
+            }
+        }
     }
 }
 
@@ -1144,39 +1677,21 @@ fn apply_radix4_groups(
             return;
         }
         if matches!(tier, simd::SimdTier::Avx512 | simd::SimdTier::Avx2Fma) && s >= 2 {
-            // SAFETY: has_avx2_fma() is runtime checked. Adjacent pairs stay
-            // inside the same radix-4 group because s >= 2. The safe
-            // alternative is the scalar radix-4 loop below; this SIMD path is
-            // kept because the measured QFT speedup depends on avoiding scalar
-            // Complex64 arithmetic in the fused stage-pair hot loop.
+            // SAFETY: AVX2 and FMA detected. Adjacent pairs stay inside the same radix-4
+            // group because s is a power of two of at least two. The safe alternative is
+            // the scalar radix-4 loop below; this SIMD path is kept because the measured
+            // QFT speedup depends on avoiding scalar Complex64 arithmetic and per-pair
+            // bounds checks in the fused stage-pair hot loop.
             unsafe {
-                let base_ptr = group.as_mut_ptr() as *mut f64;
-                for g in 0..groups {
-                    let group_off = g * s * 4;
-                    let mut k_offset = 0usize;
-                    while k_offset + 2 <= s {
-                        let k = k_base + k_offset;
-                        let w_2s_k0 = twiddles_scaled[k * step_outer];
-                        let w_2s_k1 = twiddles_scaled[(k + 1) * step_outer];
-                        let w_2s_kps0 = twiddles_scaled[(k + s) * step_outer];
-                        let w_2s_kps1 = twiddles_scaled[(k + s + 1) * step_outer];
-                        let w_s_k0 = twiddles_scaled[k * step_inner];
-                        let w_s_k1 = twiddles_scaled[(k + 1) * step_inner];
-                        let pair_base = base_ptr.add((group_off + k_offset) * 2);
-                        radix4_butterfly_pair_avx2fma(
-                            pair_base, s, w_2s_k0, w_2s_k1, w_2s_kps0, w_2s_kps1, w_s_k0, w_s_k1,
-                        );
-                        k_offset += 2;
-                    }
-                    if k_offset < s {
-                        let k = k_base + k_offset;
-                        let w_2s_k = twiddles_scaled[k * step_outer];
-                        let w_2s_kps = twiddles_scaled[(k + s) * step_outer];
-                        let w_s_k = twiddles_scaled[k * step_inner];
-                        let pair_base = base_ptr.add((group_off + k_offset) * 2);
-                        radix4_butterfly_fma(pair_base, s, w_2s_k, w_2s_kps, w_s_k);
-                    }
-                }
+                radix4_groups_avx2fma(
+                    group.as_mut_ptr() as *mut f64,
+                    groups,
+                    s,
+                    k_base,
+                    twiddles_scaled,
+                    step_outer,
+                    step_inner,
+                );
             }
             return;
         }
@@ -1335,6 +1850,37 @@ unsafe fn fft_stage_pair_chunk(
     }
 }
 
+#[cfg(all(target_arch = "x86_64", feature = "parallel"))]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn radix4_runs_avx2fma(
+    pa: *mut f64,
+    pb: *mut f64,
+    pc: *mut f64,
+    pd: *mut f64,
+    start: usize,
+    end: usize,
+    w_outer: *const Complex64,
+    w_outer_s: *const Complex64,
+    w_inner: *const Complex64,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::_mm256_loadu_pd;
+        for j in (start..end).step_by(2) {
+            radix4_butterfly_pair_packed_avx2fma(
+                pa.add(j * 2),
+                pb.add(j * 2),
+                pc.add(j * 2),
+                pd.add(j * 2),
+                _mm256_loadu_pd(w_outer.add(j).cast()),
+                _mm256_loadu_pd(w_outer_s.add(j).cast()),
+                _mm256_loadu_pd(w_inner.add(j).cast()),
+            );
+        }
+    }
+}
+
 /// Apply radix-4 butterflies at matching offsets of four quarter slices, with offset
 /// `j` taking index `j` of each twiddle slice.
 #[cfg(feature = "parallel")]
@@ -1354,10 +1900,18 @@ fn radix4_runs(
     let tier = simd::simd_tier();
     #[cfg(target_arch = "x86_64")]
     if matches!(tier, simd::SimdTier::Avx512 | simd::SimdTier::Avx2Fma) && n >= 2 {
+        assert!(
+            qb.len() >= n
+                && qc.len() >= n
+                && qd.len() >= n
+                && w_outer.len() >= n
+                && w_outer_s.len() >= n
+                && w_inner.len() >= n
+        );
         let mut j = 0usize;
         // SAFETY: AVX2, and AVX-512F for the quad loop, detected. Each call reads and
-        // writes four or two adjacent amplitudes at offset `j` of four disjoint slices
-        // of length `n`, with `j + 4 <= n` or `j + 2 <= n`.
+        // writes four or two adjacent amplitudes and twiddles at offset `j` of disjoint
+        // slices of length at least `n`, bounded by the assertion above.
         unsafe {
             let (pa, pb, pc, pd) = (
                 qa.as_mut_ptr() as *mut f64,
@@ -1379,20 +1933,20 @@ fn radix4_runs(
                     j += 4;
                 }
             }
-            while j + 2 <= n {
-                radix4_butterfly_pair_slices_avx2fma(
-                    pa.add(j * 2),
-                    pb.add(j * 2),
-                    pc.add(j * 2),
-                    pd.add(j * 2),
-                    w_outer[j],
-                    w_outer[j + 1],
-                    w_outer_s[j],
-                    w_outer_s[j + 1],
-                    w_inner[j],
-                    w_inner[j + 1],
+            let end_pair = n & !1;
+            if j < end_pair {
+                radix4_runs_avx2fma(
+                    pa,
+                    pb,
+                    pc,
+                    pd,
+                    j,
+                    end_pair,
+                    w_outer.as_ptr(),
+                    w_outer_s.as_ptr(),
+                    w_inner.as_ptr(),
                 );
-                j += 2;
+                j = end_pair;
             }
         }
         if j < n {
@@ -1470,6 +2024,21 @@ fn qft_gather_high_stages(state: &mut [Complex64], n: usize, tile_bits: usize, i
     }
 }
 
+thread_local! {
+    static QFT_GATHER_BUF: std::cell::RefCell<Vec<Complex64>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn with_qft_gather_buf<R>(len: usize, f: impl FnOnce(&mut [Complex64]) -> R) -> R {
+    QFT_GATHER_BUF.with(|buf| {
+        let mut buf = buf.borrow_mut();
+        if buf.len() < len {
+            buf.resize(len, Complex64::new(0.0, 0.0));
+        }
+        f(&mut buf[..len])
+    })
+}
+
 fn qft_gather_pass(state: &mut [Complex64], pass: QftGatherPass) {
     #[cfg(test)]
     crate::backend::statevector::sweeps::tick();
@@ -1479,23 +2048,23 @@ fn qft_gather_pass(state: &mut [Complex64], pass: QftGatherPass) {
     #[cfg(feature = "parallel")]
     if state.len() >= 1usize << kernel_parallel_qubits() {
         let ptr = SendPtr(state.as_mut_ptr());
-        (0..groups).into_par_iter().for_each_init(
-            || vec![Complex64::new(0.0, 0.0); len],
-            move |buf, g| {
+        (0..groups).into_par_iter().for_each(move |g| {
+            with_qft_gather_buf(len, |buf| {
                 // SAFETY: a group owns `row_len` offsets of each of its rows, and the
                 // groups tile the state, so no two tasks share an amplitude.
                 unsafe { pass.run_group(ptr.as_complex_ptr(), g, buf) }
-            },
-        );
+            });
+        });
         return;
     }
 
-    let mut buf = vec![Complex64::new(0.0, 0.0); len];
     let ptr = state.as_mut_ptr();
-    for g in 0..groups {
-        // SAFETY: `ptr` spans the whole state, borrowed mutably for this loop alone.
-        unsafe { pass.run_group(ptr, g, &mut buf) }
-    }
+    with_qft_gather_buf(len, |buf| {
+        for g in 0..groups {
+            // SAFETY: `ptr` spans the whole state, borrowed mutably for this loop alone.
+            unsafe { pass.run_group(ptr, g, buf) }
+        }
+    });
 }
 
 /// One gathered pass of the QFT's DIF network: stages `lo..lo + bits` of every

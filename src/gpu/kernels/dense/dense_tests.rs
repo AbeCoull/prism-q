@@ -358,3 +358,239 @@ fn device_walk_yields_to_the_probability_readback_past_the_floor() {
         (read_back.launches + 1, read_back.drains + 1)
     );
 }
+
+fn asymmetric_complex_state(num_qubits: usize, seed: u64) -> Vec<Complex64> {
+    use rand::RngExt;
+    use rand::SeedableRng;
+    let dim = 1usize << num_qubits;
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+    let mut amps: Vec<Complex64> = (0..dim)
+        .map(|_| Complex64::new(rng.random::<f64>() - 0.37, rng.random::<f64>() - 0.61))
+        .collect();
+    let norm = amps.iter().map(|a| a.norm_sqr()).sum::<f64>().sqrt();
+    for a in &mut amps {
+        *a /= norm;
+    }
+    amps
+}
+
+fn cpu_pauli_sums(amps: &[Complex64], pending_norm: f64, masks: &[(u64, u64)]) -> Vec<Complex64> {
+    let scale = pending_norm * pending_norm;
+    let triples: Vec<(usize, usize, u32)> = masks
+        .iter()
+        .map(|&(x, z)| (x as usize, z as usize, 0))
+        .collect();
+    crate::sim::pauli_sandwiches_from_masks(amps, amps, &triples)
+        .into_iter()
+        .map(|s| s * scale)
+        .collect()
+}
+
+#[test]
+fn pauli_blocks_per_mask_caps_blocks_and_partial_bytes() {
+    use super::expect::{PAULI_MAX_BLOCKS, PAULI_MAX_PARTIAL_BYTES, pauli_blocks_per_mask};
+    assert_eq!(pauli_blocks_per_mask(1, 1), 1);
+    assert_eq!(pauli_blocks_per_mask(2, 1), 1);
+    assert_eq!(pauli_blocks_per_mask(1 << 30, 1), PAULI_MAX_BLOCKS as u32);
+    assert_eq!(pauli_blocks_per_mask(1 << 30, 0), PAULI_MAX_BLOCKS as u32);
+
+    let many_masks = 2048;
+    let capped = pauli_blocks_per_mask(1 << 30, many_masks);
+    assert_eq!(capped, 512);
+    assert!(2 * many_masks * capped as usize * size_of::<f64>() <= PAULI_MAX_PARTIAL_BYTES);
+
+    assert_eq!(pauli_blocks_per_mask(1 << 30, 600_000), 1);
+}
+
+#[test]
+fn pauli_sums_empty_and_zero_state() {
+    let Some(ctx) = gpu_context_or_skip() else {
+        return;
+    };
+    let zero_amps = vec![Complex64::ZERO; 1 << 3];
+    let state = GpuState::from_host_amplitudes(ctx.clone(), &zero_amps).unwrap();
+    assert!(super::pauli_sums(&ctx, &state, &[]).unwrap().is_empty());
+
+    let masks = [(0, 0), (0, 0b101), (0b011, 0b010), (0b111, 0b101)];
+    let got = super::pauli_sums(&ctx, &state, &masks).unwrap();
+    assert_eq!(got, vec![Complex64::ZERO; masks.len()]);
+}
+
+#[test]
+fn pauli_sums_small_registers_0q_1q_2q_exhaustive() {
+    let Some(ctx) = gpu_context_or_skip() else {
+        return;
+    };
+
+    // 0-qubit register (dim = 1): x == 0 fast path with non-unit pending_norm.
+    let mut state0 = GpuState::new(ctx.clone(), 0).unwrap();
+    let amp0 = [Complex64::new(0.6, -0.8)];
+    state0
+        .buffer_mut()
+        .copy_from_host(ctx.device(), &[amp0[0].re, amp0[0].im])
+        .unwrap();
+    state0.set_pending_norm(1.25);
+    let got0 = super::pauli_sums(&ctx, &state0, &[(0, 0)]).unwrap();
+    let want0 = cpu_pauli_sums(&amp0, 1.25, &[(0, 0)]);
+    assert!(
+        (got0[0] - want0[0]).norm() < 1e-12,
+        "0q: {got0:?} vs {want0:?}"
+    );
+    assert_eq!(got0[0].im, 0.0);
+
+    // 1-qubit register (dim = 2, dim / 2 = 1 pair): exhaustive (x, z).
+    let amps1 = asymmetric_complex_state(1, 11);
+    let mut state1 = GpuState::from_host_amplitudes(ctx.clone(), &amps1).unwrap();
+    state1.set_pending_norm(1.75);
+    let masks1 = [(0, 0), (0, 1), (1, 0), (1, 1)];
+    let got1 = super::pauli_sums(&ctx, &state1, &masks1).unwrap();
+    let want1 = cpu_pauli_sums(&amps1, 1.75, &masks1);
+    for (i, ((&(x, z), g), w)) in masks1.iter().zip(&got1).zip(&want1).enumerate() {
+        assert!((g - w).norm() < 1e-12, "1q mask {i} ({x},{z}): {g} vs {w}");
+        if (x & z).count_ones() & 1 == 0 {
+            assert!(g.im.abs() < 1e-14, "1q even-Y mask ({x},{z}) im={}", g.im);
+        } else {
+            assert!(g.re.abs() < 1e-14, "1q odd-Y mask ({x},{z}) re={}", g.re);
+        }
+    }
+
+    // 2-qubit register (dim = 4, dim / 2 = 2): exhaustive 16 masks.
+    let amps2 = asymmetric_complex_state(2, 22);
+    let mut state2 = GpuState::from_host_amplitudes(ctx.clone(), &amps2).unwrap();
+    state2.set_pending_norm(0.6);
+    let masks2: Vec<(u64, u64)> = (0..4).flat_map(|x| (0..4).map(move |z| (x, z))).collect();
+    let got2 = super::pauli_sums(&ctx, &state2, &masks2).unwrap();
+    let want2 = cpu_pauli_sums(&amps2, 0.6, &masks2);
+    for ((&(x, z), g), w) in masks2.iter().zip(&got2).zip(&want2) {
+        assert!((g - w).norm() < 1e-12, "2q mask ({x},{z}): {g} vs {w}");
+    }
+}
+
+#[test]
+fn pauli_sums_tz_edge_positions_even_and_odd_y() {
+    let Some(ctx) = gpu_context_or_skip() else {
+        return;
+    };
+    let n = 10;
+    let amps = asymmetric_complex_state(n, 33);
+    let mut state = GpuState::from_host_amplitudes(ctx.clone(), &amps).unwrap();
+    state.set_pending_norm(1.3);
+
+    let msb = 1u64 << (n - 1);
+    let masks = [
+        // x == 0 fast path
+        (0, 0),
+        (0, 1),
+        (0, msb),
+        (0, (1 << n) - 1),
+        // tz(x) == 0 (LSB) with 0, 1, 2, 3 Ys
+        (1, 0),
+        (1, 1),
+        (0b10_1011, 0b10_0001),
+        (0b10_1011, 0b10_1001),
+        // tz(x) middle with 0, 1, 2, 3, 4 Ys
+        (1 << 5, 0),
+        (1 << 5, 1 << 5),
+        ((1 << 8) | (1 << 4), (1 << 8) | (1 << 4) | 1),
+        (
+            (1 << 8) | (1 << 4) | (1 << 2),
+            (1 << 8) | (1 << 4) | (1 << 2),
+        ),
+        (0b11_1100_0000, 0b11_1100_0000),
+        // tz(x) == n - 1 (MSB) with even and odd Y
+        (msb, 0),
+        (msb, msb),
+        (msb, msb | 1),
+        (msb, msb | (1 << 3) | (1 << 5)),
+    ];
+    let got = super::pauli_sums(&ctx, &state, &masks).unwrap();
+    let want = cpu_pauli_sums(&amps, 1.3, &masks);
+    for (i, ((&(x, z), g), w)) in masks.iter().zip(&got).zip(&want).enumerate() {
+        assert!(
+            (g - w).norm() < 1e-12,
+            "mask {i} ({x:#x},{z:#x}): {g} vs {w}"
+        );
+        if (x & z).count_ones() & 1 == 0 {
+            assert!(g.im.abs() < 1e-13, "even-Y mask {i} im={}", g.im);
+        } else {
+            assert!(g.re.abs() < 1e-13, "odd-Y mask {i} re={}", g.re);
+        }
+    }
+}
+
+#[test]
+fn pauli_sums_multi_mask_groups_and_slot_ordering() {
+    let Some(ctx) = gpu_context_or_skip() else {
+        return;
+    };
+    let n = 6;
+    let amps = asymmetric_complex_state(n, 44);
+    let state = GpuState::from_host_amplitudes(ctx.clone(), &amps).unwrap();
+
+    let mut ordered = Vec::new();
+    for k in 0..17u64 {
+        ordered.push((0, (k * 3 + 1) & 63));
+    }
+    for k in 0..17u64 {
+        ordered.push((0b01_0110, (k * 5 + 2) & 63));
+    }
+    for k in 0..9u64 {
+        ordered.push((1 << 5, (k * 7) & 63));
+    }
+    // Interleave deterministically so groups split across unsorted input slots.
+    let masks: Vec<(u64, u64)> = (0..ordered.len())
+        .map(|i| ordered[(i * 17 + 5) % ordered.len()])
+        .collect();
+    let got = super::pauli_sums(&ctx, &state, &masks).unwrap();
+    let want = cpu_pauli_sums(&amps, 1.0, &masks);
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!((g - w).norm() < 1e-12, "slot {i}: {g} vs {w}");
+    }
+}
+
+#[test]
+fn pauli_sums_grid_stride_24q_and_bounded_vram() {
+    let Some(ctx) = gpu_context_or_skip() else {
+        return;
+    };
+    let n = 24;
+    let amps = asymmetric_complex_state(n, 55);
+    let mut state = GpuState::from_host_amplitudes(ctx.clone(), &amps).unwrap();
+    state.set_pending_norm(1.15);
+
+    let mut masks = vec![
+        (0, 0),
+        (0, 1 | (1 << 23)),
+        (1, 0),
+        (1, 1),
+        ((1 << 12) | (1 << 15), 1 << 15),
+        ((1 << 12) | (1 << 15), (1 << 12) | (1 << 15) | (1 << 20)),
+        (1 << 23, 0),
+        (1 << 23, 1 << 23),
+    ];
+    let shared_x = (1u64 << 3) | (1u64 << 19);
+    for k in 0..9u64 {
+        masks.push((shared_x, (k << 3) | (1 << 19)));
+    }
+
+    let got = super::pauli_sums(&ctx, &state, &masks).unwrap();
+    let partials_len = ctx
+        .launcher_scratch()
+        .measure_partials
+        .as_ref()
+        .expect("measure_partials allocated")
+        .len();
+    let max_len = 2 * masks.len() * super::expect::PAULI_MAX_BLOCKS as usize;
+    assert!(
+        partials_len <= max_len,
+        "partials_len {partials_len} exceeded bounded cap {max_len}"
+    );
+
+    let want = cpu_pauli_sums(&amps, 1.15, &masks);
+    for (i, ((&(x, z), g), w)) in masks.iter().zip(&got).zip(&want).enumerate() {
+        assert!(
+            (g - w).norm() < 1e-9,
+            "24q mask {i} ({x:#x},{z:#x}): {g} vs {w}"
+        );
+    }
+}

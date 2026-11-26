@@ -744,12 +744,11 @@ impl NoisyCompiledSampler {
         let context = packed.context().clone();
         let num_shots = packed.num_shots();
 
-        // Fused path: the kernel seeds a per-(event, batch) xoshiro stream
-        // from a master seed drawn on the host, then generates and XORs the
-        // noise masks in one launch per tile. Drops the per-tile mask fill
-        // and ~25-50 MB PCIe upload that the fallback branch pays at large
-        // shot counts. The fallback runs only when compiled event
-        // probabilities fail the `u64` threshold check.
+        // Device mask path: generate per-event X/Z masks on the device from a
+        // host-drawn master seed, then accumulate row-major XORs into the shot
+        // matrix without host mask generation or PCIe uploads. The host mask
+        // fallback runs only when compiled event probabilities fail the u64
+        // threshold check.
         let use_fused = cache.event_thresholds_valid;
         let master_seed: u64 = if use_fused {
             rand::Rng::next_u64(&mut self.rng)
@@ -759,14 +758,37 @@ impl NoisyCompiledSampler {
 
         let mut shot_start = 0;
         while shot_start < num_shots {
-            let chunk_shots = (shot_start + NOISE_LUT_TILE).min(num_shots) - shot_start;
+            let chunk_shots = (num_shots - shot_start).min(crate::gpu::kernels::bts::CHUNK_SHOTS);
             let chunk_s_words = chunk_shots.div_ceil(64);
             let word_offset = shot_start / 64;
+            let mask_len = num_events.checked_mul(chunk_s_words).ok_or_else(|| {
+                crate::error::PrismError::BackendUnsupported {
+                    backend: "gpu".to_string(),
+                    operation: format!(
+                        "apply_noise_device_meas_major: mask buffer size overflow \
+                         ({num_events} events * {chunk_s_words} words)"
+                    ),
+                }
+            })?;
 
             if use_fused {
-                crate::gpu::kernels::bts::generate_and_apply_noise_masks_meas_major_by_row(
+                cache.ensure_device_mask_capacity(mask_len)?;
+                crate::gpu::kernels::bts::generate_noise_masks(
                     &context,
-                    crate::gpu::kernels::bts::NoiseDeviceGenApplyByRow {
+                    crate::gpu::kernels::bts::NoiseMaskGenerate {
+                        x_masks: &mut cache.x_masks_dev,
+                        z_masks: &mut cache.z_masks_dev,
+                        event_thresholds: &cache.event_thresholds_dev,
+                        num_events,
+                        chunk_s_words,
+                        tail_mask: crate::sim::compiled::shot_tail_mask(chunk_shots),
+                        master_seed,
+                        batch_offset: word_offset as u64,
+                    },
+                )?;
+                crate::gpu::kernels::bts::apply_noise_row_major(
+                    &context,
+                    crate::gpu::kernels::bts::NoiseRowApply {
                         meas_major: packed.data_mut(),
                         num_meas: self.num_measurements,
                         s_words: total_s_words,
@@ -774,13 +796,11 @@ impl NoisyCompiledSampler {
                         chunk_s_words,
                         row_event_offsets: &cache.row_event_offsets_dev,
                         row_event_entries: &cache.row_event_entries_dev,
-                        event_thresholds: &cache.event_thresholds_dev,
-                        master_seed,
-                        batch_offset: word_offset as u64,
+                        x_masks: &cache.x_masks_dev,
+                        z_masks: &cache.z_masks_dev,
                     },
                 )?;
             } else {
-                let mask_len = num_events * chunk_s_words;
                 cache.ensure_mask_capacity(mask_len)?;
                 Self::fill_noise_masks_event_major(
                     &self.events,

@@ -1402,15 +1402,9 @@ pub(super) fn plan_temporal_clifford(
     }
     let tail_accel = accel_for(kind, Family::Statevector, circuit.num_qubits);
     let tail_num_classical_bits = tail.num_classical_bits;
-    let fused_tail = match &tail_accel {
-        Accel::Cpu => crate::circuit::fusion::fuse_circuit(&tail, true).into_owned(),
-        #[cfg(feature = "gpu")]
-        Accel::Gpu { .. } => {
-            let expanded = crate::circuit::expand_qft_blocks(&tail);
-            let expanded = crate::circuit::expand_pauli_rotations(&expanded).into_owned();
-            crate::circuit::fusion::fuse_circuit(&expanded, true).into_owned()
-        }
-    };
+    let probe = build_statevector(&tail_accel, 0, limits);
+    let expanded = super::expand_for_backend(&probe, &tail);
+    let fused_tail = super::fuse_for_backend(&probe, &expanded).into_owned();
     Some(TemporalCliffordPlan {
         prefix,
         fused_tail,
@@ -1428,17 +1422,13 @@ pub(super) fn run_temporal_clifford(
     let mut stab = StabilizerBackend::with_limits(seed, &plan.limits);
     stab.init(plan.prefix.num_qubits, plan.prefix.num_classical_bits)?;
     stab.enable_lazy_destab();
-    for inst in &plan.prefix.instructions {
-        stab.apply(inst)?;
-    }
+    stab.apply_instructions(&plan.prefix.instructions)?;
 
     let state = stab.export_statevector()?;
 
     let mut sv = build_statevector(&plan.tail_accel, seed, &plan.limits);
     sv.init_from_state(state, plan.tail_num_classical_bits)?;
-    for inst in &plan.fused_tail.instructions {
-        sv.apply(inst)?;
-    }
+    sv.apply_instructions(&plan.fused_tail.instructions)?;
 
     let probabilities = if want_probabilities {
         try_backend_probabilities(&sv)?

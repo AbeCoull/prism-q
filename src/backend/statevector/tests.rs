@@ -2123,6 +2123,162 @@ mod gpu_scaffold {
             );
         }
     }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn staged_readback_falls_back_to_direct_copy_under_contention() {
+        use crate::gpu::GpuBuffer;
+        let Some(ctx) = device_or_skip() else {
+            return;
+        };
+        let device = ctx.device();
+        let len = (5 << 20) / 8 + 3;
+        let host_a: Vec<u64> = (0..len as u64)
+            .map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xA5A5_5A5A)
+            .collect();
+        let host_b: Vec<u64> = (0..len as u64)
+            .map(|i| i.wrapping_mul(0xD6E8_FEB8_6659_FD93) ^ 0x1234_5678)
+            .collect();
+        let buf_a = GpuBuffer::<u64>::from_host(device, &host_a).unwrap();
+        let buf_b = GpuBuffer::<u64>::from_host(device, &host_b).unwrap();
+
+        let chunks_before = device.staged_chunks();
+        let held = device
+            .checkout_staging()
+            .unwrap()
+            .expect("staging slots should be free");
+        let mut back = vec![0u64; len];
+        buf_a.copy_to_host(device, &mut back).unwrap();
+        assert_eq!(back, host_a);
+        assert_eq!(
+            device.staged_chunks(),
+            chunks_before,
+            "contended readback must bypass staging and leave staged_chunks unchanged"
+        );
+        drop(held);
+        assert_eq!(device.staged_chunks(), chunks_before);
+
+        let mut back_a = vec![0u64; len];
+        let mut back_b = vec![0u64; len];
+        let (res_a, res_b) = rayon::join(
+            || buf_a.copy_to_host(device, &mut back_a),
+            || buf_b.copy_to_host(device, &mut back_b),
+        );
+        res_a.unwrap();
+        res_b.unwrap();
+        assert_eq!(back_a, host_a);
+        assert_eq!(back_b, host_b);
+    }
+
+    #[test]
+    fn gpu_probabilities_rejects_above_limit_without_readback() {
+        use crate::limits::{Limits, ResolvedLimits};
+        let Some(ctx) = device_or_skip() else {
+            return;
+        };
+        let limits = ResolvedLimits::resolve(Some(&Limits::new().max_probability_qubits(3)));
+        let mut over = StatevectorBackend::with_limits(42, &limits).with_gpu(ctx.clone());
+        over.init(4, 0).unwrap();
+        #[cfg(feature = "bench-internal")]
+        let before = ctx.pass_census();
+        let err = over.probabilities().unwrap_err();
+        assert!(matches!(err, PrismError::ResourceLimit(_)));
+        #[cfg(feature = "bench-internal")]
+        assert_eq!(
+            (ctx.pass_census() - before).drains,
+            0,
+            "limit check must reject before device readback"
+        );
+
+        let mut at_cap = StatevectorBackend::with_limits(42, &limits).with_gpu(ctx);
+        at_cap.init(3, 0).unwrap();
+        assert_eq!(at_cap.probabilities().unwrap().len(), 8);
+    }
+
+    #[test]
+    fn gpu_export_statevector_rejects_above_limit_without_readback() {
+        use crate::limits::{Limits, ResolvedLimits};
+        let Some(ctx) = device_or_skip() else {
+            return;
+        };
+        let limits = ResolvedLimits::resolve(Some(&Limits::new().max_export_qubits(3)));
+        let mut over = StatevectorBackend::with_limits(42, &limits).with_gpu(ctx.clone());
+        over.init(4, 0).unwrap();
+        #[cfg(feature = "bench-internal")]
+        let before = ctx.pass_census();
+        let err = over.export_statevector().unwrap_err();
+        assert!(matches!(err, PrismError::ResourceLimit(_)));
+        #[cfg(feature = "bench-internal")]
+        assert_eq!(
+            (ctx.pass_census() - before).drains,
+            0,
+            "limit check must reject before device readback"
+        );
+
+        let mut at_cap = StatevectorBackend::with_limits(42, &limits).with_gpu(ctx);
+        at_cap.init(3, 0).unwrap();
+        assert_eq!(at_cap.export_statevector().unwrap().len(), 8);
+    }
+
+    #[test]
+    fn gpu_schmidt_values_rejects_above_limit_without_readback() {
+        use crate::limits::{Limits, ResolvedLimits};
+        let Some(ctx) = device_or_skip() else {
+            return;
+        };
+        let limits = ResolvedLimits::resolve(Some(&Limits::new().max_export_qubits(4)));
+        let mut over = StatevectorBackend::with_limits(42, &limits).with_gpu(ctx.clone());
+        over.init(4, 0).unwrap();
+        #[cfg(feature = "bench-internal")]
+        let before = ctx.pass_census();
+        let err = over.schmidt_values(&[0]).unwrap_err();
+        assert!(matches!(err, PrismError::ResourceLimit(_)));
+        #[cfg(feature = "bench-internal")]
+        assert_eq!(
+            (ctx.pass_census() - before).drains,
+            0,
+            "limit check must reject before device readback"
+        );
+
+        let mut at_cap = StatevectorBackend::with_limits(42, &limits).with_gpu(ctx);
+        at_cap.init(3, 0).unwrap();
+        let values = at_cap.schmidt_values(&[0]).unwrap();
+        assert_eq!(values.len(), 1);
+        assert!((values[0] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn gpu_reduced_density_matrix_rejects_above_export_limit_without_readback() {
+        use crate::limits::{Limits, ResolvedLimits};
+        let Some(ctx) = device_or_skip() else {
+            return;
+        };
+        let limits = ResolvedLimits::resolve(Some(&Limits::new().max_export_qubits(3)));
+        let mut over = StatevectorBackend::with_limits(42, &limits).with_gpu(ctx.clone());
+        over.init(4, 0).unwrap();
+        #[cfg(feature = "bench-internal")]
+        let before = ctx.pass_census();
+        let err = over.reduced_density_matrix(&[0]).unwrap_err();
+        match err {
+            PrismError::ResourceLimit(data) => {
+                assert_eq!((data.required, data.limit), (4, 3));
+                assert_eq!(data.operation, "reduced density matrix GPU readback");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        #[cfg(feature = "bench-internal")]
+        assert_eq!(
+            (ctx.pass_census() - before).drains,
+            0,
+            "limit check must reject before device readback"
+        );
+
+        let mut at_cap = StatevectorBackend::with_limits(42, &limits).with_gpu(ctx);
+        at_cap.init(3, 0).unwrap();
+        let rho = at_cap.reduced_density_matrix(&[0]).unwrap();
+        assert_eq!(rho.len(), 4);
+        assert!((rho[0].re - 1.0).abs() < 1e-12);
+    }
 }
 
 // The density-matrix registers batch only in runs of this length. On a state

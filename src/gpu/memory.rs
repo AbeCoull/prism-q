@@ -61,12 +61,14 @@ impl<T: DeviceRepr> GpuBuffer<T> {
 
     /// Copy the whole buffer from the device into the start of `host`, leaving the rest
     /// of `host` untouched. With `parallel`, copies of `STAGED_READBACK_MIN_BYTES` or more
-    /// go through `HostStaging`, and a failed pinned allocation of its slots returns the
-    /// error.
+    /// check out `HostStaging` and fall back to a direct copy when another readback holds
+    /// the slots; a failed pinned allocation of its slots returns the error.
     pub fn copy_to_host(&self, device: &GpuDevice, host: &mut [T]) -> Result<()> {
         #[cfg(feature = "parallel")]
-        if self.slice.num_bytes() >= STAGED_READBACK_MIN_BYTES {
-            device.with_staging(|staging| staging.copy_to_host(&self.slice, host))?;
+        if self.slice.num_bytes() >= STAGED_READBACK_MIN_BYTES
+            && let Some(mut staging) = device.checkout_staging()?
+        {
+            staging.copy_to_host(&self.slice, host)?;
             device.count_drain();
             return Ok(());
         }
@@ -227,6 +229,11 @@ impl HostStaging {
         let stream = &self.stream;
         let range = |k: usize| k * STAGING_SLOT_BYTES..bytes.min((k + 1) * STAGING_SLOT_BYTES);
         let chunks = bytes.div_ceil(STAGING_SLOT_BYTES);
+        // Drain the stream on error or unwind before StagingCheckout returns HostStaging to Idle.
+        let mut drain = DrainOnDrop {
+            stream,
+            armed: false,
+        };
         for k in 0..=chunks {
             if k < chunks {
                 // The copy out below may run unrelated rayon jobs on this thread, so bind
@@ -237,6 +244,7 @@ impl HostStaging {
                     .context()
                     .bind_to_thread()
                     .map_err(|e| driver_err("staged readback", e))?;
+                drain.armed = true;
                 fill(range(k), slots[k % 2])?;
                 #[cfg(test)]
                 {
@@ -262,7 +270,23 @@ impl HostStaging {
                     .for_each(|(d, s)| d.copy_from_slice(s));
             }
         }
+        drain.armed = false;
         Ok(())
+    }
+}
+
+#[cfg(feature = "parallel")]
+struct DrainOnDrop<'a> {
+    stream: &'a CudaStream,
+    armed: bool,
+}
+
+#[cfg(feature = "parallel")]
+impl Drop for DrainOnDrop<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.stream.synchronize();
+        }
     }
 }
 

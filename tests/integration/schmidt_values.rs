@@ -250,3 +250,46 @@ fn the_terminal_normalizes_a_truncating_chain_and_says_so() {
         result.metadata.exactness
     );
 }
+
+// Non-contiguous 4-qubit subsystem on an 8-qubit entangled state builds a 16x16
+// reduced density matrix (`dim * dim = 256`), exercising `faer_hermitian_eigenvalues`
+// under `parallel`, while contiguous prefix/suffix cuts exercise `svd_singular_values_with_workspace`.
+#[test]
+fn mps_schmidt_values_match_statevector_on_large_density_and_bond_cuts() {
+    let circuit = brickwork_circuit(8, 6, SEED);
+
+    let mut sv = StatevectorBackend::new(SEED);
+    sim::run_on(&mut sv, &circuit).unwrap();
+
+    let mut mps = MpsBackend::new(SEED, 128);
+    sim::run_on(&mut mps, &circuit).unwrap();
+
+    for subsystem in [
+        vec![0usize, 1, 2],
+        vec![5, 6, 7],
+        vec![0, 2, 4, 6],
+        vec![1, 3, 5, 7],
+    ] {
+        let expected = sv.schmidt_values(&subsystem).unwrap();
+        let actual = mps.schmidt_values(&subsystem).unwrap();
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "cut {subsystem:?}: len {} vs {}",
+            actual.len(),
+            expected.len()
+        );
+        for (k, (&got, &want)) in actual.iter().zip(&expected).enumerate() {
+            assert!(
+                (got - want).abs() < MPS_EPS,
+                "cut {subsystem:?} s[{k}]: {got} vs {want}"
+            );
+        }
+        let s_mps = mps.entanglement_entropy(&subsystem).unwrap();
+        let s_sv = sv.entanglement_entropy(&subsystem).unwrap();
+        assert!(
+            (s_mps - s_sv).abs() < MPS_EPS,
+            "cut {subsystem:?} entropy: {s_mps} vs {s_sv}"
+        );
+    }
+}

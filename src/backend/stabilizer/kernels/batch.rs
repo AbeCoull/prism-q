@@ -327,6 +327,144 @@ fn apply_prepared_ops(xw: &mut u64, zw: &mut u64, p: &mut bool, ops: &[PrepOp]) 
     }
 }
 
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn process_cross_word_block(
+    xz_block: &mut [u64],
+    phase_block: &mut [bool],
+    nw: usize,
+    stride: usize,
+    word_groups: &[(usize, u64, usize, usize)],
+    sorted_entries: &[(usize, u8)],
+    cross_ops: &[(u8, usize, usize)],
+    lx: &mut [u64],
+    lz: &mut [u64],
+) {
+    let mut phase_word = 0u64;
+    for (cb, &p) in phase_block.iter().enumerate() {
+        phase_word |= u64::from(p) << cb;
+    }
+
+    for &(word, _, start, end) in word_groups {
+        if end - start == 1 {
+            let (ci, bit) = sorted_entries[start];
+            let mut xa = 0u64;
+            let mut za = 0u64;
+            for (cb, row) in xz_block.chunks_exact(stride).enumerate() {
+                xa |= ((row[word] >> bit) & 1) << cb;
+                za |= ((row[nw + word] >> bit) & 1) << cb;
+            }
+            lx[ci] = xa;
+            lz[ci] = za;
+        } else {
+            let group = &sorted_entries[start..end];
+            let count = group.len().min(64);
+            let mut x_acc = [0u64; 64];
+            let mut z_acc = [0u64; 64];
+            for (cb, row) in xz_block.chunks_exact(stride).enumerate() {
+                let xw = row[word];
+                let zw = row[nw + word];
+                for ((xa, za), &(_, bit)) in x_acc[..count]
+                    .iter_mut()
+                    .zip(&mut z_acc[..count])
+                    .zip(&group[..count])
+                {
+                    *xa |= ((xw >> bit) & 1) << cb;
+                    *za |= ((zw >> bit) & 1) << cb;
+                }
+            }
+            for ((&xa, &za), &(ci, _)) in x_acc[..count]
+                .iter()
+                .zip(&z_acc[..count])
+                .zip(&group[..count])
+            {
+                lx[ci] = xa;
+                lz[ci] = za;
+            }
+        }
+    }
+
+    for &(kind, i0, i1) in cross_ops {
+        match kind {
+            BatchGate::CX => {
+                let xa = lx[i0];
+                let za = lz[i0];
+                let xb = lx[i1];
+                let zb = lz[i1];
+                phase_word ^= xa & zb & !(xb ^ za);
+                lx[i1] = xb ^ xa;
+                lz[i0] = za ^ zb;
+            }
+            BatchGate::CZ => {
+                let xa = lx[i0];
+                let xb = lx[i1];
+                let za = lz[i0];
+                let zb = lz[i1];
+                phase_word ^= xa & xb & (za ^ zb);
+                lz[i0] = za ^ xb;
+                lz[i1] = zb ^ xa;
+            }
+            _ => {
+                lx.swap(i0, i1);
+                lz.swap(i0, i1);
+            }
+        }
+    }
+
+    for &(word, combined_mask, start, end) in word_groups {
+        let keep = !combined_mask;
+        if end - start == 1 {
+            let (ci, bit) = sorted_entries[start];
+            let mut xcol = lx[ci];
+            let mut zcol = lz[ci];
+            for row in xz_block.chunks_exact_mut(stride) {
+                row[word] = (row[word] & keep) | ((xcol & 1) << bit);
+                row[nw + word] = (row[nw + word] & keep) | ((zcol & 1) << bit);
+                xcol >>= 1;
+                zcol >>= 1;
+            }
+        } else {
+            let group = &sorted_entries[start..end];
+            let count = group.len().min(64);
+            let mut x_cur = [0u64; 64];
+            let mut z_cur = [0u64; 64];
+            let mut bits = [0u8; 64];
+            for (((xc, zc), b_dst), &(ci, bit)) in x_cur[..count]
+                .iter_mut()
+                .zip(&mut z_cur[..count])
+                .zip(&mut bits[..count])
+                .zip(&group[..count])
+            {
+                *xc = lx[ci];
+                *zc = lz[ci];
+                *b_dst = bit;
+            }
+            for row in xz_block.chunks_exact_mut(stride) {
+                let mut xw = row[word] & keep;
+                let mut zw = row[nw + word] & keep;
+                for ((xc, zc), &bit) in x_cur[..count]
+                    .iter_mut()
+                    .zip(&mut z_cur[..count])
+                    .zip(&bits[..count])
+                {
+                    xw |= (*xc & 1) << bit;
+                    zw |= (*zc & 1) << bit;
+                    *xc >>= 1;
+                    *zc >>= 1;
+                }
+                row[word] = xw;
+                row[nw + word] = zw;
+            }
+        }
+    }
+
+    let mut pw = phase_word;
+    for p in phase_block.iter_mut() {
+        *p = (pw & 1) != 0;
+        pw >>= 1;
+    }
+}
+
 /// The rows one batched gate pass sweeps, borrowed from whichever tableau owns
 /// them. `row_start` is the first row a gate updates: zero for a full tableau,
 /// `n` when destabilizers are deferred.
@@ -521,120 +659,111 @@ impl GateRows<'_> {
     }
 
     fn pcc_apply_cross_word(&mut self, cross_word: &[CrossWordGate]) {
+        if cross_word.is_empty() {
+            return;
+        }
         let gs = self.row_start;
-        let total_rows = 2 * self.n + 1;
-        let active_rows = total_rows - gs;
-        let col_words = active_rows.div_ceil(64);
         let nw = self.num_words;
         let stride = self.stride();
+        let active_rows = (2 * self.n + 1) - gs;
+        debug_assert_eq!(self.xz[gs * stride..].len(), active_rows * stride);
+        debug_assert_eq!(self.phase[gs..].len(), active_rows);
 
         let mut qubit_to_idx = vec![u32::MAX; self.n];
         let mut idx_to_qubit: Vec<usize> = Vec::new();
+        let mut cross_ops: Vec<(u8, usize, usize)> = Vec::with_capacity(cross_word.len());
         for g in cross_word {
             let q0 = g.w0 as usize * 64 + g.b0 as usize;
             let q1 = g.w1 as usize * 64 + g.b1 as usize;
-            if qubit_to_idx[q0] == u32::MAX {
-                qubit_to_idx[q0] = idx_to_qubit.len() as u32;
+            let i0 = if qubit_to_idx[q0] == u32::MAX {
+                let idx = idx_to_qubit.len();
+                qubit_to_idx[q0] = idx as u32;
                 idx_to_qubit.push(q0);
-            }
-            if qubit_to_idx[q1] == u32::MAX {
-                qubit_to_idx[q1] = idx_to_qubit.len() as u32;
+                idx
+            } else {
+                qubit_to_idx[q0] as usize
+            };
+            let i1 = if qubit_to_idx[q1] == u32::MAX {
+                let idx = idx_to_qubit.len();
+                qubit_to_idx[q1] = idx as u32;
                 idx_to_qubit.push(q1);
-            }
+                idx
+            } else {
+                qubit_to_idx[q1] as usize
+            };
+            cross_ops.push((g.kind, i0, i1));
         }
         let num_cached = idx_to_qubit.len();
-        let mut x_cols = vec![0u64; num_cached * col_words];
-        let mut z_cols = vec![0u64; num_cached * col_words];
 
-        let qubit_info: Vec<(usize, u64)> = idx_to_qubit
+        let mut raw_entries: Vec<(usize, u8, usize)> = idx_to_qubit
             .iter()
-            .map(|&q| (q / 64, 1u64 << (q % 64)))
+            .enumerate()
+            .map(|(ci, &q)| (q / 64, (q % 64) as u8, ci))
             .collect();
+        raw_entries.sort_unstable_by_key(|&(word, bit, _)| (word, bit));
 
-        for (ci, &(word, mask)) in qubit_info.iter().enumerate() {
-            let x_off = ci * col_words;
-            let z_off = ci * col_words;
-            for (row_idx, row) in self.xz[gs * stride..].chunks(stride).enumerate() {
-                let cw = row_idx / 64;
-                let cb = row_idx % 64;
-                if row[word] & mask != 0 {
-                    x_cols[x_off + cw] |= 1u64 << cb;
-                }
-                if row[nw + word] & mask != 0 {
-                    z_cols[z_off + cw] |= 1u64 << cb;
-                }
+        let mut sorted_entries: Vec<(usize, u8)> = Vec::with_capacity(num_cached);
+        let mut word_groups: Vec<(usize, u64, usize, usize)> = Vec::with_capacity(num_cached);
+        let mut i = 0;
+        while i < raw_entries.len() {
+            let word = raw_entries[i].0;
+            let start = sorted_entries.len();
+            let mut combined_mask = 0u64;
+            while i < raw_entries.len() && raw_entries[i].0 == word {
+                let (_, bit, ci) = raw_entries[i];
+                combined_mask |= 1u64 << bit;
+                sorted_entries.push((ci, bit));
+                i += 1;
             }
+            let end = sorted_entries.len();
+            word_groups.push((word, combined_mask, start, end));
         }
 
-        let mut phase_col = vec![0u64; col_words];
-        for (i, p) in self.phase[gs..].iter().enumerate() {
-            if *p {
-                phase_col[i / 64] |= 1u64 << (i % 64);
-            }
+        let xz_active = &mut self.xz[gs * stride..];
+        let phase_active = &mut self.phase[gs..];
+
+        #[cfg(feature = "parallel")]
+        if self.n >= MIN_QUBITS_FOR_PAR_GATES {
+            use rayon::prelude::*;
+            xz_active
+                .par_chunks_mut(64 * stride)
+                .zip(phase_active.par_chunks_mut(64))
+                .for_each_init(
+                    || (vec![0u64; num_cached], vec![0u64; num_cached]),
+                    |(lx, lz), (xz_block, phase_block)| {
+                        process_cross_word_block(
+                            xz_block,
+                            phase_block,
+                            nw,
+                            stride,
+                            &word_groups,
+                            &sorted_entries,
+                            &cross_ops,
+                            lx,
+                            lz,
+                        );
+                    },
+                );
+            return;
         }
 
-        for g in cross_word {
-            let q0 = g.w0 as usize * 64 + g.b0 as usize;
-            let q1 = g.w1 as usize * 64 + g.b1 as usize;
-            let i0 = qubit_to_idx[q0] as usize;
-            let i1 = qubit_to_idx[q1] as usize;
-            let off0 = i0 * col_words;
-            let off1 = i1 * col_words;
-
-            match g.kind {
-                BatchGate::CX => {
-                    for w in 0..col_words {
-                        let xa = x_cols[off0 + w];
-                        let za = z_cols[off0 + w];
-                        let xb = x_cols[off1 + w];
-                        let zb = z_cols[off1 + w];
-                        phase_col[w] ^= xa & zb & !(xb ^ za);
-                        x_cols[off1 + w] = xb ^ xa;
-                        z_cols[off0 + w] = za ^ zb;
-                    }
-                }
-                BatchGate::CZ => {
-                    for w in 0..col_words {
-                        let xa = x_cols[off0 + w];
-                        let xb = x_cols[off1 + w];
-                        let za = z_cols[off0 + w];
-                        let zb = z_cols[off1 + w];
-                        phase_col[w] ^= xa & xb & (za ^ zb);
-                        z_cols[off0 + w] = za ^ xb;
-                        z_cols[off1 + w] = zb ^ xa;
-                    }
-                }
-                _ => {
-                    for w in 0..col_words {
-                        let xa = x_cols[off0 + w];
-                        let xb = x_cols[off1 + w];
-                        x_cols[off0 + w] = xb;
-                        x_cols[off1 + w] = xa;
-                        let za = z_cols[off0 + w];
-                        let zb = z_cols[off1 + w];
-                        z_cols[off0 + w] = zb;
-                        z_cols[off1 + w] = za;
-                    }
-                }
-            }
-        }
-
-        for (ci, &(word, mask)) in qubit_info.iter().enumerate() {
-            let bit = mask.trailing_zeros() as usize;
-            let x_off = ci * col_words;
-            let z_off = ci * col_words;
-            for (row_idx, row) in self.xz[gs * stride..].chunks_mut(stride).enumerate() {
-                let cw = row_idx / 64;
-                let cb = row_idx % 64;
-                let xbit = (x_cols[x_off + cw] >> cb) & 1;
-                row[word] = (row[word] & !mask) | (xbit << bit);
-                let zbit = (z_cols[z_off + cw] >> cb) & 1;
-                row[nw + word] = (row[nw + word] & !mask) | (zbit << bit);
-            }
-        }
-
-        for (i, p) in self.phase[gs..].iter_mut().enumerate() {
-            *p = (phase_col[i / 64] >> (i % 64)) & 1 == 1;
+        let mut lx = vec![0u64; num_cached];
+        let mut lz = vec![0u64; num_cached];
+        for (xz_block, phase_block) in xz_active
+            .chunks_mut(64 * stride)
+            .zip(phase_active.chunks_mut(64))
+        {
+            process_cross_word_block(
+                xz_block,
+                phase_block,
+                nw,
+                stride,
+                &word_groups,
+                &sorted_entries,
+                &cross_ops,
+                &mut lx,
+                &mut lz,
+            );
         }
     }
 

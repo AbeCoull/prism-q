@@ -11,8 +11,11 @@ pub mod qec;
 
 use num_complex::Complex64;
 use prism_q::circuit::Circuit;
+use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::{BackendKind, PauliObservable, PauliTerm};
+use rand::{RngExt, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use std::time::Duration;
 
 pub const SEED: u64 = 0xDEAD_BEEF;
@@ -33,6 +36,20 @@ pub fn run_shots_with(
 ) -> prism_q::Result<prism_q::ShotsResult> {
     sim::simulate(circuit)
         .backend(kind)
+        .seed(seed)
+        .shots(num_shots)
+}
+
+pub fn run_shots_with_noise(
+    kind: BackendKind,
+    circuit: &Circuit,
+    noise: &prism_q::NoiseModel,
+    num_shots: usize,
+    seed: u64,
+) -> prism_q::Result<prism_q::ShotsResult> {
+    sim::simulate(circuit)
+        .backend(kind)
+        .noise(noise)
         .seed(seed)
         .shots(num_shots)
 }
@@ -187,4 +204,53 @@ pub fn h_conjugated_zz_kraus(p: f64) -> Vec<[[Complex64; 4]; 4]> {
         k1[t][t ^ 2] = Complex64::new(p.sqrt() * sign, 0.0);
     }
     vec![k0, k1]
+}
+
+/// Depolarizing rate the Pauli path rows run at.
+pub const PAULI_PATH_NOISE: f64 = 0.01;
+
+/// Truncation the Pauli path rows run at, sized so the reported discarded mass stays
+/// under the standard error of the 1000-shot trajectory arm they are compared with.
+pub const PAULI_PATH_EPSILON: f64 = 1e-3;
+pub const PAULI_PATH_MAX_TERMS: usize = 1 << 14;
+
+pub fn with_terminal_measurements(mut circuit: Circuit) -> Circuit {
+    circuit.measure_all();
+    circuit
+}
+
+pub fn non_clifford_noise_circuit(n_qubits: usize, depth: usize) -> Circuit {
+    let mut circuit = Circuit::new(n_qubits, 0);
+    for layer in 0..depth {
+        for q in 0..n_qubits {
+            circuit.add_gate(Gate::H, &[q]);
+            circuit.add_gate(Gate::T, &[q]);
+            circuit.add_gate(Gate::Rz(0.03 * (layer + q + 1) as f64), &[q]);
+        }
+        for q in 0..n_qubits.saturating_sub(1) {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    with_terminal_measurements(circuit)
+}
+
+/// Build a CZ-chain circuit with one measurement and one reset at half depth.
+pub fn mid_measured_chain(n: usize, depth: usize) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(SEED);
+    let singles = [Gate::H, Gate::S, Gate::T, Gate::X];
+    let mut c = Circuit::new(n, 1);
+    for layer in 0..depth {
+        for q in 0..n {
+            c.add_gate(singles[rng.random_range(0..singles.len())].clone(), &[q]);
+        }
+        let offset = layer % 2;
+        for q in (offset..n - 1).step_by(2) {
+            c.add_gate(Gate::Cz, &[q, q + 1]);
+        }
+        if layer + 1 == depth / 2 {
+            c.add_measure(n / 2, 0);
+            c.add_reset(n / 4);
+        }
+    }
+    c
 }

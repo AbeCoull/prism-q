@@ -38,24 +38,12 @@ use common::fixtures::{
     stabilizer_rank_mid_circuit_shot_circuit,
 };
 use common::{
-    SEED, amplitude_damping_kraus, configure_group, configure_group_at, configure_group_timed,
-    correlated_zz_kraus, h_conjugated_zz_kraus, heisenberg_hamiltonian, ising_hamiltonian,
-    run_shots_with, run_with,
+    PAULI_PATH_EPSILON, PAULI_PATH_MAX_TERMS, PAULI_PATH_NOISE, SEED, amplitude_damping_kraus,
+    configure_group, configure_group_at, configure_group_timed, correlated_zz_kraus,
+    h_conjugated_zz_kraus, heisenberg_hamiltonian, ising_hamiltonian, mid_measured_chain,
+    non_clifford_noise_circuit, run_shots_with, run_shots_with_noise, run_with,
+    with_terminal_measurements,
 };
-
-fn run_shots_with_noise(
-    kind: BackendKind,
-    circuit: &Circuit,
-    noise: &prism_q::NoiseModel,
-    num_shots: usize,
-    seed: u64,
-) -> prism_q::Result<prism_q::ShotsResult> {
-    sim::simulate(circuit)
-        .backend(kind)
-        .noise(noise)
-        .seed(seed)
-        .shots(num_shots)
-}
 
 /// Statevector rows above 26q, opted in via `PRISM_BENCH_HIGH_QUBITS=<max>`.
 ///
@@ -309,11 +297,6 @@ fn compiled_filtered_bell_pairs_circuit(n_pairs: usize) -> Circuit {
     with_terminal_measurements(circuits::independent_bell_pairs(n_pairs))
 }
 
-fn with_terminal_measurements(mut circuit: Circuit) -> Circuit {
-    circuit.measure_all();
-    circuit
-}
-
 /// Thermal relaxation on every gate target. `t2 < 2 * t1` keeps the dephasing
 /// rate above zero, so the event samples three branches rather than two.
 fn thermal_noise_model(circuit: &Circuit) -> prism_q::NoiseModel {
@@ -353,21 +336,6 @@ fn pair_depolarizing_noise(circuit: &Circuit, p_single: f64, p_pair: f64) -> pri
         }
     }
     model
-}
-
-fn non_clifford_noise_circuit(n_qubits: usize, depth: usize) -> Circuit {
-    let mut circuit = Circuit::new(n_qubits, 0);
-    for layer in 0..depth {
-        for q in 0..n_qubits {
-            circuit.add_gate(Gate::H, &[q]);
-            circuit.add_gate(Gate::T, &[q]);
-            circuit.add_gate(Gate::Rz(0.03 * (layer + q + 1) as f64), &[q]);
-        }
-        for q in 0..n_qubits.saturating_sub(1) {
-            circuit.add_gate(Gate::Cx, &[q, q + 1]);
-        }
-    }
-    with_terminal_measurements(circuit)
 }
 
 /// [`non_clifford_noise_circuit`] with qubit 0 measured into an extra bit halfway
@@ -1064,16 +1032,10 @@ fn bench_density_matrix_hardware_basis(c: &mut Criterion) {
 
 // ---- Pauli path engine ----
 
-/// Depolarizing rate the crossover group runs at, and the shot count its
-/// trajectory arm draws.
-const PAULI_PATH_NOISE: f64 = 0.01;
+/// Shot count the crossover group's trajectory arm draws. The construction below refuses a
+/// width whose reported discarded mass exceeds this arm's own standard error, so the two
+/// arms are compared at equal target error rather than at equal effort.
 const PAULI_PATH_SHOTS: usize = 1000;
-
-/// Truncation the path arm runs at. The construction below refuses a width whose
-/// reported discarded mass exceeds the trajectory arm's own standard error, so
-/// the two arms are compared at equal target error rather than at equal effort.
-const PAULI_PATH_EPSILON: f64 = 1e-3;
-const PAULI_PATH_MAX_TERMS: usize = 1 << 14;
 
 /// The observable both arms answer: `Z` on qubit 0.
 ///
@@ -2564,27 +2526,6 @@ fn bench_tn_rdm_chain(c: &mut Criterion) {
         }
     }
     group.finish();
-}
-
-/// Build a CZ-chain circuit with one measurement and one reset at half depth.
-fn mid_measured_chain(n: usize, depth: usize) -> Circuit {
-    let mut rng = ChaCha8Rng::seed_from_u64(SEED);
-    let singles = [Gate::H, Gate::S, Gate::T, Gate::X];
-    let mut c = Circuit::new(n, 1);
-    for layer in 0..depth {
-        for q in 0..n {
-            c.add_gate(singles[rng.random_range(0..singles.len())].clone(), &[q]);
-        }
-        let offset = layer % 2;
-        for q in (offset..n - 1).step_by(2) {
-            c.add_gate(Gate::Cz, &[q, q + 1]);
-        }
-        if layer + 1 == depth / 2 {
-            c.add_measure(n / 2, 0);
-            c.add_reset(n / 4);
-        }
-    }
-    c
 }
 
 /// Mid-circuit measurement on a chain, where the measurement path's cost

@@ -84,69 +84,20 @@ fi
 # microseconds between runs on a byte-identical cached executable. A gate whose
 # verdict blocks a merge cannot rest on a row that moves 46% for reasons a
 # within-run control cannot see.
-CIRCUITS_ROW_LIST=(
-    # Dense statevector: scaling, the structured phase and swap workload, a
-    # non-Clifford shape, ZZ rotations with mixer layers, and the diagonal-batch
-    # families.
-    statevector/scalability_d5/18
-    statevector/qft_textbook/20
-    statevector/qpe_t_gate/16q
-    statevector/qaoa_l3/16
-    statevector/diag_mixed_l6/20
-
-    # Clifford tableau, terminal measurement, and the block-split variant.
-    stabilizer/scaling/500
-    stabilizer/measurement/wall_measure_all/1000
-    factored_stabilizer/local_blocks/10x5/50
-
-    # Compiled shot sampling, noiseless and under a Pauli model.
-    compiled_sampler/noiseless/noiseless_500q_10k
-    compiled_sampler/noisy/noisy_500q_10k
-
-    # Matrix product state: gate application with truncation, then sampling.
-    mps/random_d10/16
-    mps/sampling/32
-
-    # Sparse map state: gate application, then sampling.
-    sparse/random_d10/20
-    sparse/sampling/32
-
-    # Density matrix: the fused unitary sandwich and a Kraus channel.
-    density_matrix/rzz_layers_fused/10
-    density_matrix/noisy_channels/kraus_amp_damp/10
-
-    # Split-state and tensor network, the latter for contraction and for the
-    # mid-circuit measurement path that forces a dense collapse.
-    factored/partial_independence/factored/20
-    tn/linear_chain/12
-    tn/midmeasure_chain/20
-
-    # Product state, no entanglement.
-    product/scaling_d10/64
-
-    # Clifford+T: the deterministic and stochastic Pauli engines, and the
-    # approximate stabilizer-rank route with its pruning.
-    clifford_t/spd/10q_12t
-    clifford_t/spp_10k/10q_12t
-    stabilizer_rank/approx_1024/10q_20t
-
-    # Analytic terminals: adjoint gradients, Pauli-sum expectations, and the
-    # scalar tensor route Auto takes for an expectation terminal.
-    gradient/qaoa_l1/adjoint/18
-    expectation/pauli_sum/18
-    auto/expectation/brickwork_d4/20
-
-    # Noise: trajectory sampling on a non-Clifford circuit, the compiled Pauli
-    # sampler, and the Pauli path engine.
-    noisy_sampling/trajectory_pauli/non_clifford_12q_512
-    noisy_sampling/compiled_pauli/clifford_100q_10k
-    pauli_path/noisy_expectation/path/50
-
-    # Circuit-level paths that no backend row reaches: a guarded region and
-    # parameter binding without a rebuild.
-    dynamic/guarded_region/20
-    vqe/bind/16
-)
+# The rows, and the policy a regression on each follows in CI, live in
+# scripts/bench_gate_rows.txt. Every row but the `ir` ones is measured here, and a
+# `report` row never triggers the confirmation run or a FAIL on its own.
+ROWS_FILE="${PRISM_BENCH_ROWS:-$SCRIPT_DIR/bench_gate_rows.txt}"
+CIRCUITS_ROW_LIST=()
+REPORT_ROWS=""
+while read -r row policy _; do
+    [[ -z "$row" || "$row" == \#* ]] && continue
+    case "$policy" in
+        ir) ;;
+        report) CIRCUITS_ROW_LIST+=("$row"); REPORT_ROWS+="$row"$'\n' ;;
+        *) CIRCUITS_ROW_LIST+=("$row") ;;
+    esac
+done < "$ROWS_FILE"
 
 CIRCUITS_FILTER="^($(IFS='|'; echo "${CIRCUITS_ROW_LIST[*]}"))$"
 CIRCUITS_ROWS=${#CIRCUITS_ROW_LIST[@]}
@@ -177,7 +128,30 @@ fi
 
 FIRST="$PROJECT_DIR/bench_results/ci-ab.md"
 CONFIRM="$PROJECT_DIR/bench_results/ci-ab-confirm.md"
-rm -f "$CONFIRM"
+OUTCOME="$PROJECT_DIR/bench_results/ci-outcome.txt"
+REGRESSED="$PROJECT_DIR/bench_results/ci-regressed.txt"
+rm -f "$CONFIRM" "$OUTCOME" "$REGRESSED"
+
+# Record what the CI verdict job reads (pass, fail with the rows behind it, or
+# invalid) and exit 0 only on pass.
+finish() {
+    mkdir -p "$(dirname "$OUTCOME")"
+    printf '%s\n' "$1" > "$OUTCOME"
+    if [[ -n "${2:-}" ]]; then
+        printf '%s\n' "$2" > "$REGRESSED"
+    fi
+    [[ "$1" == pass ]] && exit 0
+    exit 1
+}
+
+# Drop `report` rows from a list of regressed rows.
+gating() {
+    if [[ -z "$REPORT_ROWS" ]]; then
+        printf '%s\n' "$1"
+        return
+    fi
+    grep -vxF -f <(printf '%s' "$REPORT_ROWS") <<<"$1" || true
+}
 
 # The regressed rows are the bullet list that follows the FAIL verdict, which
 # ends at the next line that is neither blank nor a bullet.
@@ -192,17 +166,23 @@ regressed_rows() {
 }
 
 if bash "$SCRIPT_DIR/bench_ab.sh" "${args[@]}" --out "$FIRST"; then
-    exit 0
+    finish pass
 fi
 
 if ! grep -q '^\*\*Regression verdict\*\*: FAIL' "$FIRST"; then
-    exit 1
+    finish invalid
 fi
 
 FIRST_ROWS="$(regressed_rows "$FIRST")"
 if [[ -z "$FIRST_ROWS" ]]; then
     echo "Report says FAIL but names no row. Blocking rather than confirming a list that could not be read." >&2
-    exit 1
+    finish invalid
+fi
+
+FIRST_ROWS="$(gating "$FIRST_ROWS")"
+if [[ -z "$FIRST_ROWS" ]]; then
+    echo "Only report rows regressed. Nothing to confirm."
+    finish pass
 fi
 
 echo
@@ -224,29 +204,29 @@ fi
 case "$CONFIRM_STATUS/$CONFIRM_VERDICT" in
     0/PASS|0/CONTROL)
         echo "Second run passes. Treating the first as unconfirmed."
-        exit 0
+        finish pass
         ;;
     1/FAIL)
         ;;
     *)
         echo "Second run gave no valid result (exit $CONFIRM_STATUS, verdict ${CONFIRM_VERDICT:-none}). The first FAIL stands." >&2
-        exit 1
+        finish fail "$FIRST_ROWS"
         ;;
 esac
 
 CONFIRM_ROWS="$(regressed_rows "$CONFIRM")"
 if [[ -z "$CONFIRM_ROWS" ]]; then
     echo "Second report says FAIL but names no row. Blocking rather than clearing on a list that could not be read." >&2
-    exit 1
+    finish fail "$FIRST_ROWS"
 fi
 
 CONFIRMED="$(comm -12 <(sort <<<"$FIRST_ROWS") <(sort <<<"$CONFIRM_ROWS"))"
 
 if [[ -z "$CONFIRMED" ]]; then
     echo "Both runs reported a regression, on disjoint rows. Neither is confirmed."
-    exit 0
+    finish pass
 fi
 
 echo "Regressed in both runs:"
 printf '%s\n' "$CONFIRMED" | sed 's/^/  /'
-exit 1
+finish fail "$CONFIRMED"

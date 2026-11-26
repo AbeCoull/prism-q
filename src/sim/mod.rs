@@ -746,7 +746,7 @@ fn run_route(
                 crate::backend::factored_stabilizer::FactoredStabilizerBackend::with_limits(
                     seed, limits,
                 );
-            let fs_opts = if circuit.num_qubits > 64 {
+            let fs_opts = if circuit.num_qubits >= usize::BITS as usize {
                 SimOptions {
                     probabilities: false,
                 }

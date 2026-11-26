@@ -1328,24 +1328,109 @@ macro_rules! circuit_fn {
     };
 }
 
-circuit_fn!(qft, circuits::qft_circuit, (n: usize), (n));
-circuit_fn!(random, circuits::random_circuit, (n: usize, depth: usize, seed: u64), (n, depth, seed = 42));
-circuit_fn!(hardware_efficient_ansatz, circuits::hardware_efficient_ansatz, (n: usize, layers: usize, seed: u64), (n, layers, seed = 42));
-circuit_fn!(clifford_heavy, circuits::clifford_heavy_circuit, (n: usize, depth: usize, seed: u64), (n, depth, seed = 42));
+#[pyfunction]
+#[pyo3(signature = (n))]
+fn qft(n: usize) -> PyPrismResult<PyCircuit> {
+    if n == 0 || n > u8::MAX as usize {
+        return Err(invalid(format!(
+            "qft requires between 1 and {} qubits, got {n}",
+            u8::MAX
+        )));
+    }
+    Ok(PyCircuit(circuits::qft_circuit(n)))
+}
+
+#[pyfunction]
+#[pyo3(signature = (n, depth, seed = 42))]
+fn random(n: usize, depth: usize, seed: u64) -> PyPrismResult<PyCircuit> {
+    Ok(PyCircuit(circuits::random_circuit(n, depth, seed)))
+}
+
+#[pyfunction]
+#[pyo3(signature = (n, layers, seed = 42))]
+fn hardware_efficient_ansatz(n: usize, layers: usize, seed: u64) -> PyPrismResult<PyCircuit> {
+    Ok(PyCircuit(circuits::hardware_efficient_ansatz(
+        n, layers, seed,
+    )))
+}
+
+#[pyfunction]
+#[pyo3(signature = (n, depth, seed = 42))]
+fn clifford_heavy(n: usize, depth: usize, seed: u64) -> PyPrismResult<PyCircuit> {
+    Ok(PyCircuit(circuits::clifford_heavy_circuit(n, depth, seed)))
+}
+
 circuit_fn!(clifford_random_pairs, circuits::clifford_random_pairs, (n: usize, depth: usize, seed: u64), (n, depth, seed = 42));
-circuit_fn!(qaoa, circuits::qaoa_circuit, (n: usize, layers: usize, seed: u64), (n, layers, seed = 42));
+
+#[pyfunction]
+#[pyo3(signature = (n, layers, seed = 42))]
+fn qaoa(n: usize, layers: usize, seed: u64) -> PyPrismResult<PyCircuit> {
+    Ok(PyCircuit(circuits::qaoa_circuit(n, layers, seed)))
+}
+
 circuit_fn!(single_qubit_rotation, circuits::single_qubit_rotation_circuit, (n: usize, depth: usize, seed: u64), (n, depth, seed = 42));
 circuit_fn!(quantum_volume, circuits::quantum_volume_circuit, (n: usize, depth: usize, seed: u64), (n, depth, seed = 42));
 circuit_fn!(cz_chain, circuits::cz_chain_circuit, (n: usize, depth: usize, seed: u64), (n, depth, seed = 42));
-circuit_fn!(phase_estimation, circuits::phase_estimation_circuit, (n: usize), (n));
-circuit_fn!(independent_bell_pairs, circuits::independent_bell_pairs, (n_pairs: usize), (n_pairs));
-circuit_fn!(independent_random_blocks, circuits::independent_random_blocks, (num_blocks: usize, block_size: usize, depth: usize, seed: u64), (num_blocks, block_size, depth, seed = 42));
-circuit_fn!(local_clifford_blocks, circuits::local_clifford_blocks, (num_blocks: usize, block_size: usize, depth: usize, seed: u64), (num_blocks, block_size, depth, seed = 42));
+
+#[pyfunction]
+#[pyo3(signature = (n))]
+fn phase_estimation(n: usize) -> PyPrismResult<PyCircuit> {
+    if n < 2 {
+        return Err(invalid("phase_estimation requires at least 2 qubits"));
+    }
+    Ok(PyCircuit(circuits::phase_estimation_circuit(n)))
+}
+
+#[pyfunction]
+#[pyo3(signature = (n_pairs))]
+fn independent_bell_pairs(n_pairs: usize) -> PyPrismResult<PyCircuit> {
+    n_pairs
+        .checked_mul(2)
+        .ok_or_else(|| invalid("independent_bell_pairs qubit count overflows usize"))?;
+    Ok(PyCircuit(circuits::independent_bell_pairs(n_pairs)))
+}
+
+#[pyfunction]
+#[pyo3(signature = (num_blocks, block_size, depth, seed = 42))]
+fn independent_random_blocks(
+    num_blocks: usize,
+    block_size: usize,
+    depth: usize,
+    seed: u64,
+) -> PyPrismResult<PyCircuit> {
+    num_blocks
+        .checked_mul(block_size)
+        .ok_or_else(|| invalid("independent_random_blocks qubit count overflows usize"))?;
+    Ok(PyCircuit(circuits::independent_random_blocks(
+        num_blocks, block_size, depth, seed,
+    )))
+}
+
+#[pyfunction]
+#[pyo3(signature = (num_blocks, block_size, depth, seed = 42))]
+fn local_clifford_blocks(
+    num_blocks: usize,
+    block_size: usize,
+    depth: usize,
+    seed: u64,
+) -> PyPrismResult<PyCircuit> {
+    num_blocks
+        .checked_mul(block_size)
+        .ok_or_else(|| invalid("local_clifford_blocks qubit count overflows usize"))?;
+    Ok(PyCircuit(circuits::local_clifford_blocks(
+        num_blocks, block_size, depth, seed,
+    )))
+}
 
 #[pyfunction]
 #[pyo3(signature = (n, depth, t_fraction = 0.1, seed = 42))]
-fn clifford_t(n: usize, depth: usize, t_fraction: f64, seed: u64) -> PyCircuit {
-    PyCircuit(circuits::clifford_t_circuit(n, depth, t_fraction, seed))
+fn clifford_t(n: usize, depth: usize, t_fraction: f64, seed: u64) -> PyPrismResult<PyCircuit> {
+    if !t_fraction.is_finite() || !(0.0..=1.0).contains(&t_fraction) {
+        return Err(invalid("t_fraction must be finite and in [0.0, 1.0]"));
+    }
+    Ok(PyCircuit(circuits::clifford_t_circuit(
+        n, depth, t_fraction, seed,
+    )))
 }
 
 #[pyfunction]

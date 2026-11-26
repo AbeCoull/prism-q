@@ -157,7 +157,17 @@ pub struct GuardedRegion {
 impl GuardedRegion {
     /// Compute the body's qubit union once, so each pass reads it instead of
     /// re-walking the body.
+    ///
+    /// # Panics
+    /// Panics if `body` contains [`Instruction::Save`], which must sit at the
+    /// circuit's top level so execution can split around it.
     pub fn new(condition: ClassicalCondition, body: Vec<Instruction>) -> Self {
+        assert!(
+            !body
+                .iter()
+                .any(|inst| matches!(inst, Instruction::Save { .. })),
+            "save points are not supported inside a guarded region"
+        );
         let mut qubits: SmallVec<[usize; 4]> = SmallVec::new();
         collect_region_qubits(&body, &mut qubits);
         qubits.sort_unstable();

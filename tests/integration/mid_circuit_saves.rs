@@ -407,3 +407,18 @@ fn plan_predicts_density_save_errors_from_register_width() {
         assert_eq!(planned, actual);
     }
 }
+
+#[test]
+#[should_panic(expected = "save points are not supported inside a guarded region")]
+fn guarded_region_rejects_embedded_save_point() {
+    use prism_q::circuit::{ClassicalCondition, GuardedRegion, Instruction};
+
+    let _ = GuardedRegion::new(
+        ClassicalCondition::BitIsZero(0),
+        vec![Instruction::Save {
+            spec: SaveSpec::StateVector,
+            qubits: prism_q::circuit::smallvec![0],
+            label: "nested".into(),
+        }],
+    );
+}

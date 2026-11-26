@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from prism_q import BackendKind, circuits, simulate
+from prism_q import BackendKind, Limits, PrismError, circuits, simulate
 
 
 def test_wide_factored_result_needs_no_dense_vector():
@@ -84,3 +84,35 @@ def test_a_narrow_independent_circuit_still_answers_dense():
     assert outcome.probabilities_factored() is None
     assert outcome.num_basis_states == 16
     np.testing.assert_allclose(float(outcome.probabilities.sum()), 1.0, atol=1e-12)
+
+
+def test_factored_dense_probabilities_respects_probability_limit():
+    """A factored run stays usable when `.probabilities` is over `max_probability_qubits`."""
+    outcome = (
+        simulate(circuits.independent_bell_pairs(5))
+        .limits(Limits(max_probability_qubits=4))
+        .seed(42)
+        .run()
+    )
+    assert outcome.num_basis_states == 2**10
+    assert outcome.probabilities_factored() is not None
+    with pytest.raises(PrismError) as exc_info:
+        _ = outcome.probabilities
+    assert exc_info.value.kind == "resource_limit"
+
+
+def test_circuit_builder_validation_raises_prism_error():
+    with pytest.raises(PrismError):
+        circuits.qft(0)
+    with pytest.raises(PrismError):
+        circuits.qft(256)
+    with pytest.raises(PrismError):
+        circuits.phase_estimation(1)
+    with pytest.raises(PrismError):
+        circuits.clifford_t(2, 1, t_fraction=float("nan"))
+    with pytest.raises(PrismError):
+        circuits.clifford_t(2, 1, t_fraction=1.5)
+    assert circuits.random(0, 2, seed=42).num_qubits == 0
+    assert circuits.hardware_efficient_ansatz(0, 2, seed=42).num_qubits == 0
+    assert circuits.clifford_heavy(0, 2, seed=42).num_qubits == 0
+    assert circuits.qaoa(0, 2, seed=42).num_qubits == 0

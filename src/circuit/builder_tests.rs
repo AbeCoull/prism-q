@@ -228,3 +228,47 @@ fn builder_mcu() {
         _ => panic!("expected Gate instruction"),
     }
 }
+
+#[test]
+fn guarded_propagates_classical_bits_from_measure_all() {
+    let c = CircuitBuilder::new_with_classical(2, 1)
+        .x(0)
+        .measure(0, 0)
+        .guarded(ClassicalCondition::BitIsOne(0), |g| {
+            g.x(1).measure_all();
+        })
+        .build();
+    assert_eq!(c.num_classical_bits, 2);
+    let outcome = crate::sim::simulate(&c)
+        .backend(crate::sim::BackendKind::Statevector)
+        .seed(42)
+        .run()
+        .unwrap();
+    assert_eq!(outcome.classical_bits, vec![true, true]);
+}
+
+#[test]
+fn guarded_propagates_parity_scratch_and_num_qubits() {
+    let c = CircuitBuilder::new_with_classical(1, 1)
+        .x(0)
+        .guarded(ClassicalCondition::BitIsZero(0), |g| {
+            g.measure_pauli_product(&[PauliTerm::z(0)], 0);
+        })
+        .measure_pauli_product(&[PauliTerm::z(0)], 0)
+        .build();
+    assert_eq!(c.num_qubits, 2);
+    let outcome = crate::sim::simulate(&c)
+        .backend(crate::sim::BackendKind::Statevector)
+        .seed(42)
+        .run()
+        .unwrap();
+    assert_eq!(outcome.classical_bits, vec![true]);
+}
+
+#[test]
+#[should_panic(expected = "guarded")]
+fn guarded_rejects_param_inside_body() {
+    CircuitBuilder::new_with_classical(1, 1).guarded(ClassicalCondition::BitIsOne(0), |g| {
+        g.rx(0.0, 0).param(0);
+    });
+}

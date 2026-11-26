@@ -29,12 +29,21 @@ pub enum Probabilities {
 }
 
 impl Probabilities {
+    /// Number of basis states (`2^n`) when representable in `usize`, or `None`
+    /// if `2^n` overflows `usize`.
+    pub(crate) fn checked_len(&self) -> Option<usize> {
+        match self {
+            Probabilities::Dense(v) => Some(v.len()),
+            Probabilities::Factored { total_qubits, .. } => u32::try_from(*total_qubits)
+                .ok()
+                .and_then(|bits| 1usize.checked_shl(bits)),
+        }
+    }
+
     /// Number of basis states (2^n).
     pub fn len(&self) -> usize {
-        match self {
-            Probabilities::Dense(v) => v.len(),
-            Probabilities::Factored { total_qubits, .. } => 1 << total_qubits,
-        }
+        self.checked_len()
+            .expect("number of basis states overflows usize")
     }
 
     /// Always false, a probability distribution has at least one state.
@@ -101,22 +110,41 @@ impl Probabilities {
     ///
     /// [`ReducedDensityMatrix::data`]: crate::sim::ReducedDensityMatrix::data
     pub fn subset_marginal(&self, qubits: &[usize]) -> Vec<f64> {
-        let width = 1usize << qubits.len();
+        let width = u32::try_from(qubits.len())
+            .ok()
+            .and_then(|bits| 1usize.checked_shl(bits))
+            .expect("subset marginal width overflows usize");
         match self {
             Probabilities::Dense(v) => {
+                let total_qubits = v.len().ilog2() as usize;
+                for &q in qubits {
+                    assert!(
+                        q < total_qubits,
+                        "qubit {q} out of range for {total_qubits} qubits"
+                    );
+                }
                 let mut out = vec![0.0f64; width];
                 for (index, &p) in v.iter().enumerate() {
                     out[gather_bits(index, qubits)] += p;
                 }
                 out
             }
-            Probabilities::Factored { blocks, .. } => {
+            Probabilities::Factored {
+                blocks,
+                total_qubits,
+            } => {
+                for &q in qubits {
+                    assert!(
+                        q < *total_qubits,
+                        "qubit {q} out of range for {total_qubits} qubits"
+                    );
+                }
                 let mut out = vec![1.0f64; width];
                 for block in blocks {
                     let picks: Vec<(usize, usize)> = qubits
                         .iter()
                         .enumerate()
-                        .filter(|&(_, &q)| block.mask >> q & 1 == 1)
+                        .filter(|&(_, &q)| q < u64::BITS as usize && (block.mask >> q) & 1 == 1)
                         .map(|(out_bit, &q)| (local_bit(block.mask, q), out_bit))
                         .collect();
                     if picks.is_empty() {
@@ -155,7 +183,17 @@ impl Probabilities {
     pub fn get(&self, index: usize) -> f64 {
         match self {
             Probabilities::Dense(v) => v[index],
-            Probabilities::Factored { blocks, .. } => {
+            Probabilities::Factored {
+                blocks,
+                total_qubits,
+            } => {
+                if *total_qubits < usize::BITS as usize {
+                    let len = 1usize << *total_qubits;
+                    assert!(
+                        index < len,
+                        "index out of bounds: the len is {len} but the index is {index}"
+                    );
+                }
                 let mut p = 1.0;
                 for block in blocks {
                     let local = pack_masked_bits(index, block.mask);
@@ -173,14 +211,13 @@ impl Probabilities {
             Probabilities::Dense(v) => ProbabilitiesIter {
                 inner: ProbabilitiesIterInner::Dense(v.iter().copied()),
             },
-            Probabilities::Factored {
-                blocks,
-                total_qubits,
-            } => ProbabilitiesIter {
+            Probabilities::Factored { blocks, .. } => ProbabilitiesIter {
                 inner: ProbabilitiesIterInner::Factored {
                     blocks,
                     next: 0,
-                    len: 1usize << total_qubits,
+                    len: self
+                        .checked_len()
+                        .expect("number of basis states overflows usize"),
                 },
             },
         }
@@ -191,11 +228,10 @@ impl Probabilities {
     pub fn to_vec(&self) -> Vec<f64> {
         match self {
             Probabilities::Dense(v) => v.clone(),
-            Probabilities::Factored {
-                blocks,
-                total_qubits,
-            } => {
-                let n = 1usize << total_qubits;
+            Probabilities::Factored { blocks, .. } => {
+                let n = self
+                    .checked_len()
+                    .expect("number of basis states overflows usize");
                 let mut result = vec![0.0f64; n];
                 #[cfg(feature = "parallel")]
                 {
@@ -231,15 +267,16 @@ impl Probabilities {
 /// Pack the bits `index` holds at `qubits` into a dense index, `qubits[0]`
 /// lowest.
 fn gather_bits(index: usize, qubits: &[usize]) -> usize {
-    qubits
-        .iter()
-        .enumerate()
-        .fold(0usize, |acc, (bit, &q)| acc | (index >> q & 1) << bit)
+    qubits.iter().enumerate().fold(0usize, |acc, (bit, &q)| {
+        assert!(q < usize::BITS as usize, "qubit index {q} overflows usize");
+        acc | (index >> q & 1) << bit
+    })
 }
 
 /// Position of global qubit `q` within a block's local index, which counts the
 /// block's qubits below it.
 fn local_bit(mask: u64, q: usize) -> usize {
+    assert!(q < u64::BITS as usize, "qubit index {q} overflows u64");
     (mask & ((1u64 << q) - 1)).count_ones() as usize
 }
 

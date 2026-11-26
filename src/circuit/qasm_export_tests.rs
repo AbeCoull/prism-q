@@ -144,3 +144,28 @@ fn empty_barrier_has_no_spelling() {
     circuit.add_barrier(&[]);
     assert!(to_qasm3(&circuit).is_err());
 }
+
+#[test]
+fn xx_plus_and_minus_yy_round_trip_with_beta() {
+    for (theta, beta) in [(0.6, 0.3), (-0.6, -0.3), (1.1, -0.8)] {
+        let plus_mat = gate_library::xx_plus_yy_matrix(theta, beta);
+        let plus_round = reparse(&one_gate(Gate::Fused2q(Box::new(plus_mat)), &[0, 1]));
+        let Instruction::Gate {
+            gate: plus_gate, ..
+        } = &plus_round.instructions[0]
+        else {
+            panic!("expected a gate");
+        };
+        assert!(close_4x4(&plus_gate.matrix_4x4(), &plus_mat));
+
+        let minus_mat = gate_library::xx_minus_yy_matrix(theta, beta);
+        let minus_round = reparse(&one_gate(Gate::Fused2q(Box::new(minus_mat)), &[0, 1]));
+        let Instruction::Gate {
+            gate: minus_gate, ..
+        } = &minus_round.instructions[0]
+        else {
+            panic!("expected a gate");
+        };
+        assert!(close_4x4(&minus_gate.matrix_4x4(), &minus_mat));
+    }
+}

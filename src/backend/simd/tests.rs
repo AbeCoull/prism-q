@@ -1,3 +1,8 @@
+#[cfg(target_arch = "x86_64")]
+use super::gate1q::{
+    apply_diagonal_loop_avx2fma, apply_diagonal_loop_avx512, apply_diagonal_loop_fma,
+    apply_diagonal_scalar,
+};
 use super::gate1q::{apply_slices_scalar, sandwich_1q_blocked_scalar};
 #[cfg(all(target_arch = "x86_64", feature = "distributed"))]
 use super::slice::{
@@ -634,9 +639,7 @@ fn scalar_full_apply(state: &mut [Complex64], target: usize, mat: &[[Complex64; 
 #[test]
 fn apply_full_sequential_every_tier_matches_scalar() {
     let mat = asymmetric_gate();
-    // Cover the AVX2 size/target guard boundary (target >= 2 and small state
-    // takes the 256-bit path; otherwise the 128-bit fallback).
-    for nq in [3usize, 5, 8] {
+    for nq in [1usize, 2, 3, 4, 5, 6, 8] {
         let dim = 1usize << nq;
         let state0: Vec<Complex64> = (0..dim)
             .map(|i| c(0.013 * i as f64 + 0.1, -0.017 * i as f64))
@@ -649,12 +652,22 @@ fn apply_full_sequential_every_tier_matches_scalar() {
                 let mut prepared = PreparedGate1q::new(&mat);
                 let name = tier_name(&tier);
                 prepared.tier = tier;
+
                 let mut state = state0.clone();
                 prepared.apply_full_sequential(&mut state, target);
                 for i in 0..dim {
                     assert!(
                         (state[i] - reference[i]).norm() < EPS,
-                        "tier {name} nq={nq} target={target} diverged at index {i}"
+                        "sequential tier {name} nq={nq} target={target} diverged at index {i}"
+                    );
+                }
+
+                let mut tiled = state0.clone();
+                prepared.apply_tiled(&mut tiled, target);
+                for i in 0..dim {
+                    assert!(
+                        (tiled[i] - reference[i]).norm() < EPS,
+                        "tiled tier {name} nq={nq} target={target} diverged at index {i}"
                     );
                 }
             }
@@ -789,13 +802,150 @@ fn avx512_prepared_1q_matches_avx2() {
         assert_state_close(&got_lo, &want_lo, &format!("apply lo n={n}"));
         assert_state_close(&got_hi, &want_hi, &format!("apply hi n={n}"));
     }
-    for nq in [3usize, 6, 9] {
+    for nq in [1usize, 2, 3, 6, 9] {
         let state0 = random_amplitudes(&mut rng, 1 << nq);
         for target in 0..nq {
             let (mut want, mut got) = (state0.clone(), state0.clone());
             narrow.apply_tiled(&mut want, target);
             wide.apply_tiled(&mut got, target);
             assert_state_close(&got, &want, &format!("tiled nq={nq} target={target}"));
+
+            let (mut want_seq, mut got_seq) = (state0.clone(), state0.clone());
+            narrow.apply_full_sequential(&mut want_seq, target);
+            wide.apply_full_sequential(&mut got_seq, target);
+            assert_state_close(&got_seq, &want_seq, &format!("seq nq={nq} target={target}"));
+        }
+    }
+}
+
+fn scalar_diagonal_apply(
+    state: &mut [Complex64],
+    target: usize,
+    d0: Complex64,
+    d1: Complex64,
+    skip_lo: bool,
+) {
+    let half = 1usize << target;
+    let mask = half - 1;
+    let num_pairs = state.len() >> 1;
+    for k in 0..num_pairs {
+        let i0 = (k & !mask) << 1 | (k & mask);
+        let i1 = i0 | half;
+        if !skip_lo {
+            state[i0] *= d0;
+        }
+        state[i1] *= d1;
+    }
+}
+
+#[test]
+fn apply_diagonal_sequential_every_tier_matches_scalar() {
+    let gates = [
+        ("Z", c(1.0, 0.0), c(-1.0, 0.0), true),
+        ("S", c(1.0, 0.0), c(0.0, 1.0), true),
+        (
+            "T",
+            c(1.0, 0.0),
+            Complex64::from_polar(1.0, std::f64::consts::FRAC_PI_4),
+            true,
+        ),
+        ("P", c(1.0, 0.0), Complex64::from_polar(1.0, 0.73), true),
+        (
+            "Rz",
+            Complex64::from_polar(1.0, -0.615),
+            Complex64::from_polar(1.0, 0.615),
+            false,
+        ),
+        ("asym", c(0.7, -0.4), c(-0.3, 0.9), false),
+    ];
+
+    for nq in 1..=6 {
+        let dim = 1usize << nq;
+        let mut state0: Vec<Complex64> = (0..dim)
+            .map(|i| c(0.013 * i as f64 + 0.1, -0.017 * i as f64))
+            .collect();
+        state0[0] = c(-0.0, 0.25);
+
+        for target in 0..nq {
+            let half = 1usize << target;
+            for &(name, d0, d1, skip_lo) in &gates {
+                let mut reference = state0.clone();
+                scalar_diagonal_apply(&mut reference, target, d0, d1, skip_lo);
+
+                let assert_diag = |got: &[Complex64], label: &str| {
+                    assert_state_close(got, &reference, label);
+                    if skip_lo {
+                        for (i, (g, o)) in got.iter().zip(&state0).enumerate() {
+                            if (i & half) == 0 {
+                                assert_eq!(
+                                    (g.re.to_bits(), g.im.to_bits()),
+                                    (o.re.to_bits(), o.im.to_bits()),
+                                    "{label} skip_lo modified lo amplitude at {i}"
+                                );
+                            }
+                        }
+                    }
+                };
+
+                let mut dispatched = state0.clone();
+                apply_diagonal_sequential(&mut dispatched, target, d0, d1, skip_lo);
+                assert_diag(
+                    &dispatched,
+                    &format!("dispatch {name} nq={nq} target={target}"),
+                );
+
+                #[cfg(target_arch = "x86_64")]
+                {
+                    let mut scalar = state0.clone();
+                    apply_diagonal_scalar(&mut scalar, target, d0, d1, skip_lo);
+                    assert_diag(&scalar, &format!("scalar {name} nq={nq} target={target}"));
+
+                    if has_fma() {
+                        let mut fma_state = state0.clone();
+                        // SAFETY: FMA detected above, and state0.len() is 2^nq >= 2 << target.
+                        unsafe {
+                            let d0_rr = std::arch::x86_64::_mm_set1_pd(d0.re);
+                            let d0_ii = std::arch::x86_64::_mm_set1_pd(d0.im);
+                            let d1_rr = std::arch::x86_64::_mm_set1_pd(d1.re);
+                            let d1_ii = std::arch::x86_64::_mm_set1_pd(d1.im);
+                            apply_diagonal_loop_fma(
+                                &mut fma_state,
+                                target,
+                                d0_rr,
+                                d0_ii,
+                                d1_rr,
+                                d1_ii,
+                                skip_lo,
+                            );
+                        }
+                        assert_diag(&fma_state, &format!("fma {name} nq={nq} target={target}"));
+                    }
+
+                    if has_avx2_fma() {
+                        let mut avx2_state = state0.clone();
+                        // SAFETY: AVX2 and FMA detected above, and state0.len() is 2^nq >= 2 << target.
+                        unsafe {
+                            apply_diagonal_loop_avx2fma(&mut avx2_state, target, d0, d1, skip_lo);
+                        }
+                        assert_diag(
+                            &avx2_state,
+                            &format!("avx2fma {name} nq={nq} target={target}"),
+                        );
+                    }
+
+                    if crate::backend::word_ops::avx512_test_host() {
+                        let mut avx512_state = state0.clone();
+                        // SAFETY: AVX-512F detected above, and state0.len() is 2^nq >= 2 << target.
+                        unsafe {
+                            apply_diagonal_loop_avx512(&mut avx512_state, target, d0, d1, skip_lo);
+                        }
+                        assert_diag(
+                            &avx512_state,
+                            &format!("avx512 {name} nq={nq} target={target}"),
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -956,16 +1106,16 @@ fn target_feature_kernel_count_is_pinned() {
     // Per-file expected counts; the breakdown makes a drift easy to localise.
     let expected: [(&str, usize); 17] = [
         ("src/backend/simd/mod.rs", 3),
-        ("src/backend/simd/gate1q.rs", 14),
+        ("src/backend/simd/gate1q.rs", 18),
         ("src/backend/simd/gate2q.rs", 8),
         ("src/backend/simd/kraus.rs", 3),
         ("src/backend/simd/slice.rs", 21),
         ("src/backend/simd/walsh.rs", 2),
         ("src/backend/word_ops.rs", 3),
         ("src/backend/stabilizer/kernels/simd.rs", 5),
-        ("src/backend/statevector/kernels/mod.rs", 0),
+        ("src/backend/statevector/kernels/mod.rs", 2),
         ("src/backend/statevector/kernels/batch_tables/mod.rs", 4),
-        ("src/backend/statevector/kernels/pauli_rot.rs", 0),
+        ("src/backend/statevector/kernels/pauli_rot.rs", 4),
         ("src/backend/statevector/kernels/qft/mod.rs", 27),
         ("src/backend/statevector/kernels/tiling.rs", 0),
         ("src/sim/compiled/accumulator.rs", 2),

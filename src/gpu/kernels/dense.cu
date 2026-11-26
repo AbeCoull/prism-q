@@ -904,69 +904,96 @@ extern "C" __global__ void apply_gate_1q_from_buffer(
     }
 }
 
-// sv_pauli_expect: per-block complex partials of
+// sv_pauli_expect: per-block partials of
 // sum_j conj(state[j ^ x]) * state[j] * (-1)^{popcount(j & z)} for every mask of
-// group g = group_base + blockIdx.y, PAULI_AMPS_PER_THREAD amplitudes per thread. A group holds up to
-// PAULI_GROUP_MASKS masks sharing one x, so each amplitude pair is read and
-// multiplied once for the whole group and only the sign differs per mask. The
-// product order matches the host reduction, so an x == 0 mask lands exactly on
-// |amp|^2 with a zero imaginary part.
+// group g = group_base + blockIdx.y. A group holds up to PAULI_GROUP_MASKS masks
+// sharing one x, so each state load is reused across the group.
+//
+// When x == 0, threads grid-stride over 0..dim, load state[j] once, and sum
+// (-1)^{popcount(j & z)} * |state[j]|^2 directly into a real partial.
+// When x != 0, threads grid-stride over 0..(dim / 2) pairs (i0, i1 = i0 ^ x)
+// via insert_zero_bit_u64(k, tz(x)). Because partner contributions are
+// conjugates with relative sign (-1)^{popcount(x & z)}, each mask needs only
+// one scalar accumulator: real when popcount(x & z) is even, imaginary when
+// odd, scaled by 2.0 once per block at lane 0.
 //
 // groups = [x_0 .. x_{G-1}, start_0 .. start_G] and members = [z_0 .. z_{M-1},
 // slot_0 .. slot_{M-1}], a group's members contiguous. Partials go to the
-// member's slot, laid out [slot][block][re, im], and are reduced by
-// dm_pauli_expect_finalize.
+// member's slot as [slot][block][re, im] for dm_pauli_expect_finalize.
 #define PAULI_GROUP_MASKS {{PAULI_GROUP_MASKS}}
-#define PAULI_AMPS_PER_THREAD {{PAULI_AMPS_PER_THREAD}}
+
+__device__ __forceinline__ unsigned long long insert_zero_bit_u64(
+    unsigned long long k, int bit)
+{
+    unsigned long long low = (1ULL << bit) - 1ULL;
+    return ((k & ~low) << 1) | (k & low);
+}
+
 extern "C" __global__ void sv_pauli_expect(
     const double2 *state, unsigned long long dim,
     const unsigned long long *groups, unsigned int num_groups, unsigned int group_base,
     const unsigned long long *members, unsigned int num_masks, double *out_partials)
 {
-    __shared__ double warp_sums[PAULI_GROUP_MASKS][2][32];
+    __shared__ double warp_sums[PAULI_GROUP_MASKS][32];
     unsigned int g = group_base + blockIdx.y;
     unsigned long long x = groups[g];
     unsigned int start = (unsigned int)groups[num_groups + g];
     unsigned int count = (unsigned int)groups[num_groups + g + 1] - start;
     unsigned long long z[PAULI_GROUP_MASKS];
-    double re[PAULI_GROUP_MASKS], im[PAULI_GROUP_MASKS];
+    double acc[PAULI_GROUP_MASKS];
+    unsigned int imag_bits = 0u;
 #pragma unroll
     for (int m = 0; m < PAULI_GROUP_MASKS; ++m) {
-        z[m] = m < count ? members[start + m] : 0ULL;
-        re[m] = 0.0;
-        im[m] = 0.0;
+        z[m] = (unsigned int)m < count ? members[start + m] : 0ULL;
+        acc[m] = 0.0;
+        if ((unsigned int)m < count && (__popcll(x & z[m]) & 1)) {
+            imag_bits |= (1u << m);
+        }
     }
-    unsigned long long j =
-        (unsigned long long)blockIdx.x * (blockDim.x * PAULI_AMPS_PER_THREAD) + threadIdx.x;
-    for (int rep = 0; rep < PAULI_AMPS_PER_THREAD; ++rep) {
-        if (j < dim) {
+    unsigned long long tid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long stride = (unsigned long long)gridDim.x * blockDim.x;
+    if (x == 0ULL) {
+        for (unsigned long long j = tid; j < dim; j += stride) {
             double2 a = state[j];
-            double2 p = state[j ^ x];
-            double pr = p.x * a.x + p.y * a.y;
-            double pi = p.x * a.y - p.y * a.x;
+            double p = a.x * a.x + a.y * a.y;
 #pragma unroll
             for (int m = 0; m < PAULI_GROUP_MASKS; ++m) {
-                if (m < count) {
+                if ((unsigned int)m < count) {
                     double sign = (__popcll(j & z[m]) & 1) ? -1.0 : 1.0;
-                    re[m] += sign * pr;
-                    im[m] += sign * pi;
+                    acc[m] += sign * p;
                 }
             }
         }
-        j += blockDim.x;
+    } else {
+        int tz = __ffsll((long long)x) - 1;
+        unsigned long long pairs = dim >> 1;
+        for (unsigned long long k = tid; k < pairs; k += stride) {
+            unsigned long long i0 = insert_zero_bit_u64(k, tz);
+            unsigned long long i1 = i0 ^ x;
+            double2 a = state[i0];
+            double2 b = state[i1];
+            double cr = b.x * a.x + b.y * a.y;
+            double ci = b.x * a.y - b.y * a.x;
+#pragma unroll
+            for (int m = 0; m < PAULI_GROUP_MASKS; ++m) {
+                if ((unsigned int)m < count) {
+                    double v = ((imag_bits >> m) & 1u) ? ci : cr;
+                    double sign = (__popcll(i0 & z[m]) & 1) ? -1.0 : 1.0;
+                    acc[m] += sign * v;
+                }
+            }
+        }
     }
     unsigned int lane = threadIdx.x & 31;
     unsigned int warp = threadIdx.x >> 5;
 #pragma unroll
     for (int m = 0; m < PAULI_GROUP_MASKS; ++m) {
-        if (m < count) {
+        if ((unsigned int)m < count) {
             for (int offset = 16; offset > 0; offset >>= 1) {
-                re[m] += __shfl_down_sync(0xffffffffu, re[m], offset);
-                im[m] += __shfl_down_sync(0xffffffffu, im[m], offset);
+                acc[m] += __shfl_down_sync(0xffffffffu, acc[m], offset);
             }
             if (lane == 0) {
-                warp_sums[m][0][warp] = re[m];
-                warp_sums[m][1][warp] = im[m];
+                warp_sums[m][warp] = acc[m];
             }
         }
     }
@@ -974,17 +1001,19 @@ extern "C" __global__ void sv_pauli_expect(
     if (warp == 0) {
         unsigned int num_warps = blockDim.x >> 5;
         for (unsigned int m = 0; m < count; ++m) {
-            double r = lane < num_warps ? warp_sums[m][0][lane] : 0.0;
-            double i = lane < num_warps ? warp_sums[m][1][lane] : 0.0;
+            double v = lane < num_warps ? warp_sums[m][lane] : 0.0;
             for (int offset = 16; offset > 0; offset >>= 1) {
-                r += __shfl_down_sync(0xffffffffu, r, offset);
-                i += __shfl_down_sync(0xffffffffu, i, offset);
+                v += __shfl_down_sync(0xffffffffu, v, offset);
             }
             if (lane == 0) {
+                if (x != 0ULL) {
+                    v *= 2.0;
+                }
+                bool is_imag = ((imag_bits >> m) & 1u) != 0u;
                 unsigned long long slot =
                     (members[num_masks + start + m] * gridDim.x + blockIdx.x) * 2ULL;
-                out_partials[slot] = r;
-                out_partials[slot + 1] = i;
+                out_partials[slot] = is_imag ? 0.0 : v;
+                out_partials[slot + 1] = is_imag ? v : 0.0;
             }
         }
     }

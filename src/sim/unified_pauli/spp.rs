@@ -8,7 +8,7 @@ use rand_chacha::ChaCha8Rng;
 
 use super::{
     PauliAxis, PauliTerm, clifford_conjugation_phase, count_branching_gates, pauli_vec_from_terms,
-    validate_and_lower, z_rotation_angle, zz_rotation_angle,
+    snapped_sin_cos, validate_and_lower, z_rotation_angle, zz_rotation_angle,
 };
 use crate::circuit::clifford_t::is_pauli_native;
 use crate::circuit::{Circuit, Instruction, SmallVec, smallvec};
@@ -90,9 +90,9 @@ fn flush_cliff_buf(buf: &mut Vec<(Gate, SmallVec<[usize; 4]>)>, ops: &mut Vec<Co
 /// loop stays free of trigonometry.
 #[derive(Clone, Copy)]
 pub(super) struct RotBranch {
-    p_keep: f64,
-    keep_weight: f64,
-    flip_weight_im: f64,
+    pub(super) p_keep: f64,
+    pub(super) keep_weight: f64,
+    pub(super) flip_weight_im: f64,
 }
 
 impl RotBranch {
@@ -106,7 +106,7 @@ impl RotBranch {
     /// coefficient magnitude, so the per-sample weight magnitude is
     /// `|cos| + |sin|`: 1 at the Clifford angles, `sqrt(2)` at `theta = pi/4`.
     pub(super) fn new(theta: f64) -> Self {
-        let (sin, cos) = theta.sin_cos();
+        let (sin, cos) = snapped_sin_cos(theta);
         let norm1 = cos.abs() + sin.abs();
         Self {
             p_keep: cos.abs() / norm1,
@@ -139,7 +139,9 @@ pub(super) fn branch_z_rotation(
         return Complex64::new(1.0, 0.0);
     }
 
-    if rng.random_bool(branch.p_keep) {
+    if branch.p_keep == 1.0
+        || (branch.p_keep > 0.0 && branch.p_keep < 1.0 && rng.random_bool(branch.p_keep))
+    {
         return Complex64::new(branch.keep_weight, 0.0);
     }
 
@@ -215,7 +217,11 @@ fn branch_pauli_string(pauli: &mut PauliVec, rot: &StringRot, rng: &mut impl Rng
         return Complex64::new(1.0, 0.0);
     }
 
-    if rng.random_bool(rot.branch.p_keep) {
+    if rot.branch.p_keep == 1.0
+        || (rot.branch.p_keep > 0.0
+            && rot.branch.p_keep < 1.0
+            && rng.random_bool(rot.branch.p_keep))
+    {
         return Complex64::new(rot.branch.keep_weight, 0.0);
     }
 
@@ -233,15 +239,12 @@ fn branch_pauli_string(pauli: &mut PauliVec, rot: &StringRot, rng: &mut impl Rng
     }
 }
 
-pub(super) fn backward_propagate_coalesced(
+#[inline]
+fn backward_propagate_in_place(
     ops: &[CoalescedOp],
-    observable: &PauliVec,
+    pauli: &mut PauliVec,
     rng: &mut impl Rng,
-) -> (PauliVec, Complex64) {
-    let mut pauli = PauliVec {
-        x: observable.x.clone(),
-        z: observable.z.clone(),
-    };
+) -> Complex64 {
     let mut weight = Complex64::new(1.0, 0.0);
 
     for op in ops.iter().rev() {
@@ -253,7 +256,7 @@ pub(super) fn backward_propagate_coalesced(
                     // bare `propagate_backward` is Pauli-frame only
                     // and drops the `-1` from e.g. `HYH = -Y`.
                     weight *= clifford_conjugation_phase(gate, targets, &pauli.x, &pauli.z);
-                    propagate_backward(&mut pauli, gate, targets);
+                    propagate_backward(pauli, gate, targets);
                 }
             }
             CoalescedOp::ZRot {
@@ -261,14 +264,36 @@ pub(super) fn backward_propagate_coalesced(
                 pair,
                 branch,
             } => {
-                weight *= branch_z_rotation(&mut pauli, *qubit, *pair, branch, rng);
+                weight *= branch_z_rotation(pauli, *qubit, *pair, branch, rng);
             }
             CoalescedOp::String(rot) => {
-                weight *= branch_pauli_string(&mut pauli, rot, rng);
+                weight *= branch_pauli_string(pauli, rot, rng);
             }
         }
     }
 
+    weight
+}
+
+pub(super) fn backward_propagate_coalesced_into(
+    ops: &[CoalescedOp],
+    observable: &PauliVec,
+    pauli: &mut PauliVec,
+    rng: &mut impl Rng,
+) -> Complex64 {
+    pauli.x.copy_from_slice(&observable.x);
+    pauli.z.copy_from_slice(&observable.z);
+    backward_propagate_in_place(ops, pauli, rng)
+}
+
+#[cfg(test)]
+pub(super) fn backward_propagate_coalesced(
+    ops: &[CoalescedOp],
+    observable: &PauliVec,
+    rng: &mut impl Rng,
+) -> (PauliVec, Complex64) {
+    let mut pauli = observable.clone();
+    let weight = backward_propagate_in_place(ops, &mut pauli, rng);
     (pauli, weight)
 }
 
@@ -325,19 +350,24 @@ impl Welford {
 fn estimate_qubit_expectation(
     ops: &[CoalescedOp],
     qubit: usize,
-    num_words: usize,
     num_samples: usize,
     seed: u64,
+    pauli: &mut PauliVec,
 ) -> (f64, f64, usize) {
-    let obs = PauliVec::z_on_qubit(num_words, qubit);
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
-
     let mut stats = Welford::default();
     let mut nonzero = 0usize;
+    let word = qubit / 64;
+    let bit = 1u64 << (qubit % 64);
 
     for _ in 0..num_samples {
-        let (pauli, weight) = backward_propagate_coalesced(ops, &obs, &mut rng);
-        let val = if pauli.is_diagonal() {
+        pauli.x.fill(0);
+        pauli.z.fill(0);
+        pauli.z[word] = bit;
+        let weight = backward_propagate_in_place(ops, pauli, &mut rng);
+        let val = if weight.re.is_nan() || weight.im.is_nan() {
+            f64::NAN
+        } else if pauli.is_diagonal() {
             nonzero += 1;
             weight.re
         } else {
@@ -393,10 +423,13 @@ pub fn run_spp_observable(
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut stats = Welford::default();
     let mut nonzero = 0usize;
+    let mut pauli = PauliVec::new(obs.x.len());
 
     for _ in 0..num_samples {
-        let (pauli, weight) = backward_propagate_coalesced(&ops, &obs, &mut rng);
-        let val = if pauli.is_diagonal() {
+        let weight = backward_propagate_coalesced_into(&ops, &obs, &mut pauli, &mut rng);
+        let val = if weight.re.is_nan() || weight.im.is_nan() {
+            f64::NAN
+        } else if pauli.is_diagonal() {
             nonzero += 1;
             (obs_coeff * weight).re
         } else {
@@ -454,30 +487,36 @@ pub fn run_spp(circuit: &Circuit, num_samples: usize, seed: u64) -> Result<SppRe
         use rayon::prelude::*;
         (0..n)
             .into_par_iter()
-            .map(|q| {
-                estimate_qubit_expectation(
-                    &ops,
-                    q,
-                    num_words,
-                    num_samples,
-                    crate::sim::mix_seed(seed, q),
-                )
-            })
+            .map_init(
+                || PauliVec::new(num_words),
+                |pauli, q| {
+                    estimate_qubit_expectation(
+                        &ops,
+                        q,
+                        num_samples,
+                        crate::sim::mix_seed(seed, q),
+                        pauli,
+                    )
+                },
+            )
             .collect()
     };
 
     #[cfg(not(feature = "parallel"))]
-    let results: Vec<(f64, f64, usize)> = (0..n)
-        .map(|q| {
-            estimate_qubit_expectation(
-                &ops,
-                q,
-                num_words,
-                num_samples,
-                crate::sim::mix_seed(seed, q),
-            )
-        })
-        .collect();
+    let results: Vec<(f64, f64, usize)> = {
+        let mut pauli = PauliVec::new(num_words);
+        (0..n)
+            .map(|q| {
+                estimate_qubit_expectation(
+                    &ops,
+                    q,
+                    num_samples,
+                    crate::sim::mix_seed(seed, q),
+                    &mut pauli,
+                )
+            })
+            .collect()
+    };
 
     let mut expectations = Vec::with_capacity(n);
     let mut std_errors = Vec::with_capacity(n);

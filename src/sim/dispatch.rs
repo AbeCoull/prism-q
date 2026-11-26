@@ -515,48 +515,74 @@ pub(super) enum Family {
     DensityMatrix,
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static SPARSE_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn select_auto_backend_choice(
     circuit: &Circuit,
     has_partial_independence: bool,
     limits: &ResolvedLimits,
 ) -> Family {
+    select_auto_backend_choice_with_probe(circuit, has_partial_independence, limits).0
+}
+
+fn select_auto_backend_choice_with_probe(
+    circuit: &Circuit,
+    has_partial_independence: bool,
+    limits: &ResolvedLimits,
+) -> (Family, Option<SparseBackend>) {
     if !circuit.has_entangling_gates() {
-        Family::ProductState
+        (Family::ProductState, None)
     } else if circuit.is_clifford_only() {
-        Family::Stabilizer
+        (Family::Stabilizer, None)
     } else if circuit.num_qubits > limits.statevector_qubits.value {
-        if circuit.num_qubits <= MAX_SPARSE_INDEX_QUBITS
-            && (circuit.is_sparse_friendly()
-                || sparse_support_fits(circuit, AUTO_SPARSE_MAX_SUPPORT, limits))
-        {
-            Family::Sparse
-        } else {
-            Family::Mps
+        if circuit.num_qubits <= MAX_SPARSE_INDEX_QUBITS {
+            if circuit.is_sparse_friendly() {
+                return (Family::Sparse, None);
+            }
+            if let Some(probe) = sparse_support_probe(circuit, AUTO_SPARSE_MAX_SUPPORT, limits) {
+                return (Family::Sparse, Some(probe));
+            }
         }
+        (Family::Mps, None)
     } else if has_partial_independence {
-        Family::Factored
+        (Family::Factored, None)
     } else {
-        Family::Statevector
+        (Family::Statevector, None)
     }
 }
 
-/// Run the circuit's gates on a sparse map and report whether it stays within
-/// `cap` entries throughout. Declines resets, saves, and anything after a
-/// measurement, whose branch could reach a different support.
-fn sparse_support_fits(circuit: &Circuit, cap: usize, limits: &ResolvedLimits) -> bool {
+/// Run the circuit's gates on a sparse map and return the evolved backend when
+/// every step stays within `cap` entries. Declines resets, saves, and anything
+/// after a measurement, whose branch could reach a different support.
+fn sparse_support_probe(
+    circuit: &Circuit,
+    cap: usize,
+    limits: &ResolvedLimits,
+) -> Option<SparseBackend> {
     if !circuit.has_terminal_measurements_only() {
-        return false;
+        return None;
     }
+    #[cfg(test)]
+    SPARSE_PROBES.with(|c| c.set(c.get() + 1));
     let mut probe = SparseBackend::with_limits(0, limits);
     if probe.init(circuit.num_qubits, 0).is_err() {
-        return false;
+        return None;
     }
     let lowered = super::expand_for_backend(&probe, circuit);
-    lowered.instructions.iter().all(|inst| match inst {
+    let ok = lowered.instructions.iter().all(|inst| match inst {
         Instruction::Gate { .. } => probe.apply(inst).is_ok() && probe.entry_count() <= cap,
         Instruction::Measure { .. } | Instruction::Barrier { .. } => true,
         _ => false,
-    })
+    });
+    ok.then_some(probe)
+}
+
+#[cfg(test)]
+fn sparse_support_fits(circuit: &Circuit, cap: usize, limits: &ResolvedLimits) -> bool {
+    sparse_support_probe(circuit, cap, limits).is_some()
 }
 
 pub(super) fn auto_selects_cpu_statevector(
@@ -564,6 +590,9 @@ pub(super) fn auto_selects_cpu_statevector(
     has_partial_independence: bool,
     limits: &ResolvedLimits,
 ) -> bool {
+    if circuit.num_qubits > limits.statevector_qubits.value {
+        return false;
+    }
     matches!(
         select_auto_backend_choice(circuit, has_partial_independence, limits),
         Family::Statevector
@@ -1111,19 +1140,40 @@ pub(super) fn resolve(
     has_partial_independence: bool,
     limits: &ResolvedLimits,
 ) -> ExecutionPlan {
+    resolve_with_probe(kind, circuit, has_partial_independence, limits).0
+}
+
+pub(super) fn resolve_with_probe(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    has_partial_independence: bool,
+    limits: &ResolvedLimits,
+) -> (ExecutionPlan, Option<SparseBackend>) {
+    let mut probe = None;
     let family = match kind {
-        BackendKind::Auto => select_auto_backend_choice(circuit, has_partial_independence, limits),
+        BackendKind::Auto => {
+            let (family, sparse) =
+                select_auto_backend_choice_with_probe(circuit, has_partial_independence, limits);
+            probe = sparse;
+            family
+        }
         #[cfg(feature = "gpu")]
         BackendKind::AutoGpu { .. } => {
-            select_auto_backend_choice(circuit, has_partial_independence, limits)
+            let (family, sparse) =
+                select_auto_backend_choice_with_probe(circuit, has_partial_independence, limits);
+            probe = sparse;
+            family
         }
         BackendKind::Statevector => Family::Statevector,
         BackendKind::Stabilizer => Family::Stabilizer,
         BackendKind::Sparse => Family::Sparse,
         BackendKind::Mps { max_bond_dim } => {
-            return ExecutionPlan::Backend(BackendPlan::Mps {
-                max_bond_dim: *max_bond_dim,
-            });
+            return (
+                ExecutionPlan::Backend(BackendPlan::Mps {
+                    max_bond_dim: *max_bond_dim,
+                }),
+                None,
+            );
         }
         BackendKind::ProductState => Family::ProductState,
         BackendKind::TensorNetwork | BackendKind::TensorNetworkBounded { .. } => {
@@ -1132,17 +1182,23 @@ pub(super) fn resolve(
         BackendKind::Factored => Family::Factored,
         BackendKind::FactoredStabilizer => Family::FactoredStabilizer,
         BackendKind::DensityMatrix => Family::DensityMatrix,
-        BackendKind::StabilizerRank => return ExecutionPlan::StabilizerRank,
+        BackendKind::StabilizerRank => return (ExecutionPlan::StabilizerRank, None),
         BackendKind::StochasticPauli { num_samples } => {
-            return ExecutionPlan::StochasticPauli {
-                num_samples: *num_samples,
-            };
+            return (
+                ExecutionPlan::StochasticPauli {
+                    num_samples: *num_samples,
+                },
+                None,
+            );
         }
-        BackendKind::PauliPath { .. } => return ExecutionPlan::PauliPath,
+        BackendKind::PauliPath { .. } => return (ExecutionPlan::PauliPath, None),
         BackendKind::DeterministicPauli { truncation } => {
-            return ExecutionPlan::DeterministicPauli {
-                truncation: *truncation,
-            };
+            return (
+                ExecutionPlan::DeterministicPauli {
+                    truncation: *truncation,
+                },
+                None,
+            );
         }
         #[cfg(feature = "gpu")]
         BackendKind::StatevectorGpu { .. } => Family::Statevector,
@@ -1152,7 +1208,10 @@ pub(super) fn resolve(
         BackendKind::DensityMatrixGpu { .. } => Family::DensityMatrix,
         #[cfg(feature = "distributed")]
         BackendKind::StatevectorDistributed { context } => {
-            return ExecutionPlan::Backend(BackendPlan::Distributed(context.clone()));
+            return (
+                ExecutionPlan::Backend(BackendPlan::Distributed(context.clone())),
+                None,
+            );
         }
     };
     let mut plan = plan_for_family(kind, family, circuit.num_qubits, limits);
@@ -1165,7 +1224,7 @@ pub(super) fn resolve(
         #[cfg(not(feature = "gpu"))]
         let _ = accel;
     }
-    ExecutionPlan::Backend(plan)
+    (ExecutionPlan::Backend(plan), probe)
 }
 
 /// Backend plan for a run that starts from a caller-supplied state.
@@ -1343,15 +1402,9 @@ pub(super) fn plan_temporal_clifford(
     }
     let tail_accel = accel_for(kind, Family::Statevector, circuit.num_qubits);
     let tail_num_classical_bits = tail.num_classical_bits;
-    let fused_tail = match &tail_accel {
-        Accel::Cpu => crate::circuit::fusion::fuse_circuit(&tail, true).into_owned(),
-        #[cfg(feature = "gpu")]
-        Accel::Gpu { .. } => {
-            let expanded = crate::circuit::expand_qft_blocks(&tail);
-            let expanded = crate::circuit::expand_pauli_rotations(&expanded).into_owned();
-            crate::circuit::fusion::fuse_circuit(&expanded, true).into_owned()
-        }
-    };
+    let probe = build_statevector(&tail_accel, 0, limits);
+    let expanded = super::expand_for_backend(&probe, &tail);
+    let fused_tail = super::fuse_for_backend(&probe, &expanded).into_owned();
     Some(TemporalCliffordPlan {
         prefix,
         fused_tail,
@@ -1369,17 +1422,13 @@ pub(super) fn run_temporal_clifford(
     let mut stab = StabilizerBackend::with_limits(seed, &plan.limits);
     stab.init(plan.prefix.num_qubits, plan.prefix.num_classical_bits)?;
     stab.enable_lazy_destab();
-    for inst in &plan.prefix.instructions {
-        stab.apply(inst)?;
-    }
+    stab.apply_instructions(&plan.prefix.instructions)?;
 
     let state = stab.export_statevector()?;
 
     let mut sv = build_statevector(&plan.tail_accel, seed, &plan.limits);
     sv.init_from_state(state, plan.tail_num_classical_bits)?;
-    for inst in &plan.fused_tail.instructions {
-        sv.apply(inst)?;
-    }
+    sv.apply_instructions(&plan.fused_tail.instructions)?;
 
     let probabilities = if want_probabilities {
         try_backend_probabilities(&sv)?

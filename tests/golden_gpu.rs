@@ -2732,6 +2732,183 @@ fn noisy_compiled_gpu_readout_matches_cpu_statistics() {
     );
 }
 
+#[test]
+fn noisy_compiled_gpu_multichunk_and_tail_matches_cpu_statistics() {
+    use prism_q::{NoiseModel, compile_noisy};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let base_shots = bts_min_shots_env().max(131_072);
+    if base_shots > 262_144 {
+        return;
+    }
+    let shots = base_shots + 129;
+
+    let n = 32;
+    let circuit = parity_fan_circuit();
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.02);
+    noise.with_readout_error(0.03, 0.08);
+
+    let mut cpu = compile_noisy(&circuit, &noise, 42).unwrap();
+    let mut gpu = compile_noisy(&circuit, &noise, 42)
+        .unwrap()
+        .with_gpu(f.ctx.clone());
+
+    let tol = 5.0 * (0.5 / shots as f64).sqrt();
+
+    let cpu_marginals = cpu.sample_marginals(shots);
+    #[cfg(feature = "bench-internal")]
+    let before = f.ctx.pass_census();
+    let gpu_marginals = gpu.sample_marginals(shots);
+    #[cfg(feature = "bench-internal")]
+    {
+        let diff = f.ctx.pass_census() - before;
+        assert!(
+            diff.launches > 0 && diff.drains > 0,
+            "marginals missed device: {diff:?}"
+        );
+    }
+    assert_ne!(cpu_marginals, gpu_marginals, "marginals fell back to host");
+    for q in 0..n {
+        assert!(
+            (cpu_marginals[q] - gpu_marginals[q]).abs() < tol,
+            "marginal[{q}]: cpu={} gpu={}",
+            cpu_marginals[q],
+            gpu_marginals[q]
+        );
+    }
+
+    let cpu_counts = cpu.sample_counts(shots);
+    #[cfg(feature = "bench-internal")]
+    let before = f.ctx.pass_census();
+    let gpu_counts = gpu.sample_counts(shots);
+    #[cfg(feature = "bench-internal")]
+    {
+        let diff = f.ctx.pass_census() - before;
+        assert!(
+            diff.launches > 0 && diff.drains > 0,
+            "counts missed device: {diff:?}"
+        );
+    }
+    assert_ne!(cpu_counts, gpu_counts, "counts fell back to host");
+    assert_eq!(gpu_counts.values().sum::<u64>(), shots as u64);
+
+    let cpu_freq = one_frequencies_from_counts(&cpu_counts, n, shots as u64);
+    let gpu_freq = one_frequencies_from_counts(&gpu_counts, n, shots as u64);
+    for q in 0..n {
+        assert!(
+            (cpu_freq[q] - gpu_freq[q]).abs() < tol,
+            "count frequency[{q}]: cpu={} gpu={}",
+            cpu_freq[q],
+            gpu_freq[q]
+        );
+    }
+
+    // Reuse the same sampler and GpuNoiseCache with a larger shot count.
+    let grown_shots = shots + 65_536;
+    let grown_tol = 5.0 * (0.5 / grown_shots as f64).sqrt();
+    let cpu_grown = cpu.sample_counts(grown_shots);
+    let gpu_grown = gpu.sample_counts(grown_shots);
+    assert_eq!(gpu_grown.values().sum::<u64>(), grown_shots as u64);
+    let cpu_grown_freq = one_frequencies_from_counts(&cpu_grown, n, grown_shots as u64);
+    let gpu_grown_freq = one_frequencies_from_counts(&gpu_grown, n, grown_shots as u64);
+    for q in 0..n {
+        assert!(
+            (cpu_grown_freq[q] - gpu_grown_freq[q]).abs() < grown_tol,
+            "grown count frequency[{q}]: cpu={} gpu={}",
+            cpu_grown_freq[q],
+            gpu_grown_freq[q]
+        );
+    }
+}
+
+#[test]
+fn noisy_compiled_gpu_wide_circuit_tail_clears_padding_bits() {
+    use prism_q::{NoiseModel, compile_noisy};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let base_shots = bts_min_shots_env().max(131_072);
+    if base_shots > 262_144 {
+        return;
+    }
+    let shots = base_shots + 129;
+
+    // 576 qubits yields m_words = 9 (> GPU_COUNTS_MAX_WORDS = 8), forcing
+    // DevicePackedShots::counts_with_rank_hint through to_host() and
+    // validate_meas_major_padding.
+    let n = 576;
+    let mut circuit = prism_q::Circuit::new(n, n);
+    for q in 0..16 {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for q in 16..n {
+        for k in 0..3 {
+            circuit.add_gate(Gate::Cx, &[(q - 16 + k) % 16, q]);
+        }
+    }
+    circuit.measure_all();
+
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.015);
+    noise.with_readout_error(0.02, 0.05);
+
+    let mut cpu = compile_noisy(&circuit, &noise, 42).unwrap();
+    let mut gpu = compile_noisy(&circuit, &noise, 42)
+        .unwrap()
+        .with_gpu(f.ctx.clone());
+
+    let tol = 5.0 * (0.5 / shots as f64).sqrt();
+
+    let cpu_marginals = cpu.sample_marginals(shots);
+    #[cfg(feature = "bench-internal")]
+    let before = f.ctx.pass_census();
+    let gpu_marginals = gpu.sample_marginals(shots);
+    #[cfg(feature = "bench-internal")]
+    {
+        let diff = f.ctx.pass_census() - before;
+        assert!(
+            diff.launches > 0 && diff.drains > 0,
+            "wide marginals missed device: {diff:?}"
+        );
+    }
+    assert_ne!(
+        cpu_marginals, gpu_marginals,
+        "wide marginals fell back to host"
+    );
+
+    let cpu_counts = cpu.sample_counts(shots);
+    #[cfg(feature = "bench-internal")]
+    let before = f.ctx.pass_census();
+    let gpu_counts = gpu.sample_counts(shots);
+    #[cfg(feature = "bench-internal")]
+    {
+        let diff = f.ctx.pass_census() - before;
+        assert!(
+            diff.launches > 0 && diff.drains > 0,
+            "wide counts missed device: {diff:?}"
+        );
+    }
+    assert_ne!(cpu_counts, gpu_counts, "wide counts fell back to host");
+    assert_eq!(gpu_counts.values().sum::<u64>(), shots as u64);
+
+    let cpu_freq = one_frequencies_from_counts(&cpu_counts, n, shots as u64);
+    let gpu_freq = one_frequencies_from_counts(&gpu_counts, n, shots as u64);
+    for q in 0..n {
+        assert!(
+            (cpu_marginals[q] - gpu_marginals[q]).abs() < tol,
+            "wide marginal[{q}]: cpu={} gpu={}",
+            cpu_marginals[q],
+            gpu_marginals[q]
+        );
+        assert!(
+            (cpu_freq[q] - gpu_freq[q]).abs() < tol,
+            "wide count frequency[{q}]: cpu={} gpu={}",
+            cpu_freq[q],
+            gpu_freq[q]
+        );
+    }
+}
+
 // ============================================================================
 // AutoGpu terminal sampling
 // ============================================================================
@@ -3172,6 +3349,191 @@ fn gpu_pauli_expectations_past_the_grid_y_limit_match_cpu() {
     }
 }
 
+#[test]
+fn gpu_pauli_expectations_small_widths_and_tz_edges_match_cpu() {
+    use prism_q::PauliTerm;
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    // 1-qubit asymmetric normalized state: test X, Y, Z.
+    let state1 = [Complex64::new(0.4, -0.3), Complex64::new(-0.5, 0.7)];
+    let n1: f64 = state1.iter().map(|a| a.norm_sqr()).sum::<f64>().sqrt();
+    let state1: Vec<Complex64> = state1.into_iter().map(|a| a / n1).collect();
+    let mut cpu1 = StatevectorBackend::new(42);
+    let mut gpu1 = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    cpu1.init_from_state(state1.clone(), 0).unwrap();
+    gpu1.init_from_state(state1, 0).unwrap();
+    let obs1 = vec![
+        vec![PauliTerm::x(0)],
+        vec![PauliTerm::y(0)],
+        vec![PauliTerm::z(0)],
+    ];
+    let want1 = cpu1.pauli_expectations(&obs1).unwrap();
+    let got1 = gpu1.pauli_expectations(&obs1).unwrap();
+    for (i, (w, g)) in want1.iter().zip(&got1).enumerate() {
+        assert!((w - g).abs() < EPS, "1q obs {i}: cpu={w}, gpu={g}");
+    }
+
+    // 2-qubit asymmetric normalized state: test all 15 non-identity Pauli strings.
+    let raw2 = [
+        Complex64::new(0.2, 0.5),
+        Complex64::new(-0.4, 0.1),
+        Complex64::new(0.6, -0.3),
+        Complex64::new(-0.1, -0.45),
+    ];
+    let n2: f64 = raw2.iter().map(|a| a.norm_sqr()).sum::<f64>().sqrt();
+    let state2: Vec<Complex64> = raw2.into_iter().map(|a| a / n2).collect();
+    let mut cpu2 = StatevectorBackend::new(42);
+    let mut gpu2 = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    cpu2.init_from_state(state2.clone(), 0).unwrap();
+    gpu2.init_from_state(state2, 0).unwrap();
+    let obs2: Vec<Vec<PauliTerm>> = (1..16usize)
+        .map(|k| {
+            let (x, z) = (k & 3, k >> 2);
+            (0..2)
+                .filter_map(|q| match ((x >> q) & 1, (z >> q) & 1) {
+                    (1, 0) => Some(PauliTerm::x(q)),
+                    (0, 1) => Some(PauliTerm::z(q)),
+                    (1, 1) => Some(PauliTerm::y(q)),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+    let want2 = cpu2.pauli_expectations(&obs2).unwrap();
+    let got2 = gpu2.pauli_expectations(&obs2).unwrap();
+    for (i, (w, g)) in want2.iter().zip(&got2).enumerate() {
+        assert!((w - g).abs() < EPS, "2q obs {i}: cpu={w}, gpu={g}");
+    }
+
+    // 8-qubit register with mid-circuit measurement (pending_norm != 1.0) and
+    // tz(x) = 0, middle, and MSB with 0..4 Y factors.
+    let n = 8;
+    let mut circuit = prism_q::Circuit::new(n, 1);
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.31 + 0.11 * q as f64), &[q]);
+        circuit.add_gate(Gate::Ry(0.47 + 0.07 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    circuit.add_gate(Gate::Rz(0.63), &[3]);
+    circuit.add_measure(0, 0);
+    for q in 1..n {
+        circuit.add_gate(Gate::Ry(0.23 * q as f64), &[q]);
+    }
+
+    let mut cpu8 = StatevectorBackend::new(42);
+    let mut gpu8 = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    for backend in [&mut cpu8, &mut gpu8] {
+        backend.init(n, 1).unwrap();
+        backend.apply_instructions(&circuit.instructions).unwrap();
+    }
+    let obs8 = vec![
+        vec![PauliTerm::z(0), PauliTerm::z(7)],
+        vec![PauliTerm::x(0)],
+        vec![PauliTerm::y(0)],
+        vec![PauliTerm::x(3), PauliTerm::y(5)],
+        vec![PauliTerm::y(3), PauliTerm::y(5), PauliTerm::z(6)],
+        vec![PauliTerm::y(1), PauliTerm::y(2), PauliTerm::y(4)],
+        vec![
+            PauliTerm::y(1),
+            PauliTerm::y(2),
+            PauliTerm::y(4),
+            PauliTerm::y(6),
+        ],
+        vec![PauliTerm::x(7)],
+        vec![PauliTerm::y(7)],
+    ];
+    let want8 = cpu8.pauli_expectations(&obs8).unwrap();
+    let got8 = gpu8.pauli_expectations(&obs8).unwrap();
+    for (i, (w, g)) in want8.iter().zip(&got8).enumerate() {
+        assert!((w - g).abs() < EPS, "8q obs {i}: cpu={w}, gpu={g}");
+    }
+}
+
+#[test]
+fn gpu_pauli_expectations_grid_stride_24q_matches_cpu() {
+    use prism_q::PauliTerm;
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let n = 24;
+    let mut circuit = prism_q::Circuit::new(n, 1);
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.27 + 0.03 * q as f64), &[q]);
+        circuit.add_gate(Gate::Ry(0.41 + 0.02 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n {
+        circuit.add_gate(Gate::Rz(0.19 + 0.01 * q as f64), &[q]);
+    }
+
+    let mut cpu = StatevectorBackend::new(42);
+    let mut gpu = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    for backend in [&mut cpu, &mut gpu] {
+        backend.init(n, 1).unwrap();
+        backend.apply_instructions(&circuit.instructions).unwrap();
+    }
+
+    let mut obs = vec![
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::z(0), PauliTerm::z(23)],
+        vec![PauliTerm::x(0)],
+        vec![PauliTerm::y(0)],
+        vec![PauliTerm::x(12), PauliTerm::y(15)],
+        vec![PauliTerm::y(12), PauliTerm::y(15), PauliTerm::z(20)],
+        vec![PauliTerm::x(23)],
+        vec![PauliTerm::y(23)],
+    ];
+    for k in 0..10usize {
+        let mut s = vec![PauliTerm::x(0), PauliTerm::y(5), PauliTerm::x(23)];
+        if (k & 1) != 0 {
+            s.push(PauliTerm::z(2));
+        }
+        if (k & 2) != 0 {
+            s.push(PauliTerm::z(9));
+        }
+        if (k & 4) != 0 {
+            s.push(PauliTerm::z(16));
+        }
+        if (k & 8) != 0 {
+            s.push(PauliTerm::z(21));
+        }
+        obs.push(s);
+    }
+
+    let want = cpu.pauli_expectations(&obs).unwrap();
+    let got = gpu.pauli_expectations(&obs).unwrap();
+    for (i, (w, g)) in want.iter().zip(&got).enumerate() {
+        assert!((w - g).abs() < 1e-10, "24q obs {i}: cpu={w}, gpu={g}");
+    }
+
+    // Mid-circuit measurement exercises pending_norm != 1.0 on the 24q grid-stride path.
+    let meas = Instruction::Measure {
+        qubit: 0,
+        classical_bit: 0,
+    };
+    cpu.apply(&meas).unwrap();
+    gpu.apply(&meas).unwrap();
+    assert_eq!(cpu.classical_results(), gpu.classical_results());
+    let post_obs = vec![
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::x(23)],
+        vec![PauliTerm::y(12), PauliTerm::y(15)],
+    ];
+    let want_post = cpu.pauli_expectations(&post_obs).unwrap();
+    let got_post = gpu.pauli_expectations(&post_obs).unwrap();
+    for (i, (w, g)) in want_post.iter().zip(&got_post).enumerate() {
+        assert!(
+            (w - g).abs() < 1e-10,
+            "24q post-meas obs {i}: cpu={w}, gpu={g}"
+        );
+    }
+}
+
 // Three commuting groups, one per host branch of the grouped evaluation: six
 // members expand into 15 pair masks inline, eight Z-only members take the
 // moments pass on the state as run, seven mixed members take it on a
@@ -3303,9 +3665,8 @@ fn auto_gpu_temporal_clifford_matches_cpu_auto() {
     assert_run_probs_match(&circuit, &f.ctx);
 }
 
-// Same shape with a `QftBlock` tail: the device tail cannot run the native
-// host FFT path, so the block is expanded at plan time. Catches any route
-// that hands an unexpanded block to the device kernels.
+// Same shape with a `QftBlock` tail: the device tail preserves `Gate::QftBlock`
+// natively and executes it through the device DIF kernel.
 #[test]
 fn auto_gpu_temporal_clifford_qft_tail_matches_cpu_auto() {
     let Some(f) = Fixture::try_new() else { return };
@@ -3327,6 +3688,118 @@ fn auto_gpu_temporal_clifford_qft_tail_matches_cpu_auto() {
         circuit.add_gate(Gate::Rz(0.5), &[q]);
     }
     assert_run_probs_match(&circuit, &f.ctx);
+}
+
+#[test]
+fn auto_gpu_temporal_clifford_tiled_tail_matches_cpu_auto() {
+    use prism_q::{BackendKind, PauliTerm, Placement, simulate};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    for n in [18usize, 19] {
+        let mut circuit = temporal_prefix(n);
+        for q in 0..n {
+            circuit.add_gate(Gate::Rx(0.27 + 0.02 * q as f64), &[q]);
+            circuit.add_gate(Gate::Ry(0.43 - 0.01 * q as f64), &[q]);
+            circuit.add_gate(Gate::Rz(0.19 + 0.03 * q as f64), &[q]);
+        }
+        for q in 0..n - 1 {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+            circuit.add_gate(Gate::Rzz(0.31), &[q, q + 1]);
+        }
+        circuit.add_pauli_rotation(0.41, &[PauliTerm::x(0), PauliTerm::z(1)]);
+        circuit.add_pauli_rotation(-0.23, &[PauliTerm::y(2), PauliTerm::x(5), PauliTerm::z(9)]);
+
+        let cpu = simulate(&circuit)
+            .backend(BackendKind::Auto)
+            .seed(42)
+            .run()
+            .unwrap();
+        #[cfg(feature = "bench-internal")]
+        let before = f.ctx.pass_census();
+        let gpu = simulate(&circuit)
+            .gpu_auto(f.ctx.clone())
+            .seed(42)
+            .run()
+            .unwrap();
+        #[cfg(feature = "bench-internal")]
+        {
+            let delta = f.ctx.pass_census() - before;
+            assert!(
+                delta.tiles > 0,
+                "n={n}: temporal-Clifford tail above tile floor must run apply_tiled_gpu"
+            );
+        }
+        assert_eq!(gpu.metadata.placement, Placement::Device, "n={n}");
+        let cp = cpu.probabilities.expect("cpu probs").to_vec();
+        let gp = gpu.probabilities.expect("gpu probs").to_vec();
+        assert_probs_close(&gp, &cp, 1e-10, &format!("temporal_clifford_tiled_{n}"));
+    }
+}
+
+#[test]
+fn auto_gpu_temporal_clifford_qft_tail_tiled_18q_matches_cpu_auto() {
+    let Some(f) = Fixture::try_new() else { return };
+
+    let n = 18;
+    let mut circuit = temporal_prefix(n);
+    let targets: Vec<usize> = (0..n).collect();
+    circuit.add_gate(
+        Gate::QftBlock {
+            start: 0,
+            num: n as u8,
+            inverse: false,
+            swaps: true,
+            big_endian: false,
+        },
+        &targets,
+    );
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.35 + 0.02 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    assert_run_probs_match(&circuit, &f.ctx);
+}
+
+#[test]
+fn auto_gpu_temporal_clifford_measured_tail_matches_cpu_auto() {
+    use prism_q::{BackendKind, simulate};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let n = 18;
+    let mut circuit = temporal_prefix(n);
+    circuit.num_classical_bits = 4;
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.29 + 0.015 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    circuit.add_measure(0, 0);
+    circuit.add_measure(5, 1);
+    for q in 0..n {
+        circuit.add_gate(Gate::Ry(0.17 + 0.01 * q as f64), &[q]);
+    }
+    circuit.add_measure(11, 2);
+    circuit.add_measure(17, 3);
+
+    let cpu = simulate(&circuit)
+        .backend(BackendKind::Auto)
+        .seed(42)
+        .run()
+        .unwrap();
+    let gpu = simulate(&circuit)
+        .gpu_auto(f.ctx.clone())
+        .seed(42)
+        .run()
+        .unwrap();
+    assert_eq!(cpu.classical_bits, gpu.classical_bits);
+    let cp = cpu.probabilities.expect("cpu probs").to_vec();
+    let gp = gpu.probabilities.expect("gpu probs").to_vec();
+    assert_probs_close(&gp, &cp, 1e-10, "temporal_clifford_measured_tail");
 }
 
 #[test]
@@ -3534,6 +4007,155 @@ fn over_vram_init_reports_the_device_budget() {
         }
         other => panic!("expected the device budget error, got {other:?}"),
     }
+}
+
+#[test]
+fn statevector_gpu_respects_probability_and_export_limits() {
+    use prism_q::{BackendKind, Limits, Placement, PrismError, simulate};
+
+    let Some(f) = Fixture::try_new() else { return };
+    let n = prism_q::gpu::min_qubits().max(3);
+    let circuit = prism_q::circuits::ghz_circuit(n);
+
+    let prob_err = simulate(&circuit)
+        .backend(BackendKind::StatevectorGpu {
+            context: f.ctx.clone(),
+        })
+        .limits(Limits::new().max_probability_qubits(n - 1))
+        .seed(42)
+        .run()
+        .unwrap_err();
+    assert!(matches!(prob_err, PrismError::ResourceLimit(_)));
+
+    let at_cap = simulate(&circuit)
+        .backend(BackendKind::StatevectorGpu {
+            context: f.ctx.clone(),
+        })
+        .limits(Limits::new().max_probability_qubits(n))
+        .seed(42)
+        .run()
+        .unwrap();
+    assert_eq!(at_cap.metadata.placement, Placement::Device);
+    assert_eq!(at_cap.probabilities.unwrap().len(), 1 << n);
+
+    let export_err = simulate(&circuit)
+        .backend(BackendKind::StatevectorGpu {
+            context: f.ctx.clone(),
+        })
+        .limits(Limits::new().max_export_qubits(n - 1))
+        .seed(42)
+        .state_vector()
+        .unwrap_err();
+    assert!(matches!(export_err, PrismError::ResourceLimit(_)));
+
+    let rdm_err = simulate(&circuit)
+        .backend(BackendKind::StatevectorGpu {
+            context: f.ctx.clone(),
+        })
+        .limits(Limits::new().max_export_qubits(n - 1))
+        .seed(42)
+        .reduced_density_matrix(&[0])
+        .unwrap_err();
+    match rdm_err {
+        PrismError::ResourceLimit(data) => {
+            assert_eq!((data.required, data.limit), (n as u128, (n - 1) as u128));
+            assert_eq!(data.operation, "reduced density matrix GPU readback");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    let rdm_at_cap = simulate(&circuit)
+        .backend(BackendKind::StatevectorGpu {
+            context: f.ctx.clone(),
+        })
+        .limits(Limits::new().max_export_qubits(n))
+        .seed(42)
+        .reduced_density_matrix(&[0])
+        .unwrap();
+    assert_eq!(rdm_at_cap.metadata.placement, Placement::Device);
+    assert_eq!(rdm_at_cap.data.len(), 4);
+}
+
+#[test]
+fn stabilizer_gpu_reports_device_placement_and_explicit_rule() {
+    use prism_q::{BackendKind, Circuit, Placement, RouteRule, StabilizerBackend, simulate};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let mut direct = StabilizerBackend::new(42).with_gpu(f.ctx.clone());
+    assert_eq!(direct.placement(), Placement::Host);
+    direct.init(4, 0).unwrap();
+    assert_eq!(direct.placement(), Placement::Device);
+
+    let n = prism_q::gpu::stabilizer_min_qubits();
+    let mut circuit = Circuit::new(n, n);
+    circuit.add_gate(Gate::H, &[0]);
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    circuit.measure_all();
+
+    let res = simulate(&circuit)
+        .backend(BackendKind::StabilizerGpu {
+            context: f.ctx.clone(),
+        })
+        .seed(42)
+        .run()
+        .unwrap();
+    assert_eq!(res.metadata.placement, Placement::Device);
+    assert_eq!(res.metadata.reason, RouteRule::ExplicitBackend);
+    assert!(
+        res.classical_bits
+            .iter()
+            .all(|&b| b == res.classical_bits[0])
+    );
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn staged_readback_concurrent_rayon_fallback() {
+    let Some(f) = Fixture::try_new() else { return };
+
+    let n = 19;
+    let mut insts = Vec::new();
+    for q in 0..n {
+        insts.push(g(Gate::Rx(0.2 + 0.03 * q as f64), &[q]));
+    }
+    for q in 0..n - 1 {
+        insts.push(g(Gate::Cx, &[q, q + 1]));
+    }
+
+    let mut cpu = StatevectorBackend::new(42);
+    cpu.init(n, 0).unwrap();
+    cpu.apply_instructions(&insts).unwrap();
+    let expected_sv = cpu.export_statevector().unwrap();
+    let expected_probs = cpu.probabilities().unwrap();
+
+    let mut gpu_a = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    gpu_a.init(n, 0).unwrap();
+    gpu_a.apply_instructions(&insts).unwrap();
+
+    let mut gpu_b = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    gpu_b.init(n, 0).unwrap();
+    gpu_b.apply_instructions(&insts).unwrap();
+
+    let (sv_res, probs_res) = rayon::join(
+        move || gpu_a.export_statevector(),
+        move || gpu_b.probabilities(),
+    );
+    let gpu_sv = sv_res.unwrap();
+    let gpu_probs = probs_res.unwrap();
+
+    assert_eq!(gpu_sv.len(), expected_sv.len());
+    for (i, (g_amp, e_amp)) in gpu_sv.iter().zip(&expected_sv).enumerate() {
+        assert!((g_amp - e_amp).norm() < 1e-12, "amp[{i}] mismatch");
+    }
+    assert_probs_close(
+        &gpu_probs,
+        &expected_probs,
+        1e-12,
+        "staged_readback_concurrent",
+    );
 }
 
 #[test]

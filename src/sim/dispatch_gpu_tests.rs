@@ -321,3 +321,160 @@ mod accel_tests {
         assert!(matches!(err, PrismError::BackendUnsupported { .. }));
     }
 }
+
+mod temporal_clifford_tests {
+    use super::*;
+    use crate::gates::Gate;
+    use crate::sim::unified_pauli::PauliTerm;
+    use crate::test_support::{assert_probs_close, gpu_context_or_skip};
+
+    fn clifford_prefix_with_tail(n: usize) -> Circuit {
+        let mut circuit = Circuit::new(n, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        for _ in 0..3 {
+            for q in 0..n - 1 {
+                circuit.add_gate(Gate::Cx, &[q, q + 1]);
+            }
+        }
+        circuit
+    }
+
+    #[test]
+    fn temporal_clifford_gpu_preserves_native_qft_block() {
+        let Some(ctx) = gpu_context_or_skip() else {
+            return;
+        };
+        let n = 15;
+        let mut circuit = clifford_prefix_with_tail(n);
+        let targets: Vec<usize> = (0..n).collect();
+        circuit.add_gate(
+            Gate::QftBlock {
+                start: 0,
+                num: n as u8,
+                inverse: false,
+                swaps: true,
+                big_endian: false,
+            },
+            &targets,
+        );
+        for q in 0..n {
+            circuit.add_gate(Gate::Rz(0.5), &[q]);
+        }
+
+        let limits = ResolvedLimits::process_default();
+        let plan =
+            plan_temporal_clifford(&BackendKind::AutoGpu { context: ctx }, &circuit, &limits)
+                .expect("temporal clifford plan");
+        assert!(matches!(plan.tail_accel, Accel::Gpu { soft: true, .. }));
+        assert!(
+            plan.fused_tail.instructions.iter().any(|inst| matches!(
+                inst,
+                Instruction::Gate {
+                    gate: Gate::QftBlock { .. },
+                    ..
+                }
+            )),
+            "native QftBlock must stay intact on the GPU temporal-Clifford tail"
+        );
+
+        let gpu_out = run_temporal_clifford(&plan, 42, true).unwrap();
+        let cpu_plan = plan_temporal_clifford(&BackendKind::Auto, &circuit, &limits).unwrap();
+        let cpu_out = run_temporal_clifford(&cpu_plan, 42, true).unwrap();
+        assert_probs_close(
+            &gpu_out.probabilities.as_ref().unwrap().to_vec(),
+            &cpu_out.probabilities.as_ref().unwrap().to_vec(),
+            1e-10,
+        );
+    }
+
+    #[test]
+    fn temporal_clifford_gpu_uses_device_fusion_profile_above_tile_floor() {
+        let Some(ctx) = gpu_context_or_skip() else {
+            return;
+        };
+        let n = crate::gpu::tiles::MIN_QUBITS;
+        let mut circuit = clifford_prefix_with_tail(n);
+        for q in 0..n {
+            circuit.add_gate(Gate::Rx(0.25 + 0.03 * q as f64), &[q]);
+            circuit.add_gate(Gate::Ry(0.41 - 0.02 * q as f64), &[q]);
+        }
+        for q in 0..n - 1 {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        for q in 0..n {
+            circuit.add_gate(Gate::Rz(0.17 + 0.01 * q as f64), &[q]);
+        }
+
+        let limits = ResolvedLimits::process_default();
+        let plan =
+            plan_temporal_clifford(&BackendKind::AutoGpu { context: ctx }, &circuit, &limits)
+                .expect("temporal clifford plan");
+        assert!(matches!(plan.tail_accel, Accel::Gpu { soft: true, .. }));
+        assert!(
+            plan.fused_tail
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst, Instruction::Gate { gate: Gate::Cx, .. })),
+            "FusionProfile::Device must keep lone CX gates out of Fused2q/Multi2q"
+        );
+        assert!(
+            !plan.fused_tail.instructions.iter().any(|inst| matches!(
+                inst,
+                Instruction::Gate {
+                    gate: Gate::Multi2q(_) | Gate::MultiFused(_) | Gate::Fused2q(_),
+                    ..
+                }
+            )),
+            "FusionProfile::Device must skip host multi-gate and non-same-pair 2q batches"
+        );
+    }
+
+    #[test]
+    fn temporal_clifford_cpu_preserves_qft_and_pauli_rot() {
+        let n = 15;
+        let mut circuit = clifford_prefix_with_tail(n);
+        let targets: Vec<usize> = (0..n).collect();
+        circuit.add_gate(
+            Gate::QftBlock {
+                start: 0,
+                num: n as u8,
+                inverse: false,
+                swaps: true,
+                big_endian: false,
+            },
+            &targets,
+        );
+        circuit.add_pauli_rotation(0.37, &[PauliTerm::x(0), PauliTerm::z(1), PauliTerm::y(2)]);
+
+        let limits = ResolvedLimits::process_default();
+        let plan = plan_temporal_clifford(&BackendKind::Auto, &circuit, &limits)
+            .expect("CPU temporal clifford plan");
+        assert!(matches!(plan.tail_accel, Accel::Cpu));
+        assert!(plan.fused_tail.instructions.iter().any(|inst| matches!(
+            inst,
+            Instruction::Gate {
+                gate: Gate::QftBlock { .. },
+                ..
+            }
+        )));
+        assert!(plan.fused_tail.instructions.iter().any(|inst| matches!(
+            inst,
+            Instruction::Gate {
+                gate: Gate::PauliRot(_),
+                ..
+            }
+        )));
+
+        let tc_out = run_temporal_clifford(&plan, 42, true).unwrap();
+        let sv_out = crate::sim::simulate(&circuit)
+            .backend(BackendKind::Statevector)
+            .seed(42)
+            .run()
+            .unwrap();
+        assert_probs_close(
+            &tc_out.probabilities.as_ref().unwrap().to_vec(),
+            &sv_out.probabilities.as_ref().unwrap().to_vec(),
+            1e-10,
+        );
+    }
+}

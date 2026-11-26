@@ -84,8 +84,8 @@ pub enum Gate {
     /// Pre-fused single-qubit unitary (product of consecutive gates on the same target).
     Fused(Box<[[Complex64; 2]; 2]>),
 
-    /// Controlled-phase gates sharing a control, applied in one pass. Targets:
-    /// `[control]`.
+    /// Controlled phases sharing a control. Source instructions list the control first,
+    /// followed by the phase qubits. Fusion stores just the control in its output.
     BatchPhase(Box<BatchPhaseData>),
 
     /// Rzz gates applied in one pass.
@@ -414,6 +414,101 @@ impl Gate {
             }
             _ => 1,
         }
+    }
+
+    /// Check the complete target list of a source instruction, including embedded qubits.
+    pub fn validate_targets(
+        &self,
+        targets: &[usize],
+        num_qubits: usize,
+    ) -> crate::error::Result<()> {
+        use crate::error::PrismError;
+
+        let expected = self.num_qubits();
+        if targets.len() != expected {
+            return Err(PrismError::GateArity {
+                gate: self.name().into(),
+                expected,
+                got: targets.len(),
+            });
+        }
+        if targets.is_empty() {
+            return Err(PrismError::InvalidParameter {
+                message: format!("gate `{}` has no targets", self.name()),
+            });
+        }
+        for (i, &q) in targets.iter().enumerate() {
+            if q >= num_qubits {
+                return Err(PrismError::InvalidQubit {
+                    index: q,
+                    register_size: num_qubits,
+                });
+            }
+            if targets[..i].contains(&q) {
+                return Err(PrismError::InvalidParameter {
+                    message: format!("qubit {q} named twice"),
+                });
+            }
+        }
+        let pair = |a, b| a != b && targets.contains(&a) && targets.contains(&b);
+        let agrees = match self {
+            Gate::BatchPhase(data) => targets[1..]
+                .iter()
+                .all(|q| data.phases.iter().any(|(p, _)| p == q)),
+            Gate::BatchRzz(data) => data.edges.iter().all(|&(a, b, _)| pair(a, b)),
+            Gate::DiagonalBatch(data) => data.entries.iter().all(|entry| match *entry {
+                DiagEntry::Phase1q { qubit, .. } => targets.contains(&qubit),
+                DiagEntry::Phase2q { q0, q1, .. } | DiagEntry::Parity2q { q0, q1, .. } => {
+                    pair(q0, q1)
+                }
+            }),
+            Gate::MultiFused(data) => data.gates.iter().all(|(q, _)| targets.contains(q)),
+            Gate::Multi2q(data) => data.gates.iter().all(|(a, b, _)| pair(*a, *b)),
+            Gate::MultiPauliRot(data) => {
+                let mask = data.support();
+                targets
+                    .iter()
+                    .all(|&q| q < usize::BITS as usize && (mask >> q) & 1 != 0)
+            }
+            Gate::QftBlock { start, num, .. } => {
+                *num != 0
+                    && targets
+                        .iter()
+                        .copied()
+                        .eq(usize::from(*start)..usize::from(*start) + usize::from(*num))
+            }
+            Gate::Id
+            | Gate::X
+            | Gate::Y
+            | Gate::Z
+            | Gate::H
+            | Gate::S
+            | Gate::Sdg
+            | Gate::T
+            | Gate::Tdg
+            | Gate::SX
+            | Gate::SXdg
+            | Gate::Rx(_)
+            | Gate::Ry(_)
+            | Gate::Rz(_)
+            | Gate::P(_)
+            | Gate::Rzz(_)
+            | Gate::Cx
+            | Gate::Cz
+            | Gate::Swap
+            | Gate::Cu(_)
+            | Gate::Mcu(_)
+            | Gate::Fused(_)
+            | Gate::Fused2q(_)
+            | Gate::PauliRot(_)
+            | Gate::Unitary(_) => true,
+        };
+        if !agrees {
+            return Err(PrismError::InvalidParameter {
+                message: format!("gate `{}` payload disagrees with its targets", self.name()),
+            });
+        }
+        Ok(())
     }
 
     /// Returns the 2×2 unitary matrix for single-qubit gates.

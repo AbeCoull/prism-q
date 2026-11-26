@@ -616,3 +616,38 @@ fn batched_diagonal_gates_keep_independent_blocks_apart() {
         "fusing a batch must not merge blocks its entries never connect"
     );
 }
+
+#[test]
+fn sixty_four_qubit_factored_and_decomposed_runs_decline_probabilities() {
+    use prism_q::backend::Backend;
+    use prism_q::sim::{BackendKind, simulate};
+
+    let c = circuits::independent_bell_pairs(32);
+    assert_eq!(c.num_qubits, 64);
+
+    let auto_out = simulate(&c)
+        .seed(SEED)
+        .run()
+        .expect("64q decomposed run must succeed");
+    assert!(
+        auto_out.probabilities.is_none(),
+        "64q decomposed run must decline probabilities"
+    );
+
+    let fs_out = simulate(&c)
+        .backend(BackendKind::FactoredStabilizer)
+        .seed(SEED)
+        .run()
+        .expect("64q FactoredStabilizer run must succeed");
+    assert!(
+        fs_out.probabilities.is_none(),
+        "64q FactoredStabilizer run must decline probabilities"
+    );
+
+    let mut fb = FactoredBackend::new(SEED);
+    prism_q::sim::run_on(&mut fb, &c).unwrap();
+    assert!(
+        fb.block_probabilities().is_none(),
+        "64q FactoredBackend must decline block_probabilities"
+    );
+}

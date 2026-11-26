@@ -633,6 +633,14 @@ fn read_instructions(r: &mut Reader<'_>) -> PyPrismResult<Vec<Instruction>> {
             6 => {
                 let condition = read_condition(r)?;
                 let body = read_instructions(r)?;
+                if body
+                    .iter()
+                    .any(|inst| matches!(inst, Instruction::Save { .. }))
+                {
+                    return Err(invalid(
+                        "save points are not supported inside a guarded region",
+                    ));
+                }
                 Instruction::Region(Box::new(GuardedRegion::new(condition, body)))
             }
             other => return Err(bad_tag("instruction", other)),
@@ -644,6 +652,7 @@ fn read_instructions(r: &mut Reader<'_>) -> PyPrismResult<Vec<Instruction>> {
 /// Check every index an instruction names against the register, so a corrupt
 /// payload raises here rather than panicking inside a kernel.
 fn check_instructions(circuit: &Circuit, instructions: &[Instruction]) -> PyPrismResult<()> {
+    use crate::circuit::{check_condition, check_targets};
     let qubit = |q: usize| {
         if q < circuit.num_qubits {
             Ok(())
@@ -658,20 +667,11 @@ fn check_instructions(circuit: &Circuit, instructions: &[Instruction]) -> PyPris
             Err(invalid(format!("pickle payload names classical bit {b}")))
         }
     };
-    let condition = |c: &ClassicalCondition| -> PyPrismResult<()> {
-        crate::circuit::condition_bits(c)?
-            .into_iter()
-            .try_for_each(bit)
-    };
-    let gate = |gate: &Gate, targets: &[usize]| -> PyPrismResult<()> {
-        if gate.num_qubits() != targets.len() {
-            return Err(invalid("pickle payload holds a gate of the wrong arity"));
-        }
-        targets.iter().try_for_each(|&q| qubit(q))
-    };
     for inst in instructions {
         match inst {
-            Instruction::Gate { gate: g, targets } => gate(g, targets)?,
+            Instruction::Gate { gate: g, targets } => {
+                check_targets(circuit.num_qubits, g, targets)?
+            }
             Instruction::Measure {
                 qubit: q,
                 classical_bit,
@@ -688,11 +688,11 @@ fn check_instructions(circuit: &Circuit, instructions: &[Instruction]) -> PyPris
                 gate: g,
                 targets,
             } => {
-                condition(c)?;
-                gate(g, targets)?;
+                check_condition(circuit.num_classical_bits, c)?;
+                check_targets(circuit.num_qubits, g, targets)?;
             }
             Instruction::Region(region) => {
-                condition(region.condition())?;
+                check_condition(circuit.num_classical_bits, region.condition())?;
                 check_instructions(circuit, region.body())?;
             }
         }

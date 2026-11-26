@@ -1263,11 +1263,11 @@ impl Backend for StatevectorBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
+        statevector_probability_len(self.name(), self.num_qubits, &self.limits)?;
         #[cfg(feature = "gpu")]
         if let Some(gpu) = self.gpu_state.as_ref() {
             return gpu.probabilities();
         }
-        statevector_probability_len(self.name(), self.num_qubits, &self.limits)?;
         Ok(self.host_probability_vector())
     }
 
@@ -1276,16 +1276,16 @@ impl Backend for StatevectorBackend {
     }
 
     fn export_statevector(&self) -> crate::error::Result<Vec<Complex64>> {
-        #[cfg(feature = "gpu")]
-        if let Some(gpu) = self.gpu_state.as_ref() {
-            return gpu.export_statevector();
-        }
         dense_statevector_len(
             self.name(),
             "statevector export",
             self.num_qubits,
             &self.limits,
         )?;
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = self.gpu_state.as_ref() {
+            return gpu.export_statevector();
+        }
         if self.pending_norm == 1.0 {
             return Ok(self.state.clone());
         }
@@ -1318,10 +1318,13 @@ impl Backend for StatevectorBackend {
     /// clears the context.
     fn supports_two_qubit_kraus(&self) -> bool {
         #[cfg(feature = "gpu")]
-        if self.gpu_context.is_some() {
-            return false;
+        {
+            self.gpu_context.is_none()
         }
-        true
+        #[cfg(not(feature = "gpu"))]
+        {
+            true
+        }
     }
 
     fn reduced_density_matrix_2q(&mut self, q0: usize, q1: usize) -> Result<[[Complex64; 4]; 4]> {
@@ -1360,6 +1363,14 @@ impl Backend for StatevectorBackend {
         schmidt::validate_subsystem(subsystem, self.num_qubits)?;
         #[cfg(feature = "gpu")]
         if let Some(gpu) = self.gpu_state.as_ref() {
+            if self.num_qubits + 1 > self.limits.export_cap() {
+                return Err(schmidt::export_cap_exceeded(
+                    self.name(),
+                    "Schmidt values across a cut, as a gathered copy and thin factor".to_string(),
+                    self.num_qubits + 1,
+                    &self.limits,
+                ));
+            }
             let state = gpu.export_statevector()?;
             return schmidt::dense_schmidt_values(
                 self.name(),
@@ -1386,11 +1397,17 @@ impl Backend for StatevectorBackend {
         let dim =
             reduced_density::reduced_density_side(self.name(), subsystem.len(), &self.limits)?;
         #[cfg(feature = "gpu")]
-        let readback = self
-            .gpu_state
-            .as_ref()
-            .map(|gpu| gpu.export_statevector())
-            .transpose()?;
+        let readback = if let Some(gpu) = self.gpu_state.as_ref() {
+            dense_statevector_len(
+                self.name(),
+                "reduced density matrix GPU readback",
+                self.num_qubits,
+                &self.limits,
+            )?;
+            Some(gpu.export_statevector()?)
+        } else {
+            None
+        };
         #[cfg(feature = "gpu")]
         let state = readback.as_deref().unwrap_or(self.state.as_slice());
         #[cfg(not(feature = "gpu"))]

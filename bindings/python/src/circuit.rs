@@ -47,21 +47,6 @@ fn check_classical_bit(num_bits: usize, bit: usize) -> PyPrismResult<()> {
     Ok(())
 }
 
-fn check_targets(num_qubits: usize, gate: &Gate, targets: &[usize]) -> PyPrismResult<()> {
-    let expected = gate.num_qubits();
-    if targets.len() != expected {
-        return Err(invalid(format!(
-            "gate `{}` expects {expected} qubits, got {}",
-            gate.name(),
-            targets.len()
-        )));
-    }
-    for (idx, &target) in targets.iter().enumerate() {
-        check_qubit(num_qubits, target, format!("target[{idx}]"))?;
-    }
-    Ok(())
-}
-
 /// Parse `(qubit, axis)` factors and reject what `Circuit::add_pauli_rotation`
 /// panics on, so bad input reaches Python as a `PrismError`.
 fn check_pauli_factors(
@@ -121,6 +106,16 @@ fn check_distinct(qubits: &[usize]) -> PyPrismResult<()> {
     Ok(())
 }
 
+fn check_gate_qubits<const N: usize>(
+    num_qubits: usize,
+    args: [(usize, &str); N],
+) -> PyPrismResult<()> {
+    for (q, name) in args {
+        check_qubit(num_qubits, q, name)?;
+    }
+    check_distinct(&args.map(|(q, _)| q))
+}
+
 fn check_mcu_targets(num_qubits: usize, controls: &[usize], target: usize) -> PyPrismResult<()> {
     if controls.is_empty() {
         return Err(invalid("mcu requires at least one control qubit"));
@@ -136,7 +131,10 @@ fn check_mcu_targets(num_qubits: usize, controls: &[usize], target: usize) -> Py
         check_qubit(num_qubits, control, format!("control[{idx}]"))?;
     }
     check_qubit(num_qubits, target, "target")?;
-    Ok(())
+    if controls.contains(&target) {
+        return Err(invalid(format!("qubit {target} named twice")));
+    }
+    check_distinct(controls)
 }
 
 const REPR_MAX_QUBITS: usize = 64;
@@ -159,7 +157,10 @@ pub(crate) fn condition_bits(condition: &ClassicalCondition) -> PyPrismResult<Ve
         ClassicalCondition::Parity { bits, .. } => bits.to_vec(),
         ClassicalCondition::RegisterEquals { offset, size, .. }
         | ClassicalCondition::RegisterNotEquals { offset, size, .. } => {
-            (*offset..offset + size).collect()
+            let end = offset
+                .checked_add(*size)
+                .ok_or_else(|| invalid("classical register range overflows"))?;
+            (*offset..end).collect()
         }
         other => {
             return Err(invalid(format!(
@@ -169,11 +170,25 @@ pub(crate) fn condition_bits(condition: &ClassicalCondition) -> PyPrismResult<Ve
     })
 }
 
-fn check_condition(num_bits: usize, condition: &ClassicalCondition) -> PyPrismResult<()> {
-    for bit in condition_bits(condition)? {
-        check_classical_bit(num_bits, bit)?;
-    }
-    Ok(())
+pub(crate) fn check_condition(
+    num_bits: usize,
+    condition: &ClassicalCondition,
+) -> PyPrismResult<()> {
+    condition
+        .validate_bits(num_bits)
+        .map_err(|err| invalid(err.to_string()))
+}
+
+pub(crate) fn check_targets(
+    num_qubits: usize,
+    gate: &Gate,
+    targets: &[usize],
+) -> PyPrismResult<()> {
+    gate.validate_targets(targets, num_qubits)
+        .map_err(|err| match err {
+            prism_q::PrismError::InvalidParameter { .. } => err.into(),
+            other => invalid(other.to_string()),
+        })
 }
 
 fn check_register(size: usize, value: u64) -> PyPrismResult<()> {
@@ -256,9 +271,7 @@ impl PyClassicalCondition {
 
     /// Evaluate against a classical record, bit `i` at index `i`.
     fn evaluate(&self, classical_bits: Vec<bool>) -> PyPrismResult<bool> {
-        for bit in condition_bits(&self.0)? {
-            check_classical_bit(classical_bits.len(), bit)?;
-        }
+        check_condition(classical_bits.len(), &self.0)?;
         Ok(self.0.evaluate(&classical_bits))
     }
 
@@ -822,8 +835,7 @@ impl PyCircuitBuilder {
         q1: usize,
     ) -> PyPrismResult<PyRefMut<'_, Self>> {
         let num_qubits = slf.inner.circuit().num_qubits;
-        check_qubit(num_qubits, q0, "q0")?;
-        check_qubit(num_qubits, q1, "q1")?;
+        check_gate_qubits(num_qubits, [(q0, "q0"), (q1, "q1")])?;
         slf.inner.rzz(theta, q0, q1);
         Ok(slf)
     }
@@ -901,16 +913,14 @@ impl PyCircuitBuilder {
         target: usize,
     ) -> PyPrismResult<PyRefMut<'_, Self>> {
         let num_qubits = slf.inner.circuit().num_qubits;
-        check_qubit(num_qubits, control, "control")?;
-        check_qubit(num_qubits, target, "target")?;
+        check_gate_qubits(num_qubits, [(control, "control"), (target, "target")])?;
         slf.inner.cx(control, target);
         Ok(slf)
     }
 
     fn cz(mut slf: PyRefMut<'_, Self>, q0: usize, q1: usize) -> PyPrismResult<PyRefMut<'_, Self>> {
         let num_qubits = slf.inner.circuit().num_qubits;
-        check_qubit(num_qubits, q0, "q0")?;
-        check_qubit(num_qubits, q1, "q1")?;
+        check_gate_qubits(num_qubits, [(q0, "q0"), (q1, "q1")])?;
         slf.inner.cz(q0, q1);
         Ok(slf)
     }
@@ -921,8 +931,7 @@ impl PyCircuitBuilder {
         q1: usize,
     ) -> PyPrismResult<PyRefMut<'_, Self>> {
         let num_qubits = slf.inner.circuit().num_qubits;
-        check_qubit(num_qubits, q0, "q0")?;
-        check_qubit(num_qubits, q1, "q1")?;
+        check_gate_qubits(num_qubits, [(q0, "q0"), (q1, "q1")])?;
         slf.inner.swap(q0, q1);
         Ok(slf)
     }
@@ -934,8 +943,7 @@ impl PyCircuitBuilder {
         target: usize,
     ) -> PyPrismResult<PyRefMut<'_, Self>> {
         let num_qubits = slf.inner.circuit().num_qubits;
-        check_qubit(num_qubits, control, "control")?;
-        check_qubit(num_qubits, target, "target")?;
+        check_gate_qubits(num_qubits, [(control, "control"), (target, "target")])?;
         slf.inner.cphase(theta, control, target);
         Ok(slf)
     }
@@ -947,8 +955,7 @@ impl PyCircuitBuilder {
         target: usize,
     ) -> PyPrismResult<PyRefMut<'py, Self>> {
         let num_qubits = slf.inner.circuit().num_qubits;
-        check_qubit(num_qubits, control, "control")?;
-        check_qubit(num_qubits, target, "target")?;
+        check_gate_qubits(num_qubits, [(control, "control"), (target, "target")])?;
         let mat = crate::gate::extract_2x2(matrix)?;
         slf.inner.cu(mat, control, target);
         Ok(slf)
@@ -988,9 +995,7 @@ impl PyCircuitBuilder {
         q1: usize,
     ) -> PyPrismResult<PyRefMut<'_, Self>> {
         let num_qubits = slf.inner.circuit().num_qubits;
-        check_qubit(num_qubits, q0, "q0")?;
-        check_qubit(num_qubits, q1, "q1")?;
-        check_distinct(&[q0, q1])?;
+        check_gate_qubits(num_qubits, [(q0, "q0"), (q1, "q1")])?;
         slf.inner.rxx(theta, q0, q1);
         Ok(slf)
     }
@@ -1003,9 +1008,7 @@ impl PyCircuitBuilder {
         q1: usize,
     ) -> PyPrismResult<PyRefMut<'_, Self>> {
         let num_qubits = slf.inner.circuit().num_qubits;
-        check_qubit(num_qubits, q0, "q0")?;
-        check_qubit(num_qubits, q1, "q1")?;
-        check_distinct(&[q0, q1])?;
+        check_gate_qubits(num_qubits, [(q0, "q0"), (q1, "q1")])?;
         slf.inner.ryy(theta, q0, q1);
         Ok(slf)
     }
@@ -1016,9 +1019,7 @@ impl PyCircuitBuilder {
         target: usize,
     ) -> PyPrismResult<PyRefMut<'_, Self>> {
         let num_qubits = slf.inner.circuit().num_qubits;
-        check_qubit(num_qubits, control, "control")?;
-        check_qubit(num_qubits, target, "target")?;
-        check_distinct(&[control, target])?;
+        check_gate_qubits(num_qubits, [(control, "control"), (target, "target")])?;
         slf.inner.cy(control, target);
         Ok(slf)
     }
@@ -1029,9 +1030,7 @@ impl PyCircuitBuilder {
         target: usize,
     ) -> PyPrismResult<PyRefMut<'_, Self>> {
         let num_qubits = slf.inner.circuit().num_qubits;
-        check_qubit(num_qubits, control, "control")?;
-        check_qubit(num_qubits, target, "target")?;
-        check_distinct(&[control, target])?;
+        check_gate_qubits(num_qubits, [(control, "control"), (target, "target")])?;
         slf.inner.ch(control, target);
         Ok(slf)
     }
@@ -1043,9 +1042,7 @@ impl PyCircuitBuilder {
         target: usize,
     ) -> PyPrismResult<PyRefMut<'_, Self>> {
         let num_qubits = slf.inner.circuit().num_qubits;
-        check_qubit(num_qubits, control, "control")?;
-        check_qubit(num_qubits, target, "target")?;
-        check_distinct(&[control, target])?;
+        check_gate_qubits(num_qubits, [(control, "control"), (target, "target")])?;
         slf.inner.crx(theta, control, target);
         Ok(slf)
     }
@@ -1057,9 +1054,7 @@ impl PyCircuitBuilder {
         target: usize,
     ) -> PyPrismResult<PyRefMut<'_, Self>> {
         let num_qubits = slf.inner.circuit().num_qubits;
-        check_qubit(num_qubits, control, "control")?;
-        check_qubit(num_qubits, target, "target")?;
-        check_distinct(&[control, target])?;
+        check_gate_qubits(num_qubits, [(control, "control"), (target, "target")])?;
         slf.inner.cry(theta, control, target);
         Ok(slf)
     }
@@ -1071,9 +1066,7 @@ impl PyCircuitBuilder {
         target: usize,
     ) -> PyPrismResult<PyRefMut<'_, Self>> {
         let num_qubits = slf.inner.circuit().num_qubits;
-        check_qubit(num_qubits, control, "control")?;
-        check_qubit(num_qubits, target, "target")?;
-        check_distinct(&[control, target])?;
+        check_gate_qubits(num_qubits, [(control, "control"), (target, "target")])?;
         slf.inner.crz(theta, control, target);
         Ok(slf)
     }
@@ -1085,9 +1078,7 @@ impl PyCircuitBuilder {
         q1: usize,
     ) -> PyPrismResult<PyRefMut<'_, Self>> {
         let num_qubits = slf.inner.circuit().num_qubits;
-        check_qubit(num_qubits, q0, "q0")?;
-        check_qubit(num_qubits, q1, "q1")?;
-        check_distinct(&[q0, q1])?;
+        check_gate_qubits(num_qubits, [(q0, "q0"), (q1, "q1")])?;
         slf.inner.iswap(q0, q1);
         Ok(slf)
     }
@@ -1100,10 +1091,14 @@ impl PyCircuitBuilder {
         target: usize,
     ) -> PyPrismResult<PyRefMut<'_, Self>> {
         let num_qubits = slf.inner.circuit().num_qubits;
-        check_qubit(num_qubits, control0, "control0")?;
-        check_qubit(num_qubits, control1, "control1")?;
-        check_qubit(num_qubits, target, "target")?;
-        check_distinct(&[control0, control1, target])?;
+        check_gate_qubits(
+            num_qubits,
+            [
+                (control0, "control0"),
+                (control1, "control1"),
+                (target, "target"),
+            ],
+        )?;
         slf.inner.ccx(control0, control1, target);
         Ok(slf)
     }
@@ -1116,10 +1111,7 @@ impl PyCircuitBuilder {
         q1: usize,
     ) -> PyPrismResult<PyRefMut<'_, Self>> {
         let num_qubits = slf.inner.circuit().num_qubits;
-        check_qubit(num_qubits, control, "control")?;
-        check_qubit(num_qubits, q0, "q0")?;
-        check_qubit(num_qubits, q1, "q1")?;
-        check_distinct(&[control, q0, q1])?;
+        check_gate_qubits(num_qubits, [(control, "control"), (q0, "q0"), (q1, "q1")])?;
         slf.inner.cswap(control, q0, q1);
         Ok(slf)
     }
@@ -1336,24 +1328,109 @@ macro_rules! circuit_fn {
     };
 }
 
-circuit_fn!(qft, circuits::qft_circuit, (n: usize), (n));
-circuit_fn!(random, circuits::random_circuit, (n: usize, depth: usize, seed: u64), (n, depth, seed = 42));
-circuit_fn!(hardware_efficient_ansatz, circuits::hardware_efficient_ansatz, (n: usize, layers: usize, seed: u64), (n, layers, seed = 42));
-circuit_fn!(clifford_heavy, circuits::clifford_heavy_circuit, (n: usize, depth: usize, seed: u64), (n, depth, seed = 42));
+#[pyfunction]
+#[pyo3(signature = (n))]
+fn qft(n: usize) -> PyPrismResult<PyCircuit> {
+    if n == 0 || n > u8::MAX as usize {
+        return Err(invalid(format!(
+            "qft requires between 1 and {} qubits, got {n}",
+            u8::MAX
+        )));
+    }
+    Ok(PyCircuit(circuits::qft_circuit(n)))
+}
+
+#[pyfunction]
+#[pyo3(signature = (n, depth, seed = 42))]
+fn random(n: usize, depth: usize, seed: u64) -> PyPrismResult<PyCircuit> {
+    Ok(PyCircuit(circuits::random_circuit(n, depth, seed)))
+}
+
+#[pyfunction]
+#[pyo3(signature = (n, layers, seed = 42))]
+fn hardware_efficient_ansatz(n: usize, layers: usize, seed: u64) -> PyPrismResult<PyCircuit> {
+    Ok(PyCircuit(circuits::hardware_efficient_ansatz(
+        n, layers, seed,
+    )))
+}
+
+#[pyfunction]
+#[pyo3(signature = (n, depth, seed = 42))]
+fn clifford_heavy(n: usize, depth: usize, seed: u64) -> PyPrismResult<PyCircuit> {
+    Ok(PyCircuit(circuits::clifford_heavy_circuit(n, depth, seed)))
+}
+
 circuit_fn!(clifford_random_pairs, circuits::clifford_random_pairs, (n: usize, depth: usize, seed: u64), (n, depth, seed = 42));
-circuit_fn!(qaoa, circuits::qaoa_circuit, (n: usize, layers: usize, seed: u64), (n, layers, seed = 42));
+
+#[pyfunction]
+#[pyo3(signature = (n, layers, seed = 42))]
+fn qaoa(n: usize, layers: usize, seed: u64) -> PyPrismResult<PyCircuit> {
+    Ok(PyCircuit(circuits::qaoa_circuit(n, layers, seed)))
+}
+
 circuit_fn!(single_qubit_rotation, circuits::single_qubit_rotation_circuit, (n: usize, depth: usize, seed: u64), (n, depth, seed = 42));
 circuit_fn!(quantum_volume, circuits::quantum_volume_circuit, (n: usize, depth: usize, seed: u64), (n, depth, seed = 42));
 circuit_fn!(cz_chain, circuits::cz_chain_circuit, (n: usize, depth: usize, seed: u64), (n, depth, seed = 42));
-circuit_fn!(phase_estimation, circuits::phase_estimation_circuit, (n: usize), (n));
-circuit_fn!(independent_bell_pairs, circuits::independent_bell_pairs, (n_pairs: usize), (n_pairs));
-circuit_fn!(independent_random_blocks, circuits::independent_random_blocks, (num_blocks: usize, block_size: usize, depth: usize, seed: u64), (num_blocks, block_size, depth, seed = 42));
-circuit_fn!(local_clifford_blocks, circuits::local_clifford_blocks, (num_blocks: usize, block_size: usize, depth: usize, seed: u64), (num_blocks, block_size, depth, seed = 42));
+
+#[pyfunction]
+#[pyo3(signature = (n))]
+fn phase_estimation(n: usize) -> PyPrismResult<PyCircuit> {
+    if n < 2 {
+        return Err(invalid("phase_estimation requires at least 2 qubits"));
+    }
+    Ok(PyCircuit(circuits::phase_estimation_circuit(n)))
+}
+
+#[pyfunction]
+#[pyo3(signature = (n_pairs))]
+fn independent_bell_pairs(n_pairs: usize) -> PyPrismResult<PyCircuit> {
+    n_pairs
+        .checked_mul(2)
+        .ok_or_else(|| invalid("independent_bell_pairs qubit count overflows usize"))?;
+    Ok(PyCircuit(circuits::independent_bell_pairs(n_pairs)))
+}
+
+#[pyfunction]
+#[pyo3(signature = (num_blocks, block_size, depth, seed = 42))]
+fn independent_random_blocks(
+    num_blocks: usize,
+    block_size: usize,
+    depth: usize,
+    seed: u64,
+) -> PyPrismResult<PyCircuit> {
+    num_blocks
+        .checked_mul(block_size)
+        .ok_or_else(|| invalid("independent_random_blocks qubit count overflows usize"))?;
+    Ok(PyCircuit(circuits::independent_random_blocks(
+        num_blocks, block_size, depth, seed,
+    )))
+}
+
+#[pyfunction]
+#[pyo3(signature = (num_blocks, block_size, depth, seed = 42))]
+fn local_clifford_blocks(
+    num_blocks: usize,
+    block_size: usize,
+    depth: usize,
+    seed: u64,
+) -> PyPrismResult<PyCircuit> {
+    num_blocks
+        .checked_mul(block_size)
+        .ok_or_else(|| invalid("local_clifford_blocks qubit count overflows usize"))?;
+    Ok(PyCircuit(circuits::local_clifford_blocks(
+        num_blocks, block_size, depth, seed,
+    )))
+}
 
 #[pyfunction]
 #[pyo3(signature = (n, depth, t_fraction = 0.1, seed = 42))]
-fn clifford_t(n: usize, depth: usize, t_fraction: f64, seed: u64) -> PyCircuit {
-    PyCircuit(circuits::clifford_t_circuit(n, depth, t_fraction, seed))
+fn clifford_t(n: usize, depth: usize, t_fraction: f64, seed: u64) -> PyPrismResult<PyCircuit> {
+    if !t_fraction.is_finite() || !(0.0..=1.0).contains(&t_fraction) {
+        return Err(invalid("t_fraction must be finite and in [0.0, 1.0]"));
+    }
+    Ok(PyCircuit(circuits::clifford_t_circuit(
+        n, depth, t_fraction, seed,
+    )))
 }
 
 #[pyfunction]

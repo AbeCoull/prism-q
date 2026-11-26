@@ -832,7 +832,7 @@ impl Backend for FactoredStabilizerBackend {
         // `FactoredBlock::mask` is a u64 and `Probabilities::len` is
         // `1 << total_qubits`, so a wider register has no representable lazy
         // form either; the dense terminal declines it.
-        if self.num_qubits > 64 {
+        if self.num_qubits >= usize::BITS as usize {
             return None;
         }
 

@@ -354,7 +354,8 @@ pub fn qft_textbook_steps(
         let phases = (0..q).map(move |k| QftTextbookStep::CPhase {
             control: label(k),
             target: label(q),
-            theta: std::f64::consts::TAU / (1u64 << (q - k + 1)) as f64,
+            theta: i32::try_from(q - k + 1)
+                .map_or(0.0, |exp| std::f64::consts::TAU * 0.5f64.powi(exp)),
         });
         head.chain(phases)
     });

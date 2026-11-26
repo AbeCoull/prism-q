@@ -1023,6 +1023,17 @@ impl<'a> Parser<'a> {
             .collect())
     }
 
+    fn angle_is_valid(&self, angle: f64) -> bool {
+        match tag_id(angle) {
+            Some(id) => {
+                let tags = self.tags.borrow();
+                let form = &tags[id];
+                form.offset.is_finite() && form.terms.iter().all(|&(_, scale)| scale.is_finite())
+            }
+            None => angle.is_finite(),
+        }
+    }
+
     /// `gphase(theta)` multiplies the state by `e^(i theta)`.
     ///
     /// A global phase is observable through a `state_vector` result and under a
@@ -1047,15 +1058,38 @@ impl<'a> Parser<'a> {
             });
         }
         let mut angle = params[0];
-        for modifier in modifiers {
+        if !self.angle_is_valid(angle) {
+            return Err(parse_error(line_num, "global phase angle is not finite"));
+        }
+        for modifier in modifiers.iter().rev() {
             match modifier {
                 Modifier::Inv if tag_id(angle).is_some() => angle = self.mix(&[(-1.0, angle)], 0.0),
                 Modifier::Pow(k) if tag_id(angle).is_some() => {
+                    if !k.is_finite() {
+                        return Err(parse_error(
+                            line_num,
+                            format!("pow({k}) exponent is not finite"),
+                        ));
+                    }
                     angle = self.mix(&[(*k, angle)], 0.0);
                 }
                 Modifier::Inv => angle = -angle,
-                Modifier::Pow(k) => angle *= k,
+                Modifier::Pow(k) => {
+                    if !k.is_finite() {
+                        return Err(parse_error(
+                            line_num,
+                            format!("pow({k}) exponent is not finite"),
+                        ));
+                    }
+                    angle *= k;
+                }
                 Modifier::Ctrl { .. } => {}
+            }
+            if !self.angle_is_valid(angle) {
+                return Err(parse_error(
+                    line_num,
+                    "global phase angle overflowed or became non-finite",
+                ));
             }
         }
         if tag_id(angle).is_some() {
@@ -1458,6 +1492,13 @@ impl<'a> Parser<'a> {
         line_num: usize,
         out: &mut Vec<Instruction>,
     ) -> Result<()> {
+        if let Some(instrs) = self.expand_user_gate(gate_name, params, qubits, line_num)? {
+            out.extend(Self::modify_expansion(
+                instrs, modifiers, gate_name, line_num,
+            )?);
+            return Ok(());
+        }
+
         if let Some(instrs) =
             gate_library::resolve_decomposed_gate(gate_name, params, qubits, line_num)?
         {
@@ -1476,13 +1517,6 @@ impl<'a> Parser<'a> {
                 out.extend(lowered);
                 return Ok(());
             }
-            out.extend(Self::modify_expansion(
-                instrs, modifiers, gate_name, line_num,
-            )?);
-            return Ok(());
-        }
-
-        if let Some(instrs) = self.expand_user_gate(gate_name, params, qubits, line_num)? {
             out.extend(Self::modify_expansion(
                 instrs, modifiers, gate_name, line_num,
             )?);

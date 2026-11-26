@@ -206,6 +206,18 @@ def test_invalid_programmatic_indices_raise_prism_error():
         CircuitBuilder(1, 0).measure(0, 0)
 
 
+@pytest.mark.parametrize("gate", [
+    lambda b: b.cx(0, 0),
+    lambda b: b.swap(1, 1),
+    lambda b: b.rzz(0.1, 0, 0),
+    lambda b: b.mcu([[0, 1], [1, 0]], [1, 0], 0),
+    lambda b: b.gate(prism_q.Gate.cx(), [0, 0]),
+])
+def test_builder_rejects_repeated_gate_targets(gate):
+    with pytest.raises(prism_q.PrismError, match="named twice"):
+        gate(CircuitBuilder(2))
+
+
 def test_initial_state_evolves_from_the_given_amplitudes():
     # H (cos(pi/8)|0> + sin(pi/8)|1>) has p(0) = (1 + sin(pi/4))/2.
     theta = math.pi / 8

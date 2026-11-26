@@ -1806,20 +1806,23 @@ fn bench_mps_scaling(c: &mut Criterion) {
     group.finish();
 }
 
-/// Amplitude damping over a brickwork chain at bond 16. Every damping event
-/// reads a single-site reduced density matrix off the chain before choosing
-/// its branch, so these rows price that read under bonds the cap shapes.
 fn bench_mps_noisy_trajectory(c: &mut Criterion) {
     let mut group = c.benchmark_group("mps/noisy_trajectory");
     configure_group(&mut group);
 
-    for &(n, depth, shots) in &[(12usize, 8usize, 4usize), (16, 10, 1)] {
+    for &(n, depth, shots) in &[(12usize, 8usize, 4usize), (16, 10, 1), (24, 10, 1)] {
         let circuit = with_terminal_measurements(circuits::brickwork_circuit(n, depth, SEED));
-        let noise = prism_q::NoiseModel::with_amplitude_damping(&circuit, 0.01);
-        group.bench_with_input(
-            BenchmarkId::new("amplitude_damping_b16", n),
-            &circuit,
-            |b, circ| {
+        for (name, noise) in [
+            (
+                "amplitude_damping_b16",
+                prism_q::NoiseModel::with_amplitude_damping(&circuit, 0.01),
+            ),
+            (
+                "depolarizing_b16",
+                prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.01),
+            ),
+        ] {
+            group.bench_with_input(BenchmarkId::new(name, n), &circuit, |b, circ| {
                 b.iter(|| {
                     black_box(
                         run_shots_with_noise(
@@ -1832,8 +1835,8 @@ fn bench_mps_noisy_trajectory(c: &mut Criterion) {
                         .unwrap(),
                     )
                 });
-            },
-        );
+            });
+        }
     }
     group.finish();
 }

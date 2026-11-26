@@ -385,7 +385,7 @@ extern "C" __global__ void bts_transpose_meas_to_shot(
               + (unsigned long long)m_word] = out;
 }
 
-// Shared helpers for the fused noise kernel below. The xoshiro256++ stream
+// Shared helpers for the noise and sampling kernels below. The xoshiro256++ stream
 // per (event, 64-shot batch) is seeded from a master RNG value plus a
 // splitmix64 hash of (event, absolute batch), so every bit of randomness is
 // drawn on the device. Event thresholds are packed by the host as three u64
@@ -444,26 +444,97 @@ extern "C" __global__ void bts_fill_random(
     }
 }
 
-// Per-(row, batch) fused noise generator and XOR accumulator. Each thread
-// owns one (row, batch) output word, walks that row's event list, and
-// accumulates the 64-bit masks in a register. The single `^=` write at the
-// end replaces up to N `atomicXor` calls and removes the cross-block
-// contention an event-major launch would pay on rows shared by many events.
+// Per-(event, 64-shot batch) device noise mask generator. Each thread draws
+// 64 shots from its xoshiro256++ stream and writes packed X and Z flip masks
+// in [event * chunk_s_words + batch] layout so both this write and
+// bts_apply_noise_row_major's read are coalesced. When t_p == 0ULL, both masks
+// are written explicitly because device mask buffers are reused without
+// zeroing. Trailing padding bits on the last word are cleared via tail_mask.
+extern "C" __global__ void bts_generate_noise_masks(
+    unsigned long long *x_masks,
+    unsigned long long *z_masks,
+    const unsigned long long *event_thresholds,
+    int num_events,
+    int chunk_s_words,
+    unsigned long long tail_mask,
+    unsigned long long master_seed,
+    unsigned long long batch_offset
+) {
+    int event = blockIdx.x;
+    int batch = blockIdx.y * blockDim.x + threadIdx.x;
+    if (event >= num_events || batch >= chunk_s_words) return;
+
+    unsigned long long out_idx =
+        (unsigned long long)event * (unsigned long long)chunk_s_words +
+        (unsigned long long)batch;
+
+    unsigned long long t_x  = event_thresholds[(unsigned long long)event * 3ULL + 0ULL];
+    unsigned long long t_xy = event_thresholds[(unsigned long long)event * 3ULL + 1ULL];
+    unsigned long long t_p  = event_thresholds[(unsigned long long)event * 3ULL + 2ULL];
+    if (t_p == 0ULL) {
+        x_masks[out_idx] = 0ULL;
+        z_masks[out_idx] = 0ULL;
+        return;
+    }
+
+    unsigned long long absolute_batch = batch_offset + (unsigned long long)batch;
+    unsigned long long seed = master_seed
+        ^ ((unsigned long long)event * 0x9e3779b97f4a7c15ULL)
+        ^ bts_splitmix64_step(absolute_batch);
+    unsigned long long s0 = bts_splitmix64_step(seed);
+    unsigned long long s1 = bts_splitmix64_step(s0);
+    unsigned long long s2 = bts_splitmix64_step(s1);
+    unsigned long long s3 = bts_splitmix64_step(s2);
+
+    unsigned long long x_mask = 0ULL;
+    unsigned long long z_mask = 0ULL;
+    #pragma unroll 8
+    for (int bit = 0; bit < 64; ++bit) {
+        unsigned long long result = bts_rotl64(s0 + s3, 23) + s0;
+        unsigned long long t = s1 << 17;
+        s2 ^= s0;
+        s3 ^= s1;
+        s1 ^= s2;
+        s0 ^= s3;
+        s2 ^= t;
+        s3 = bts_rotl64(s3, 45);
+
+        unsigned long long bit_mask = 1ULL << bit;
+        if (result < t_x) {
+            z_mask |= bit_mask;
+        } else if (result < t_xy) {
+            x_mask |= bit_mask;
+            z_mask |= bit_mask;
+        } else if (result < t_p) {
+            x_mask |= bit_mask;
+        }
+    }
+
+    if (batch == chunk_s_words - 1) {
+        x_mask &= tail_mask;
+        z_mask &= tail_mask;
+    }
+    x_masks[out_idx] = x_mask;
+    z_masks[out_idx] = z_mask;
+}
+
+// Per-(row, batch) XOR accumulator consuming masks from bts_generate_noise_masks.
+// Each thread walks one row's CSR entry list, accumulates X/Z mask flips into
+// a register, and XORs once into meas_major.
 //
 // Entry layout: `event << 2 | flag`. Flag bit 0 means the event contributes
 // X to this row, bit 1 means Z. A Y contribution sets both bits and applies
-// both masks from the single xoshiro stream.
-extern "C" __global__ void bts_generate_and_apply_noise_meas_major_by_row(
+// both masks.
+extern "C" __global__ void bts_apply_noise_row_major(
     unsigned long long *meas_major,
     int num_meas,
     int s_words,
     int out_word_offset,
     const unsigned int *row_event_offsets,
     const unsigned int *row_event_entries,
-    const unsigned long long *event_thresholds,
-    int chunk_s_words,
-    unsigned long long master_seed,
-    unsigned long long batch_offset
+    const unsigned long long *x_masks,
+    const unsigned long long *z_masks,
+    int chunk_s_words
 ) {
     int row = blockIdx.x;
     int batch = blockIdx.y * blockDim.x + threadIdx.x;
@@ -473,56 +544,16 @@ extern "C" __global__ void bts_generate_and_apply_noise_meas_major_by_row(
     unsigned int end = row_event_offsets[row + 1];
     if (start == end) return;
 
-    unsigned long long absolute_batch = batch_offset + (unsigned long long)batch;
-    unsigned long long batch_mix = bts_splitmix64_step(absolute_batch);
     unsigned long long acc = 0ULL;
-
     for (unsigned int i = start; i < end; ++i) {
         unsigned int entry = row_event_entries[i];
         unsigned int event = entry >> 2;
         unsigned int flag = entry & 3u;
-
-        unsigned long long t_x  = event_thresholds[(unsigned long long)event * 3ULL + 0ULL];
-        unsigned long long t_xy = event_thresholds[(unsigned long long)event * 3ULL + 1ULL];
-        unsigned long long t_p  = event_thresholds[(unsigned long long)event * 3ULL + 2ULL];
-        if (t_p == 0ULL) continue;
-
-        // Match the event-major kernel's seed derivation exactly so both
-        // paths produce identical outcomes from the same master seed.
-        unsigned long long seed = master_seed
-            ^ ((unsigned long long)event * 0x9e3779b97f4a7c15ULL)
-            ^ batch_mix;
-        unsigned long long s0 = bts_splitmix64_step(seed);
-        unsigned long long s1 = bts_splitmix64_step(s0);
-        unsigned long long s2 = bts_splitmix64_step(s1);
-        unsigned long long s3 = bts_splitmix64_step(s2);
-
-        unsigned long long x_mask = 0ULL;
-        unsigned long long z_mask = 0ULL;
-        #pragma unroll 8
-        for (int bit = 0; bit < 64; ++bit) {
-            unsigned long long result = bts_rotl64(s0 + s3, 23) + s0;
-            unsigned long long t = s1 << 17;
-            s2 ^= s0;
-            s3 ^= s1;
-            s1 ^= s2;
-            s0 ^= s3;
-            s2 ^= t;
-            s3 = bts_rotl64(s3, 45);
-
-            unsigned long long bit_mask = 1ULL << bit;
-            if (result < t_x) {
-                z_mask |= bit_mask;
-            } else if (result < t_xy) {
-                x_mask |= bit_mask;
-                z_mask |= bit_mask;
-            } else if (result < t_p) {
-                x_mask |= bit_mask;
-            }
-        }
-
-        if (flag & 1u) acc ^= x_mask;
-        if (flag & 2u) acc ^= z_mask;
+        unsigned long long mask_idx =
+            (unsigned long long)event * (unsigned long long)chunk_s_words +
+            (unsigned long long)batch;
+        if (flag & 1u) acc ^= x_masks[mask_idx];
+        if (flag & 2u) acc ^= z_masks[mask_idx];
     }
 
     if (acc == 0ULL) return;

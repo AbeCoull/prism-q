@@ -16,6 +16,7 @@ const JACOBI_REL_TOL: f64 = 1e-15;
 
 /// Thin SVD result: A = U · diag(S) · V†
 #[doc(hidden)]
+#[derive(Default)]
 pub struct SvdResult {
     pub u: Vec<Complex64>,
     pub u_rows: usize,
@@ -24,15 +25,87 @@ pub struct SvdResult {
     pub vt_cols: usize,
 }
 
+/// Grow-only scratch and result buffers for [`svd_with_workspace`] and
+/// [`svd_singular_values_with_workspace`], kept across gates so steady-state
+/// cuts allocate nothing.
+#[derive(Default)]
+pub(super) struct SvdWorkspace {
+    pub(super) result: SvdResult,
+    #[cfg(feature = "parallel")]
+    s_cplx: Vec<Complex64>,
+    #[cfg(feature = "parallel")]
+    probe_x: Vec<Complex64>,
+    #[cfg(feature = "parallel")]
+    probe_residual: Vec<Complex64>,
+    jacobi_work: Vec<Complex64>,
+    jacobi_v: Vec<Complex64>,
+    jacobi_s: Vec<f64>,
+    jacobi_u: Vec<Complex64>,
+    jacobi_order: Vec<usize>,
+    #[cfg(feature = "parallel")]
+    faer_scratch: Option<faer::dyn_stack::MemBuffer>,
+}
+
+#[cfg(feature = "parallel")]
+fn ensure_mem_stack(
+    slot: &mut Option<faer::dyn_stack::MemBuffer>,
+    req: faer::dyn_stack::StackReq,
+) -> &mut faer::dyn_stack::MemStack {
+    use faer::dyn_stack::{MemBuffer, MemStack};
+    let needs_alloc = slot
+        .as_mut()
+        .is_none_or(|buf| !MemStack::new(buf).can_hold(req));
+    if needs_alloc {
+        *slot = Some(MemBuffer::new(req));
+    }
+    MemStack::new(slot.as_mut().expect("buffer initialized above"))
+}
+
 /// Thin SVD through faer when the `parallel` feature is on and `m * n >= 256`,
 /// one-sided Jacobi otherwise.
 #[doc(hidden)]
 pub fn svd(a: &[Complex64], m: usize, n: usize) -> SvdResult {
+    let mut ws = SvdWorkspace::default();
+    svd_with_workspace(&mut ws, a, m, n);
+    ws.result
+}
+
+/// Thin SVD into `ws.result`, reusing `ws`'s scratch allocations.
+pub(super) fn svd_with_workspace(ws: &mut SvdWorkspace, a: &[Complex64], m: usize, n: usize) {
     #[cfg(feature = "parallel")]
     if m * n >= 256 {
-        return svd_faer(a, m, n);
+        svd_faer_into(ws, a, m, n);
+        return;
     }
-    svd_jacobi(a, m, n)
+    svd_jacobi_into(ws, a, m, n, true);
+}
+
+/// Singular values only into `ws.result.s`, skipping singular vector computation.
+///
+/// Uses bidiagonal QR iteration (`divide_and_conquer = false`) with
+/// `ComputeSvdVectors::No`: without singular vectors `probe_residual` cannot
+/// guard against faer divide-and-conquer error (`~1e-8`) on rank-deficient
+/// graded spectra, and bidiagonal QR iteration without vector accumulation
+/// runs in `O(k^2)`.
+pub(crate) fn svd_singular_values_with_workspace<'a>(
+    ws: &'a mut SvdWorkspace,
+    a: &[Complex64],
+    m: usize,
+    n: usize,
+) -> &'a [f64] {
+    #[cfg(feature = "parallel")]
+    if m * n >= 256 && faer_svd_core(ws, a, m, n, false, false) {
+        return &ws.result.s;
+    }
+    svd_jacobi_into(ws, a, m, n, false);
+    &ws.result.s
+}
+
+/// Singular values only of column-major `a` (`m` by `n`), in descending order.
+pub(crate) fn svd_singular_values(a: &[Complex64], m: usize, n: usize) -> Vec<f64> {
+    let mut ws = SvdWorkspace::default();
+    svd_singular_values_with_workspace(&mut ws, a, m, n);
+    ws.result.s
 }
 
 /// Return a length-`len` window of `buf`, growing it only past its high-water
@@ -70,6 +143,12 @@ pub(super) struct ThinQr {
     pub(super) q: Vec<Complex64>,
     pub(super) r: Vec<Complex64>,
     v: Vec<Complex64>,
+    #[cfg(feature = "parallel")]
+    qr_work: Vec<Complex64>,
+    #[cfg(feature = "parallel")]
+    q_coeff: Vec<Complex64>,
+    #[cfg(feature = "parallel")]
+    faer_scratch: Option<faer::dyn_stack::MemBuffer>,
     pub(super) rank: usize,
     /// Squared weight the last [`ThinQr::factorize`] left with the columns it
     /// dropped, relative to the whole input. A column is dropped only where
@@ -105,25 +184,63 @@ impl ThinQr {
     /// column-at-a-time projections lose to a blocked reflector sweep.
     #[cfg(feature = "parallel")]
     fn factorize_faer(&mut self, a: &[Complex64], rows: usize, cols: usize) {
-        use faer::MatRef;
+        use faer::dyn_stack::StackReq;
+        use faer::linalg::householder::{
+            apply_block_householder_sequence_on_the_left_in_place_scratch,
+            apply_block_householder_sequence_on_the_left_in_place_with_conj,
+        };
+        use faer::linalg::qr::no_pivoting::factor::{
+            qr_in_place, qr_in_place_scratch, recommended_block_size,
+        };
+        use faer::{Conj, MatMut, MatRef};
 
         let k = rows.min(cols);
-        let qr = MatRef::from_column_major_slice(a, rows, cols).qr();
-        let q_mat = qr.compute_thin_Q();
-        let r_mat = qr.thin_R();
+        let block_size = recommended_block_size::<Complex64>(rows, cols);
+        let par = faer::get_global_parallelism();
+
+        let qr_work = scratch_slice(&mut self.qr_work, rows * cols);
+        qr_work.copy_from_slice(&a[..rows * cols]);
+        let q_coeff = scratch_slice(&mut self.q_coeff, block_size * k);
+        q_coeff.fill(ZERO);
+
+        let req = StackReq::any_of(&[
+            qr_in_place_scratch::<Complex64>(rows, cols, block_size, par, Default::default()),
+            apply_block_householder_sequence_on_the_left_in_place_scratch::<Complex64>(
+                rows, block_size, k,
+            ),
+        ]);
+        let stack = ensure_mem_stack(&mut self.faer_scratch, req);
+
+        qr_in_place(
+            MatMut::from_column_major_slice_mut(qr_work, rows, cols),
+            MatMut::from_column_major_slice_mut(q_coeff, block_size, k),
+            par,
+            stack,
+            Default::default(),
+        );
+
+        let r = scratch_slice(&mut self.r, k * cols);
+        r.fill(ZERO);
+        for (j, col) in qr_work[..rows * cols].chunks_exact(rows).enumerate() {
+            for (i, &val) in col.iter().take(k.min(j + 1)).enumerate() {
+                r[i * cols + j] = val;
+            }
+        }
 
         let q = scratch_slice(&mut self.q, rows * k);
-        for j in 0..k {
-            for i in 0..rows {
-                q[j * rows + i] = q_mat[(i, j)];
-            }
-        }
-        let r = scratch_slice(&mut self.r, k * cols);
+        q.fill(ZERO);
         for i in 0..k {
-            for j in 0..cols {
-                r[i * cols + j] = if j >= i { r_mat[(i, j)] } else { ZERO };
-            }
+            q[i * rows + i] = ONE;
         }
+        apply_block_householder_sequence_on_the_left_in_place_with_conj(
+            MatRef::from_column_major_slice(qr_work, rows, cols).subcols(0, k),
+            MatRef::from_column_major_slice(q_coeff, block_size, k),
+            Conj::No,
+            MatMut::from_column_major_slice_mut(q, rows, k),
+            par,
+            stack,
+        );
+
         self.rank = k;
         #[cfg(test)]
         {
@@ -352,12 +469,35 @@ pub(super) fn fill_vt_site_data(
 /// sorted by descending singular values.
 #[doc(hidden)]
 pub fn svd_jacobi(a: &[Complex64], m: usize, n: usize) -> SvdResult {
-    let k = m.min(n);
-    let transpose = m < n;
+    let mut ws = SvdWorkspace::default();
+    svd_jacobi_into(&mut ws, a, m, n, true);
+    ws.result
+}
 
+fn svd_jacobi_into(
+    ws: &mut SvdWorkspace,
+    a: &[Complex64],
+    m: usize,
+    n: usize,
+    compute_vectors: bool,
+) {
+    let k = m.min(n);
+    if k == 0 {
+        ws.result.s.clear();
+        if compute_vectors {
+            ws.result.u.clear();
+            ws.result.vt.clear();
+            ws.result.u_rows = m;
+            ws.result.vt_cols = n;
+        }
+        return;
+    }
+
+    let transpose = m < n;
     let (work_m, work_n) = if transpose { (n, m) } else { (m, n) };
 
-    let mut work = vec![ZERO; work_m * work_n];
+    ws.jacobi_work.resize(work_m * work_n, ZERO);
+    let work = &mut ws.jacobi_work[..work_m * work_n];
     if transpose {
         for col_b in 0..work_n {
             for row_b in 0..work_m {
@@ -368,10 +508,14 @@ pub fn svd_jacobi(a: &[Complex64], m: usize, n: usize) -> SvdResult {
         work.copy_from_slice(&a[..work_m * work_n]);
     }
 
-    let mut v = vec![ZERO; work_n * work_n];
-    for i in 0..work_n {
-        v[i * work_n + i] = ONE;
+    if compute_vectors {
+        ws.jacobi_v.resize(work_n * work_n, ZERO);
+        ws.jacobi_v.fill(ZERO);
+        for i in 0..work_n {
+            ws.jacobi_v[i * work_n + i] = ONE;
+        }
     }
+    let v = &mut ws.jacobi_v;
 
     for _sweep in 0..MAX_SVD_SWEEPS {
         let mut rotated = false;
@@ -419,11 +563,13 @@ pub fn svd_jacobi(a: &[Complex64], m: usize, n: usize) -> SvdResult {
                     work[q * work_m + r] = -s_cx * ap + c_cx * phase_conj * aq;
                 }
 
-                for r in 0..work_n {
-                    let vp = v[p * work_n + r];
-                    let vq = v[q * work_n + r];
-                    v[p * work_n + r] = c_cx * vp + s_cx * phase_conj * vq;
-                    v[q * work_n + r] = -s_cx * vp + c_cx * phase_conj * vq;
+                if compute_vectors {
+                    for r in 0..work_n {
+                        let vp = v[p * work_n + r];
+                        let vq = v[q * work_n + r];
+                        v[p * work_n + r] = c_cx * vp + s_cx * phase_conj * vq;
+                        v[q * work_n + r] = -s_cx * vp + c_cx * phase_conj * vq;
+                    }
                 }
             }
         }
@@ -433,8 +579,11 @@ pub fn svd_jacobi(a: &[Complex64], m: usize, n: usize) -> SvdResult {
         }
     }
 
-    let mut singular_values = vec![0.0f64; work_n];
-    let mut u_work = vec![ZERO; work_m * work_n];
+    ws.jacobi_s.resize(work_n, 0.0);
+    if compute_vectors {
+        ws.jacobi_u.resize(work_m * work_n, ZERO);
+        ws.jacobi_u.fill(ZERO);
+    }
 
     for j in 0..work_n {
         let mut norm_sq = 0.0f64;
@@ -442,53 +591,49 @@ pub fn svd_jacobi(a: &[Complex64], m: usize, n: usize) -> SvdResult {
             norm_sq += work[j * work_m + r].norm_sqr();
         }
         let norm = norm_sq.sqrt();
-        singular_values[j] = norm;
-        if norm > NORM_CLAMP_MIN {
+        ws.jacobi_s[j] = norm;
+        if compute_vectors && norm > NORM_CLAMP_MIN {
             let inv_norm = 1.0 / norm;
             for r in 0..work_m {
-                u_work[j * work_m + r] = work[j * work_m + r] * inv_norm;
+                ws.jacobi_u[j * work_m + r] = work[j * work_m + r] * inv_norm;
             }
         }
     }
 
-    let mut order: Vec<usize> = (0..work_n).collect();
-    order.sort_by(|&a, &b| singular_values[b].partial_cmp(&singular_values[a]).unwrap());
+    ws.jacobi_order.clear();
+    ws.jacobi_order.extend(0..work_n);
+    ws.jacobi_order
+        .sort_by(|&a, &b| ws.jacobi_s[b].partial_cmp(&ws.jacobi_s[a]).unwrap());
 
-    let mut s_sorted = vec![0.0f64; k];
-    let mut u_sorted = vec![ZERO; work_m * k];
-    let mut vt_sorted = vec![ZERO; k * work_n];
-
-    for (new_idx, &old_idx) in order.iter().take(k).enumerate() {
-        s_sorted[new_idx] = singular_values[old_idx];
-
-        for r in 0..work_m {
-            u_sorted[new_idx * work_m + r] = u_work[old_idx * work_m + r];
-        }
-
-        for r in 0..work_n {
-            vt_sorted[new_idx * work_n + r] = v[old_idx * work_n + r].conj();
-        }
+    ws.result.s.resize(k, 0.0);
+    for (new_idx, &old_idx) in ws.jacobi_order.iter().take(k).enumerate() {
+        ws.result.s[new_idx] = ws.jacobi_s[old_idx];
     }
 
-    if transpose {
-        // SVD is computed from A^H (shape n x m): A^H = U_h * S * V_h^H
-        // So A = V_h * S * U_h^H
-        // U_A = V_h (m×k col-major): conj of vt_sorted (which stores V_h^H row-major)
-        // V_A^H = U_h^H (k×n row-major): conj of u_sorted (which stores U_h col-major)
-        SvdResult {
-            u: vt_sorted.iter().map(|x| x.conj()).collect(),
-            u_rows: m,
-            s: s_sorted,
-            vt: u_sorted.iter().map(|x| x.conj()).collect(),
-            vt_cols: n,
-        }
-    } else {
-        SvdResult {
-            u: u_sorted,
-            u_rows: work_m,
-            s: s_sorted,
-            vt: vt_sorted,
-            vt_cols: work_n,
+    if !compute_vectors {
+        return;
+    }
+
+    ws.result.u_rows = m;
+    ws.result.vt_cols = n;
+    ws.result.u.resize(m * k, ZERO);
+    ws.result.vt.resize(k * n, ZERO);
+
+    for (new_idx, &old_idx) in ws.jacobi_order.iter().take(k).enumerate() {
+        if transpose {
+            for r in 0..work_n {
+                ws.result.u[new_idx * m + r] = ws.jacobi_v[old_idx * work_n + r];
+            }
+            for r in 0..work_m {
+                ws.result.vt[new_idx * n + r] = ws.jacobi_u[old_idx * work_m + r].conj();
+            }
+        } else {
+            for r in 0..work_m {
+                ws.result.u[new_idx * work_m + r] = ws.jacobi_u[old_idx * work_m + r];
+            }
+            for r in 0..work_n {
+                ws.result.vt[new_idx * work_n + r] = ws.jacobi_v[old_idx * work_n + r].conj();
+            }
         }
     }
 }
@@ -502,22 +647,34 @@ pub fn svd_jacobi(a: &[Complex64], m: usize, n: usize) -> SvdResult {
 #[cfg(feature = "parallel")]
 #[doc(hidden)]
 pub fn svd_faer(a: &[Complex64], m: usize, n: usize) -> SvdResult {
-    faer_thin_svd(a, m, n, true)
-        .or_else(|| faer_thin_svd(a, m, n, false))
-        .unwrap_or_else(|| svd_jacobi(a, m, n))
+    let mut ws = SvdWorkspace::default();
+    svd_faer_into(&mut ws, a, m, n);
+    ws.result
 }
 
 #[cfg(feature = "parallel")]
-fn faer_thin_svd(
+fn svd_faer_into(ws: &mut SvdWorkspace, a: &[Complex64], m: usize, n: usize) {
+    if faer_svd_core(ws, a, m, n, true, true) {
+        return;
+    }
+    if faer_svd_core(ws, a, m, n, false, true) {
+        return;
+    }
+    svd_jacobi_into(ws, a, m, n, true);
+}
+
+#[cfg(feature = "parallel")]
+fn faer_svd_core(
+    ws: &mut SvdWorkspace,
     a: &[Complex64],
     m: usize,
     n: usize,
     divide_and_conquer: bool,
-) -> Option<SvdResult> {
-    use faer::diag::Diag;
-    use faer::dyn_stack::{MemBuffer, MemStack};
+    compute_vectors: bool,
+) -> bool {
+    use faer::diag::DiagMut;
     use faer::linalg::svd::{self as faer_svd, ComputeSvdVectors, SvdParams};
-    use faer::{Auto, Mat, MatRef};
+    use faer::{Auto, MatMut, MatRef};
 
     let k = m.min(n);
     let par = faer::get_global_parallelism();
@@ -525,61 +682,84 @@ fn faer_thin_svd(
     if !divide_and_conquer {
         params.recursion_threshold = usize::MAX;
     }
-    let mut u_mat = Mat::<Complex64>::zeros(m, k);
-    let mut v_mat = Mat::<Complex64>::zeros(n, k);
-    let mut s_diag = Diag::<Complex64>::zeros(k);
-    let scratch = faer_svd::svd_scratch::<Complex64>(
-        m,
-        n,
-        ComputeSvdVectors::Thin,
-        ComputeSvdVectors::Thin,
-        par,
-        params.into(),
-    );
-    faer_svd::svd(
-        MatRef::from_column_major_slice(a, m, n),
-        s_diag.as_mut(),
-        Some(u_mat.as_mut()),
-        Some(v_mat.as_mut()),
-        par,
-        MemStack::new(&mut MemBuffer::new(scratch)),
-        params.into(),
-    )
-    .ok()?;
+    let vec_mode = if compute_vectors {
+        ComputeSvdVectors::Thin
+    } else {
+        ComputeSvdVectors::No
+    };
+    let req = faer_svd::svd_scratch::<Complex64>(m, n, vec_mode, vec_mode, par, params.into());
+    let stack = ensure_mem_stack(&mut ws.faer_scratch, req);
 
-    let mut u = vec![ZERO; m * k];
-    for j in 0..k {
-        for i in 0..m {
-            u[j * m + i] = u_mat[(i, j)];
-        }
+    ws.s_cplx.resize(k, ZERO);
+    ws.result.s.resize(k, 0.0);
+
+    let ok = if compute_vectors {
+        ws.result.u_rows = m;
+        ws.result.vt_cols = n;
+        ws.result.u.resize(m * k, ZERO);
+        ws.result.vt.resize(k * n, ZERO);
+        faer_svd::svd(
+            MatRef::from_column_major_slice(a, m, n),
+            DiagMut::from_slice_mut(&mut ws.s_cplx[..k]),
+            Some(MatMut::from_column_major_slice_mut(
+                &mut ws.result.u[..m * k],
+                m,
+                k,
+            )),
+            // faer writes column-major V (n x k); indexing (j, i) at i * n + j matches
+            // row-major V^H (k x n) once conjugated in place below.
+            Some(MatMut::from_column_major_slice_mut(
+                &mut ws.result.vt[..k * n],
+                n,
+                k,
+            )),
+            par,
+            stack,
+            params.into(),
+        )
+        .is_ok()
+    } else {
+        faer_svd::svd(
+            MatRef::from_column_major_slice(a, m, n),
+            DiagMut::from_slice_mut(&mut ws.s_cplx[..k]),
+            None,
+            None,
+            par,
+            stack,
+            params.into(),
+        )
+        .is_ok()
+    };
+
+    if !ok {
+        return false;
     }
 
-    let s_col = s_diag.column_vector();
-    let s: Vec<f64> = (0..k).map(|i| s_col[i].re).collect();
+    for (dst, src) in ws.result.s[..k].iter_mut().zip(&ws.s_cplx[..k]) {
+        *dst = src.re;
+    }
+    if !ws.result.s.iter().all(|x| x.is_finite()) {
+        return false;
+    }
 
-    let mut vt = vec![ZERO; k * n];
-    for i in 0..k {
-        for j in 0..n {
-            vt[i * n + j] = v_mat[(j, i)].conj();
-        }
+    if !compute_vectors {
+        return true;
+    }
+
+    for z in &mut ws.result.vt[..k * n] {
+        *z = z.conj();
     }
 
     let finite = |z: &Complex64| z.re.is_finite() && z.im.is_finite();
-    if !(s.iter().all(|x| x.is_finite()) && u.iter().all(finite) && vt.iter().all(finite)) {
-        return None;
+    if !(ws.result.u.iter().all(finite) && ws.result.vt.iter().all(finite)) {
+        return false;
     }
 
-    let result = SvdResult {
-        u,
-        u_rows: m,
-        s,
-        vt,
-        vt_cols: n,
-    };
-    (probe_residual(a, &result) <= SVD_PROBE_TOL).then_some(result)
+    probe_residual_with_scratch(&mut ws.probe_x, &mut ws.probe_residual, a, &ws.result)
+        <= SVD_PROBE_TOL
 }
 
-/// Largest [`probe_residual`] a faer factorization may leave before the next
+/// Largest probe residual a faer factorization may leave before the next
 /// fallback recomputes it. Sound factorizations up to 512 wide read under 2e-15;
 /// faer's divide-and-conquer on rank-64 cuts 128 and 256 wide reads 5e-9 to 1e-7.
 #[cfg(feature = "parallel")]
@@ -588,15 +768,26 @@ const SVD_PROBE_TOL: f64 = 1e-12;
 /// `|A x - U S V^H x| / (|A|_F |x|)` for a fixed unit-modulus probe `x`: one
 /// matrix-vector product, about `1 / k` of the factorization it checks.
 #[cfg(feature = "parallel")]
-fn probe_residual(a: &[Complex64], r: &SvdResult) -> f64 {
+fn probe_residual_with_scratch(
+    probe_x: &mut Vec<Complex64>,
+    residual: &mut Vec<Complex64>,
+    a: &[Complex64],
+    r: &SvdResult,
+) -> f64 {
     const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
     let (m, n) = (r.u_rows, r.vt_cols);
-    let x: Vec<Complex64> = (0..n)
-        .map(|j| Complex64::from_polar(1.0, j as f64 * GOLDEN_ANGLE))
-        .collect();
-    let mut residual = vec![ZERO; m];
+    if m == 0 || n == 0 {
+        return 0.0;
+    }
+    if probe_x.len() < n {
+        let start = probe_x.len();
+        probe_x.extend((start..n).map(|j| Complex64::from_polar(1.0, j as f64 * GOLDEN_ANGLE)));
+    }
+    let x = &probe_x[..n];
+    residual.clear();
+    residual.resize(m, ZERO);
     let mut a_norm_sqr = 0.0;
-    for (col, &xj) in a.chunks_exact(m).zip(&x) {
+    for (col, &xj) in a.chunks_exact(m).zip(x) {
         for (out, &aij) in residual.iter_mut().zip(col) {
             *out += aij * xj;
             a_norm_sqr += aij.norm_sqr();
@@ -604,14 +795,14 @@ fn probe_residual(a: &[Complex64], r: &SvdResult) -> f64 {
     }
     for (g, &sg) in r.s.iter().enumerate() {
         let row = &r.vt[g * n..(g + 1) * n];
-        let y = row.iter().zip(&x).map(|(v, x)| v * x).sum::<Complex64>() * sg;
+        let y = row.iter().zip(x).map(|(v, x)| v * x).sum::<Complex64>() * sg;
         for (out, &ug) in residual.iter_mut().zip(&r.u[g * m..(g + 1) * m]) {
             *out -= ug * y;
         }
     }
     let scale = (a_norm_sqr * n as f64).sqrt();
     if scale > 0.0 {
-        l2_norm(&residual) / scale
+        l2_norm(residual) / scale
     } else {
         0.0
     }

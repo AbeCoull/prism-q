@@ -14,7 +14,7 @@ pub use expr::{
 };
 pub(crate) use expr::{Callback, ExternFunction, ValueKind, binary, check_bit, real, unary};
 
-use super::{Circuit, ClassicalCondition, Instruction, SmallVec};
+use super::{Circuit, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 
@@ -358,22 +358,6 @@ fn check_qubits(qubits: &[usize], num_qubits: usize) -> Result<()> {
     }
 }
 
-fn check_condition(condition: &ClassicalCondition, num_classical_bits: usize) -> Result<()> {
-    match condition {
-        ClassicalCondition::BitIsOne(bit) | ClassicalCondition::BitIsZero(bit) => {
-            check_bit(*bit, num_classical_bits)
-        }
-        ClassicalCondition::RegisterEquals { offset, size, .. }
-        | ClassicalCondition::RegisterNotEquals { offset, size, .. } => match size {
-            0 => Ok(()),
-            _ => check_bit(offset + size - 1, num_classical_bits),
-        },
-        ClassicalCondition::Parity { bits, .. } => bits
-            .iter()
-            .try_for_each(|&bit| check_bit(bit, num_classical_bits)),
-    }
-}
-
 fn check_instructions(
     instructions: &[Instruction],
     num_qubits: usize,
@@ -382,14 +366,7 @@ fn check_instructions(
     for instruction in instructions {
         match instruction {
             Instruction::Gate { gate, targets } => {
-                if gate.num_qubits() != targets.len() {
-                    return Err(PrismError::GateArity {
-                        gate: gate.name().to_string(),
-                        expected: gate.num_qubits(),
-                        got: targets.len(),
-                    });
-                }
-                check_qubits(targets, num_qubits)?;
+                gate.validate_targets(targets, num_qubits)?;
             }
             Instruction::Measure {
                 qubit,
@@ -405,18 +382,11 @@ fn check_instructions(
                 gate,
                 targets,
             } => {
-                check_condition(condition, num_classical_bits)?;
-                if gate.num_qubits() != targets.len() {
-                    return Err(PrismError::GateArity {
-                        gate: gate.name().to_string(),
-                        expected: gate.num_qubits(),
-                        got: targets.len(),
-                    });
-                }
-                check_qubits(targets, num_qubits)?;
+                condition.validate_bits(num_classical_bits)?;
+                gate.validate_targets(targets, num_qubits)?;
             }
             Instruction::Region(region) => {
-                check_condition(region.condition(), num_classical_bits)?;
+                region.condition().validate_bits(num_classical_bits)?;
                 check_instructions(region.body(), num_qubits, num_classical_bits)?;
             }
             Instruction::Save { label, .. } => {

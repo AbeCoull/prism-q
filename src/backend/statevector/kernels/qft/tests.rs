@@ -98,3 +98,60 @@ fn tiled_bit_reversal_matches_index_reversal() {
         }
     }
 }
+
+#[test]
+fn qft_block_odd_and_threshold_widths_match_textbook() {
+    use crate::test_support::random_state;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    let cases = [
+        (1, 1),
+        (2, 2),
+        (3, 3),
+        (5, 5),
+        (13, 13),
+        (14, 14),
+        (15, 15),
+        (15, 1),
+        (15, 2),
+        (15, 3),
+        (15, 13),
+    ];
+    for (state_bits, num) in cases {
+        let state = random_state(
+            state_bits,
+            &mut ChaCha8Rng::seed_from_u64(100 + (state_bits * 31 + num) as u64),
+        );
+        for f in 0..8 {
+            let (inverse, swaps, big_endian) = (f & 1 != 0, f & 2 != 0, f & 4 != 0);
+
+            let mut textbook = StatevectorBackend::new(42);
+            textbook.num_qubits = state_bits;
+            textbook.state = state.clone();
+            textbook.apply_qft_block_textbook(0, num, inverse, swaps, big_endian);
+
+            for use_default in [false, true] {
+                let mut got = StatevectorBackend::new(42);
+                got.num_qubits = state_bits;
+                got.state = state.clone();
+                if use_default {
+                    got.apply_qft_block(num, inverse, swaps, big_endian);
+                } else {
+                    got.apply_qft_block_with(num, inverse, swaps, big_endian, false);
+                }
+                let diff = got
+                    .state
+                    .iter()
+                    .zip(&textbook.state)
+                    .map(|(a, b)| (a - b).norm())
+                    .fold(0.0, f64::max);
+                assert!(
+                    diff < 1e-12,
+                    "state_bits {state_bits}, num {num}, form ({inverse}, {swaps}, {big_endian}), \
+                     default {use_default}: diff {diff:e}"
+                );
+            }
+        }
+    }
+}

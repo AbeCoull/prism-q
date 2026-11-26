@@ -265,3 +265,87 @@ fn backend_rule_names_the_auto_family_and_explicit_otherwise() {
         );
     }
 }
+
+#[test]
+fn decide_tensor_over_mps_for_plan_declines_when_planning_overhead_exhausts_budget() {
+    let mut circuit = Circuit::new(32, 0);
+    for layer in 0..4 {
+        for q in (layer % 2..31).step_by(2) {
+            circuit.add_gate(Gate::Ry(0.4), &[q]);
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    let (mps_cost, _) = mps_apply_cost(&circuit, 256);
+    let too_many_obs = (mps_cost / TENSOR_PLAN_MPS_COST_PER_OBSERVABLE) as usize + 1;
+    let observables: Vec<Vec<PauliTerm>> = (0..too_many_obs)
+        .map(|k| vec![PauliTerm::z(k % 32)])
+        .collect();
+    let plan = BackendPlan::Mps { max_bond_dim: 256 };
+    assert!(
+        decide_tensor_over_mps_for_plan(&circuit, &observables, &plan, &limits()).is_none(),
+        "planning overhead exceeding mps_cost must decline before planning"
+    );
+}
+
+#[test]
+fn decide_expectations_above_cap_probes_sparse_at_most_once() {
+    let limits = ResolvedLimits::resolve(Some(&crate::Limits::new().max_statevector_qubits(8)));
+    let w_state = crate::circuits::w_state_circuit(32);
+    let obs = vec![vec![PauliTerm::z(0)]];
+
+    super::dispatch::SPARSE_PROBES.with(|c| c.set(0));
+    let route = decide_expectations(&BackendKind::Auto, &w_state, &obs, &limits).unwrap();
+    assert!(matches!(
+        route,
+        ExpectationRoute::Native(BackendPlan::Sparse)
+    ));
+    assert_eq!(super::dispatch::SPARSE_PROBES.with(|c| c.get()), 1);
+
+    let hea = crate::circuits::hardware_efficient_ansatz(32, 2, 42);
+    let hea_obs: Vec<Vec<PauliTerm>> = (0..8).map(|k| vec![PauliTerm::z(k * 4)]).collect();
+    super::dispatch::SPARSE_PROBES.with(|c| c.set(0));
+    let route = decide_expectations(&BackendKind::Auto, &hea, &hea_obs, &limits).unwrap();
+    assert!(matches!(
+        route,
+        ExpectationRoute::Native(BackendPlan::Mps { .. })
+    ));
+    assert_eq!(super::dispatch::SPARSE_PROBES.with(|c| c.get()), 1);
+
+    super::dispatch::SPARSE_PROBES.with(|c| c.set(0));
+    let marginal = decide_marginals_after_spd(&BackendKind::Auto, &w_state, &limits).unwrap();
+    assert!(matches!(
+        marginal,
+        MarginalRoute::Native(BackendPlan::Sparse)
+    ));
+    assert_eq!(super::dispatch::SPARSE_PROBES.with(|c| c.get()), 1);
+}
+
+#[test]
+fn auto_sparse_shots_reuses_probe_state_without_reexecuting() {
+    let limits = ResolvedLimits::resolve(Some(&crate::Limits::new().max_statevector_qubits(16)));
+    let mut circuit = crate::circuits::w_state_circuit(32);
+    circuit.num_classical_bits = 32;
+    circuit.measure_all();
+
+    super::dispatch::SPARSE_PROBES.with(|c| c.set(0));
+    super::shot_routes::NATIVE_SHOT_SOURCE_EXECUTIONS.with(|c| c.set(0));
+    let (auto_counts, meta) =
+        super::shot_routes::run_counts_with(BackendKind::Auto, &circuit, 32, 42, &limits).unwrap();
+    assert_eq!(meta.backend, ResolvedBackend::Sparse);
+    assert_eq!(super::dispatch::SPARSE_PROBES.with(|c| c.get()), 1);
+    assert_eq!(
+        super::shot_routes::NATIVE_SHOT_SOURCE_EXECUTIONS.with(|c| c.get()),
+        0
+    );
+
+    let (sparse_counts, _) =
+        super::shot_routes::run_counts_with(BackendKind::Sparse, &circuit, 32, 42, &limits)
+            .unwrap();
+    assert_eq!(auto_counts, sparse_counts);
+
+    let auto_shots =
+        super::shot_routes::run_shots_with(BackendKind::Auto, &circuit, 16, 42, &limits).unwrap();
+    let sparse_shots =
+        super::shot_routes::run_shots_with(BackendKind::Sparse, &circuit, 16, 42, &limits).unwrap();
+    assert_eq!(auto_shots.shots, sparse_shots.shots);
+}

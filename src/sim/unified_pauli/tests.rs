@@ -1414,3 +1414,534 @@ fn spp_pauli_string_rotations_agree_across_key_widths() {
     }
     assert!(reference.unwrap().1 > 1e-6);
 }
+
+#[test]
+fn clifford_angle_rotations_produce_no_ghost_terms_across_engines() {
+    use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
+
+    let angles = [
+        PI,
+        -PI,
+        FRAC_PI_2,
+        -FRAC_PI_2,
+        3.0 * FRAC_PI_2,
+        TAU,
+        PI + 1e-13,
+        FRAC_PI_2 - 1e-13,
+    ];
+    let mut circuit = Circuit::new(3, 0);
+    for q in 0..3 {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for i in 0..24 {
+        let theta = angles[i % angles.len()];
+        match i % 7 {
+            0 => circuit.add_gate(Gate::Rz(theta), &[i % 3]),
+            1 => circuit.add_gate(Gate::P(theta), &[i % 3]),
+            2 => circuit.add_gate(Gate::Rzz(theta), &[i % 3, (i + 1) % 3]),
+            3 => circuit.add_gate(Gate::Rx(theta), &[i % 3]),
+            4 => circuit.add_gate(Gate::Ry(theta), &[i % 3]),
+            5 => {
+                let (gate, targets) = pauli_string_rotation(
+                    theta,
+                    &[(0, PauliAxis::X), (1, PauliAxis::Y), (2, PauliAxis::Z)],
+                );
+                circuit.add_gate(gate, &targets);
+            }
+            _ => circuit.add_gate(u3(theta, FRAC_PI_2, -FRAC_PI_2), &[i % 3]),
+        }
+    }
+    for q in 0..3 {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+
+    let obs = [PauliTerm::z(0), PauliTerm::x(1), PauliTerm::y(2)];
+    let sv_want = reference_expectations(
+        &circuit,
+        crate::sim::BackendKind::Statevector,
+        None,
+        &[
+            vec![PauliTerm::z(0)],
+            vec![PauliTerm::z(1)],
+            vec![PauliTerm::z(2)],
+            obs.to_vec(),
+        ],
+    );
+
+    let spd = run_spd(&circuit, 0.0, 0).unwrap();
+    assert_eq!(spd.max_terms, 1);
+    for (&got, &want) in spd.expectations.iter().zip(&sv_want[..3]) {
+        assert!((got - want).abs() < 1e-11);
+    }
+
+    let spd_obs = run_spd_observable(&circuit, &obs, 0.0, 0).unwrap();
+    assert_eq!(spd_obs.peak_terms, 1);
+    assert!((spd_obs.mean - sv_want[3]).abs() < 1e-11);
+
+    let cone_obs = run_spd_observable_light_cone(&circuit, &obs, 0.0, 0).unwrap();
+    assert_eq!(cone_obs.peak_terms, 1);
+    assert!((cone_obs.mean - sv_want[3]).abs() < 1e-11);
+
+    let unital_noise = NoiseModel::uniform_depolarizing(&circuit, 0.03);
+    let dm_unital = reference_expectations(
+        &circuit,
+        crate::sim::BackendKind::DensityMatrix,
+        Some(&unital_noise),
+        &[obs.to_vec()],
+    )[0];
+    let path_unital = run_pauli_path_observable(&circuit, &unital_noise, &obs, 0.0, 0).unwrap();
+    assert_eq!(path_unital.peak_terms, 1);
+    assert!((path_unital.mean - dm_unital).abs() < 1e-11);
+
+    let damp_noise = NoiseModel::with_amplitude_damping(&circuit, 0.03);
+    let dm_damp = reference_expectations(
+        &circuit,
+        crate::sim::BackendKind::DensityMatrix,
+        Some(&damp_noise),
+        &[obs.to_vec()],
+    )[0];
+    let path_damp = run_pauli_path_observable(&circuit, &damp_noise, &obs, 0.0, 0).unwrap();
+    assert!((path_damp.mean - dm_damp).abs() < 1e-11);
+
+    // Register excess rotation path (`2 * theta` hits `pi/2` and `pi`).
+    for theta in [FRAC_PI_4, FRAC_PI_2] {
+        let terms = propagate_register_rotations(1, 0, [(0, 1, 0, theta)].into_iter());
+        assert_eq!(terms.len(), 1);
+    }
+}
+
+#[test]
+fn auto_marginals_uses_spd_exact_for_clifford_angle_rotations() {
+    use std::f64::consts::{FRAC_PI_2, PI};
+
+    // Exceed MAX_GAUGE_QUBITS (64) so Auto routes past CliffordRegister to MarginalRoute::Spd.
+    let n = 65;
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::T, &[q]);
+    }
+    for i in 0..24 {
+        let q = i % n;
+        let q_next = (i + 1) % n;
+        circuit.add_gate(Gate::Rz(PI), &[q]);
+        circuit.add_gate(Gate::Rzz(FRAC_PI_2), &[q, q_next]);
+    }
+    for q in 0..n {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+
+    let result = crate::sim::simulate(&circuit).seed(42).marginals().unwrap();
+    assert_eq!(
+        result.metadata.backend,
+        crate::sim::ResolvedBackend::DeterministicPauli
+    );
+    assert_eq!(result.metadata.reason, crate::sim::RouteRule::SpdExact);
+}
+
+#[test]
+fn spp_clifford_angles_draw_zero_rng_and_preserve_unit_norm() {
+    use std::f64::consts::{FRAC_PI_2, PI};
+
+    for theta in [
+        PI,
+        -PI,
+        FRAC_PI_2,
+        -FRAC_PI_2,
+        PI + 1e-13,
+        FRAC_PI_2 - 1e-13,
+    ] {
+        let b = RotBranch::new(theta);
+        assert!(
+            b.p_keep == 1.0 || b.p_keep == 0.0,
+            "theta={theta}: {}",
+            b.p_keep
+        );
+        if b.p_keep == 1.0 {
+            assert_eq!(b.keep_weight.abs(), 1.0);
+        } else {
+            assert_eq!(b.flip_weight_im.abs(), 1.0);
+        }
+    }
+
+    let mut circuit = Circuit::new(3, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::H, &[1]);
+    circuit.add_gate(Gate::Rz(PI), &[0]);
+    circuit.add_gate(Gate::Rzz(FRAC_PI_2), &[0, 1]);
+    let (p_pi, t_pi) = pauli_string_rotation(PI, &[(0, PauliAxis::X), (2, PauliAxis::Z)]);
+    circuit.add_gate(p_pi, &t_pi);
+    let (p_half, t_half) =
+        pauli_string_rotation(FRAC_PI_2, &[(1, PauliAxis::Y), (2, PauliAxis::X)]);
+    circuit.add_gate(p_half, &t_half);
+    circuit.add_gate(Gate::H, &[0]);
+
+    let ops = coalesce_cliffords(&circuit);
+    let obs = PauliVec::z_on_qubit(1, 0);
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let _ = backward_propagate_coalesced(&ops, &obs, &mut rng);
+    assert_eq!(rng.get_word_pos(), 0);
+
+    let spp = run_spp_observable(&circuit, &[PauliTerm::z(0)], 64, 42).unwrap();
+    assert_eq!(spp.variance, 0.0);
+}
+
+#[test]
+fn small_non_clifford_angles_outside_identity_eps_still_branch() {
+    use std::f64::consts::PI;
+
+    for theta in [1e-10, PI + 1e-10] {
+        let mut circuit = Circuit::new(1, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::Rz(theta), &[0]);
+        circuit.add_gate(Gate::H, &[0]);
+
+        let spd = run_spd_observable(&circuit, &[PauliTerm::z(0)], 0.0, 0).unwrap();
+        assert_eq!(spd.peak_terms, 2, "theta={theta}");
+
+        let b = RotBranch::new(theta);
+        assert!(
+            b.p_keep > 0.0 && b.p_keep < 1.0,
+            "theta={theta}: {}",
+            b.p_keep
+        );
+    }
+}
+
+#[test]
+fn prepared_spd_matches_light_cone_and_statevector_across_observables() {
+    use std::f64::consts::{FRAC_PI_2, PI, TAU};
+
+    let mut circuit = Circuit::new(4, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Rz(PI), &[0]);
+    circuit.add_gate(Gate::Rx(0.41), &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_gate(Gate::Ry(FRAC_PI_2), &[1]);
+    circuit.add_gate(Gate::T, &[1]);
+    circuit.add_gate(u3(0.35, -0.7, 1.2), &[2]);
+    circuit.add_gate(Gate::cu(Gate::Rz(0.8).matrix_2x2()), &[2, 3]);
+    let (p_gate, p_targets) = pauli_string_rotation(TAU, &[(0, PauliAxis::X), (3, PauliAxis::Y)]);
+    circuit.add_gate(p_gate, &p_targets);
+    let (p_gate2, p_targets2) =
+        pauli_string_rotation(-0.37, &[(1, PauliAxis::Z), (2, PauliAxis::X)]);
+    circuit.add_gate(p_gate2, &p_targets2);
+
+    let observables = vec![
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::x(1), PauliTerm::z(2)],
+        vec![PauliTerm::y(0), PauliTerm::z(3)],
+        vec![PauliTerm::z(2), PauliTerm::x(3)],
+    ];
+    let want = reference_expectations(
+        &circuit,
+        crate::sim::BackendKind::Statevector,
+        None,
+        &observables,
+    );
+
+    let prepared = PreparedSpd::new(&circuit, "light-cone SPD observable").unwrap();
+    for (obs, sv_mean) in observables.iter().zip(want) {
+        let from_prepared = prepared.eval_light_cone(obs, 1e-10, 16_384).unwrap();
+        let direct = run_spd_observable_light_cone(&circuit, obs, 1e-10, 16_384).unwrap();
+        assert_eq!(from_prepared.mean.to_bits(), direct.mean.to_bits());
+        assert_eq!(from_prepared.t_count, direct.t_count);
+        assert_eq!(from_prepared.peak_terms, direct.peak_terms);
+        assert_eq!(
+            from_prepared.total_discarded.to_bits(),
+            direct.total_discarded.to_bits()
+        );
+        assert!((from_prepared.mean - sv_mean).abs() < 1e-9);
+    }
+}
+
+#[test]
+fn inverse_light_cone_bitset_handles_multi_word_empty_duplicate_and_oob() {
+    for n in [0usize, 63, 64, 65, 128, 130] {
+        let mut circuit = Circuit::new(n, 0);
+        if n >= 2 {
+            let last = n - 1;
+            circuit.add_gate(Gate::H, &[0]);
+            circuit.add_gate(Gate::T, &[last]);
+            circuit.add_gate(Gate::Cx, &[0, last]);
+            if n > 64 {
+                circuit.add_gate(Gate::H, &[64]);
+                circuit.add_gate(Gate::T, &[64]);
+            }
+
+            assert_eq!(
+                inverse_light_cone(&circuit, &[]),
+                vec![false; circuit.instructions.len()]
+            );
+
+            let cone_last = inverse_light_cone(&circuit, &[PauliTerm::z(last)]);
+            let cone_dup = inverse_light_cone(&circuit, &[PauliTerm::z(last), PauliTerm::z(last)]);
+            assert_eq!(cone_last, cone_dup);
+            assert!(cone_last[0] && cone_last[1] && cone_last[2]);
+            if n > 64 && last != 64 {
+                assert!(!cone_last[3] && !cone_last[4]);
+            }
+        } else {
+            assert_eq!(inverse_light_cone(&circuit, &[]), Vec::<bool>::new());
+        }
+
+        // Out-of-range observable qubit must not panic.
+        let oob = inverse_light_cone(&circuit, &[PauliTerm::z(n + 100)]);
+        assert_eq!(oob, vec![false; circuit.instructions.len()]);
+    }
+}
+
+#[test]
+fn spp_non_finite_rotation_angles_do_not_panic() {
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        // Anticommuting Rz(bad)
+        let mut rz_circuit = Circuit::new(1, 0);
+        rz_circuit.add_gate(Gate::H, &[0]);
+        rz_circuit.add_gate(Gate::Rz(bad), &[0]);
+        rz_circuit.add_gate(Gate::H, &[0]);
+
+        let rz_obs = run_spp_observable(&rz_circuit, &[PauliTerm::z(0)], 16, 42).unwrap();
+        assert!(
+            rz_obs.mean.is_nan(),
+            "Rz({bad}) observable mean={}",
+            rz_obs.mean
+        );
+        let rz_marg = run_spp(&rz_circuit, 16, 42).unwrap();
+        assert!(
+            rz_marg.expectations[0].is_nan(),
+            "Rz({bad}) expectation={}",
+            rz_marg.expectations[0]
+        );
+
+        // Commuting Rz(bad)
+        let mut rz_comm = Circuit::new(1, 0);
+        rz_comm.add_gate(Gate::Rz(bad), &[0]);
+        let comm_obs = run_spp_observable(&rz_comm, &[PauliTerm::z(0)], 16, 42).unwrap();
+        assert_eq!(comm_obs.mean, 1.0);
+        let comm_marg = run_spp(&rz_comm, 16, 42).unwrap();
+        assert_eq!(comm_marg.expectations[0], 1.0);
+
+        // Anticommuting PauliRot(bad)
+        let mut pr_circuit = Circuit::new(2, 0);
+        let (pr_gate, pr_targets) =
+            pauli_string_rotation(bad, &[(0, PauliAxis::X), (1, PauliAxis::Z)]);
+        pr_circuit.add_gate(pr_gate, &pr_targets);
+
+        let pr_obs = run_spp_observable(&pr_circuit, &[PauliTerm::z(0)], 16, 42).unwrap();
+        assert!(
+            pr_obs.mean.is_nan(),
+            "PauliRot({bad}) observable mean={}",
+            pr_obs.mean
+        );
+        let pr_marg = run_spp(&pr_circuit, 16, 42).unwrap();
+        assert!(
+            pr_marg.expectations[0].is_nan(),
+            "PauliRot({bad}) expectation={}",
+            pr_marg.expectations[0]
+        );
+        assert_eq!(pr_marg.expectations[1], 1.0);
+
+        // Anticommuting Rzz(bad), Rx(bad), Ry(bad), P(bad)
+        let mut mixed = Circuit::new(2, 0);
+        mixed.add_gate(Gate::H, &[0]);
+        mixed.add_gate(Gate::Rzz(bad), &[0, 1]);
+        mixed.add_gate(Gate::Rx(bad), &[1]);
+        mixed.add_gate(Gate::Ry(bad), &[0]);
+        mixed.add_gate(Gate::P(bad), &[1]);
+        let mixed_obs = run_spp_observable(&mixed, &[PauliTerm::z(0)], 16, 42).unwrap();
+        assert!(mixed_obs.mean.is_nan());
+        let mixed_marg = run_spp(&mixed, 16, 42).unwrap();
+        assert!(mixed_marg.expectations.iter().all(|v| v.is_nan()));
+    }
+}
+
+fn spp_multi_gate_circuit(n: usize, qubits: &[usize; 5]) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    c.add_gate(Gate::H, &[qubits[0]]);
+    c.add_gate(Gate::S, &[qubits[1]]);
+    c.add_gate(Gate::Cx, &[qubits[0], qubits[2]]);
+    c.add_gate(Gate::Cz, &[qubits[1], qubits[3]]);
+    c.add_gate(Gate::Rz(0.37), &[qubits[0]]);
+    c.add_gate(Gate::Rzz(-0.43), &[qubits[1], qubits[4]]);
+    let (p_gate, p_targets) = pauli_string_rotation(
+        0.61,
+        &[
+            (qubits[0], PauliAxis::X),
+            (qubits[2], PauliAxis::Y),
+            (qubits[4], PauliAxis::Z),
+        ],
+    );
+    c.add_gate(p_gate, &p_targets);
+    c.add_gate(Gate::H, &[qubits[2]]);
+    c.add_gate(Gate::Rz(-0.29), &[qubits[3]]);
+    c.add_gate(Gate::Cx, &[qubits[3], qubits[4]]);
+    c
+}
+
+#[test]
+fn spp_scratch_reuse_matches_fresh_backward_propagation() {
+    for (n, qubits, obs_terms) in [
+        (
+            5usize,
+            [0usize, 1, 2, 3, 4],
+            vec![PauliTerm::x(0), PauliTerm::y(2), PauliTerm::z(4)],
+        ),
+        (
+            130usize,
+            [0usize, 63, 64, 65, 129],
+            vec![PauliTerm::x(63), PauliTerm::y(64), PauliTerm::z(129)],
+        ),
+    ] {
+        let circuit = spp_multi_gate_circuit(n, &qubits);
+        let ops = coalesce_cliffords(&circuit);
+        let (obs, _) = pauli_vec_from_terms(n, &obs_terms).unwrap();
+        let mut scratch = PauliVec::new(obs.x.len());
+        let mut rng_reuse = ChaCha8Rng::seed_from_u64(42);
+        let mut rng_fresh = ChaCha8Rng::seed_from_u64(42);
+
+        for sample in 0..200 {
+            let w_reuse =
+                backward_propagate_coalesced_into(&ops, &obs, &mut scratch, &mut rng_reuse);
+            let (fresh, w_fresh) = backward_propagate_coalesced(&ops, &obs, &mut rng_fresh);
+            assert_eq!(scratch.x, fresh.x, "n={n} sample={sample}");
+            assert_eq!(scratch.z, fresh.z, "n={n} sample={sample}");
+            assert_eq!(w_reuse.re.to_bits(), w_fresh.re.to_bits());
+            assert_eq!(w_reuse.im.to_bits(), w_fresh.im.to_bits());
+        }
+    }
+}
+
+#[test]
+fn spp_multi_word_reuse_does_not_leak_stale_bits_across_qubits_or_samples() {
+    let small_qubits = [0usize, 1, 2, 3, 4];
+    let wide_qubits = [0usize, 63, 64, 65, 129];
+
+    let add_rx_ry = |c: &mut Circuit, q: &[usize; 5]| {
+        c.add_gate(Gate::Rx(0.51), &[q[0]]);
+        c.add_gate(Gate::Ry(-0.33), &[q[2]]);
+        c.add_gate(Gate::H, &[q[4]]);
+    };
+
+    let mut small = spp_multi_gate_circuit(5, &small_qubits);
+    add_rx_ry(&mut small, &small_qubits);
+    let mut wide = spp_multi_gate_circuit(130, &wide_qubits);
+    add_rx_ry(&mut wide, &wide_qubits);
+
+    let obs_small = [PauliTerm::x(1), PauliTerm::y(2), PauliTerm::z(4)];
+    let obs_wide = [PauliTerm::x(63), PauliTerm::y(64), PauliTerm::z(129)];
+    let res_small = run_spp_observable(&small, &obs_small, 2000, 42).unwrap();
+    let res_wide = run_spp_observable(&wide, &obs_wide, 2000, 42).unwrap();
+    assert_eq!(res_small.mean.to_bits(), res_wide.mean.to_bits());
+    assert_eq!(res_small.variance.to_bits(), res_wide.variance.to_bits());
+    assert_eq!(
+        res_small.nonzero_fraction.to_bits(),
+        res_wide.nonzero_fraction.to_bits()
+    );
+
+    let spp_wide = run_spp(&wide, 8000, 42).unwrap();
+    for untouched in [1usize, 62, 66, 128] {
+        assert_eq!(spp_wide.expectations[untouched], 1.0);
+        assert_eq!(spp_wide.std_errors[untouched], 0.0);
+    }
+    let spd_small = run_spd(&small, 0.0, 0).unwrap();
+    for (i, &q) in wide_qubits.iter().enumerate() {
+        let got = spp_wide.expectations[q];
+        let want = spd_small.expectations[i];
+        let tol = 5.0 * spp_wide.std_errors[q] + 1e-2;
+        assert!(
+            (got - want).abs() <= tol,
+            "qubit {q}: got={got}, want={want}, tol={tol}"
+        );
+    }
+}
+
+#[test]
+fn spp_scratch_reuse_preserves_clifford_snapping_and_zero_rng_draws() {
+    use std::f64::consts::{FRAC_PI_2, PI, TAU};
+
+    let mut circuit = Circuit::new(70, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::H, &[64]);
+    circuit.add_gate(Gate::Rz(PI + 1e-13), &[0]);
+    circuit.add_gate(Gate::Rz(FRAC_PI_2 - 1e-13), &[64]);
+    circuit.add_gate(Gate::Rzz(-2e-13), &[0, 64]);
+    let (p_gate, p_targets) = pauli_string_rotation(
+        TAU,
+        &[(0, PauliAxis::X), (65, PauliAxis::Y), (69, PauliAxis::Z)],
+    );
+    circuit.add_gate(p_gate, &p_targets);
+    circuit.add_gate(Gate::H, &[0]);
+
+    let ops = coalesce_cliffords(&circuit);
+    let (obs, _) = pauli_vec_from_terms(70, &[PauliTerm::z(0), PauliTerm::x(65)]).unwrap();
+    let mut scratch = PauliVec::new(obs.x.len());
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    for _ in 0..32 {
+        let _ = backward_propagate_coalesced_into(&ops, &obs, &mut scratch, &mut rng);
+    }
+    assert_eq!(rng.get_word_pos(), 0);
+
+    let obs_res = run_spp_observable(&circuit, &[PauliTerm::z(0)], 64, 42).unwrap();
+    assert_eq!(obs_res.variance, 0.0);
+    let marg_res = run_spp(&circuit, 64, 42).unwrap();
+    assert!(marg_res.std_errors.iter().all(|&se| se == 0.0));
+}
+
+#[test]
+fn spp_scratch_reuse_isolates_non_finite_angles_across_samples_and_qubits() {
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut circuit = Circuit::new(70, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::H, &[64]);
+        circuit.add_gate(Gate::Rz(bad), &[0]);
+        circuit.add_gate(Gate::Rzz(bad), &[0, 64]);
+        let (p_gate, p_targets) =
+            pauli_string_rotation(bad, &[(0, PauliAxis::X), (64, PauliAxis::Z)]);
+        circuit.add_gate(p_gate, &p_targets);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::H, &[64]);
+
+        let res = run_spp(&circuit, 32, 42).unwrap();
+        assert!(res.expectations[0].is_nan());
+        assert!(res.expectations[64].is_nan());
+        assert_eq!(res.expectations[65], 1.0);
+        assert_eq!(res.std_errors[65], 0.0);
+    }
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn spp_parallel_matches_sequential_thread_counts() {
+    let mut circuit = Circuit::new(70, 0);
+    for q in [0usize, 1, 31, 63, 64, 69] {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    circuit.add_gate(Gate::Cx, &[0, 64]);
+    circuit.add_gate(Gate::T, &[0]);
+    circuit.add_gate(Gate::Rz(0.31), &[63]);
+    circuit.add_gate(Gate::Rzz(-0.55), &[1, 69]);
+    let (p_gate, p_targets) =
+        pauli_string_rotation(0.47, &[(31, PauliAxis::X), (64, PauliAxis::Y)]);
+    circuit.add_gate(p_gate, &p_targets);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::H, &[64]);
+
+    let one = crate::ThreadPool::with_threads(1)
+        .unwrap()
+        .install(|| run_spp(&circuit, 1024, 42).unwrap());
+    let four = crate::ThreadPool::with_threads(4)
+        .unwrap()
+        .install(|| run_spp(&circuit, 1024, 42).unwrap());
+
+    assert_eq!(one.expectations.len(), four.expectations.len());
+    for (a, b) in one.expectations.iter().zip(&four.expectations) {
+        assert_eq!(a.to_bits(), b.to_bits());
+    }
+    for (a, b) in one.std_errors.iter().zip(&four.std_errors) {
+        assert_eq!(a.to_bits(), b.to_bits());
+    }
+    assert_eq!(
+        one.nonzero_fraction.to_bits(),
+        four.nonzero_fraction.to_bits()
+    );
+}

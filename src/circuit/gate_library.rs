@@ -365,8 +365,8 @@ pub(crate) fn xx_plus_yy_matrix(theta: f64, beta: f64) -> [[Complex64; 4]; 4] {
     let s = Complex64::new(0.0, -(theta / 2.0).sin());
     [
         [one, zero, zero, zero],
-        [zero, c, s * Complex64::from_polar(1.0, -beta), zero],
-        [zero, s * Complex64::from_polar(1.0, beta), c, zero],
+        [zero, c, s * Complex64::from_polar(1.0, beta), zero],
+        [zero, s * Complex64::from_polar(1.0, -beta), c, zero],
         [zero, zero, zero, one],
     ]
 }

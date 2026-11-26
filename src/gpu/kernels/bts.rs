@@ -35,7 +35,7 @@ pub(crate) const GPU_COUNTS_MAX_WORDS: usize = 8;
 
 /// Shots per device chunk, which bounds peak memory at any shot count. Matches the CPU
 /// `BTS_BATCH_SHOTS` boundary.
-const CHUNK_SHOTS: usize = 65_536;
+pub(crate) const CHUNK_SHOTS: usize = 65_536;
 /// Largest sampled shot matrix, in bytes, that [`launch_bts_sample`] holds whole on the
 /// device and reads back in one copy; past it the chunks come back one at a time.
 const SINGLE_READBACK_BYTES: usize = 512 << 20;
@@ -484,20 +484,35 @@ pub(crate) struct NoiseApplyBase<'a> {
 }
 
 /// [`NoiseApplyBase`] plus per-event X/Z flip masks pre-generated on the host,
-/// as opposed to the on-device generation of [`NoiseDeviceGenApplyByRow`].
+/// as opposed to the on-device generation of [`NoiseMaskGenerate`] and
+/// [`NoiseRowApply`].
 pub(crate) struct NoiseMaskApply<'a> {
     pub base: NoiseApplyBase<'a>,
     pub x_masks: &'a GpuBuffer<u64>,
     pub z_masks: &'a GpuBuffer<u64>,
 }
 
-/// Arguments for the per-(row, batch) fused noise kernel. Each thread walks
-/// one row's entry list in the row-major event CSR and XORs the generated
-/// masks into a register, avoiding the cross-block `atomicXor` contention an
-/// event-major launch pays on rows touched by many events. `row_event_offsets`
-/// is length `num_meas + 1`; each `row_event_entries` entry is
-/// `event << 2 | flag` (bit 0 = X, bit 1 = Z).
-pub(crate) struct NoiseDeviceGenApplyByRow<'a> {
+/// Arguments for per-(event, 64-shot batch) device noise mask generation.
+/// Writes packed X and Z masks into `x_masks` and `z_masks` in
+/// `[event * chunk_s_words + batch]` layout with trailing bits on the final
+/// batch word cleared by `tail_mask`.
+pub(crate) struct NoiseMaskGenerate<'a> {
+    pub x_masks: &'a mut GpuBuffer<u64>,
+    pub z_masks: &'a mut GpuBuffer<u64>,
+    pub event_thresholds: &'a GpuBuffer<u64>,
+    pub num_events: usize,
+    pub chunk_s_words: usize,
+    pub tail_mask: u64,
+    pub master_seed: u64,
+    pub batch_offset: u64,
+}
+
+/// Arguments for the per-(row, batch) XOR accumulator kernel. Each thread
+/// walks one row's entry list in the row-major event CSR (`row_event_offsets`
+/// of length `num_meas + 1`, `row_event_entries` packed as `event << 2 | flag`
+/// with bit 0 = X and bit 1 = Z), reads from `x_masks` and `z_masks`, and
+/// XORs the accumulated mask once into `meas_major`.
+pub(crate) struct NoiseRowApply<'a> {
     pub meas_major: &'a mut GpuBuffer<u64>,
     pub num_meas: usize,
     pub s_words: usize,
@@ -505,16 +520,97 @@ pub(crate) struct NoiseDeviceGenApplyByRow<'a> {
     pub chunk_s_words: usize,
     pub row_event_offsets: &'a GpuBuffer<u32>,
     pub row_event_entries: &'a GpuBuffer<u32>,
-    pub event_thresholds: &'a GpuBuffer<u64>,
-    pub master_seed: u64,
-    pub batch_offset: u64,
+    pub x_masks: &'a GpuBuffer<u64>,
+    pub z_masks: &'a GpuBuffer<u64>,
 }
 
-pub(crate) fn generate_and_apply_noise_masks_meas_major_by_row(
-    ctx: &GpuContext,
-    args: NoiseDeviceGenApplyByRow<'_>,
-) -> Result<()> {
-    let NoiseDeviceGenApplyByRow {
+pub(crate) fn generate_noise_masks(ctx: &GpuContext, args: NoiseMaskGenerate<'_>) -> Result<()> {
+    let NoiseMaskGenerate {
+        x_masks,
+        z_masks,
+        event_thresholds,
+        num_events,
+        chunk_s_words,
+        tail_mask,
+        master_seed,
+        batch_offset,
+    } = args;
+    if num_events == 0 || chunk_s_words == 0 {
+        return Ok(());
+    }
+
+    let mask_len = num_events.checked_mul(chunk_s_words).ok_or_else(|| {
+        super::launch_limit_err("bts_generate_noise_masks", "mask_len", usize::MAX, "usize")
+    })?;
+    let thresholds_len = num_events.checked_mul(3).ok_or_else(|| {
+        super::launch_limit_err(
+            "bts_generate_noise_masks",
+            "event_thresholds",
+            usize::MAX,
+            "usize",
+        )
+    })?;
+    assert!(
+        x_masks.len() >= mask_len && z_masks.len() >= mask_len,
+        "noise mask buffers ({}, {}) smaller than required {}",
+        x_masks.len(),
+        z_masks.len(),
+        mask_len
+    );
+    assert!(
+        event_thresholds.len() >= thresholds_len,
+        "event_thresholds buffer ({}) smaller than required {}",
+        event_thresholds.len(),
+        thresholds_len
+    );
+
+    let (stream, func) = stream_and_fn(ctx, "bts_generate_noise_masks")?;
+    let num_events_i = require_i32("bts_generate_noise_masks", "num_events", num_events)?;
+    let chunk_s_words_i = require_i32("bts_generate_noise_masks", "chunk_s_words", chunk_s_words)?;
+    let block_threads = noise_block_threads(chunk_s_words);
+    let batch_blocks = div_ceil_grid(
+        "bts_generate_noise_masks",
+        "chunk_s_words",
+        chunk_s_words,
+        block_threads,
+    )?;
+    if batch_blocks > 65_535 {
+        return Err(super::launch_limit_err(
+            "bts_generate_noise_masks",
+            "batch_blocks",
+            batch_blocks as usize,
+            "gridDim.y",
+        ));
+    }
+    let num_events_grid = require_u32("bts_generate_noise_masks", "num_events", num_events)?;
+    let cfg = LaunchConfig {
+        grid_dim: (num_events_grid, batch_blocks, 1),
+        block_dim: (block_threads, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    let mut x_masks_view = x_masks.raw_mut().slice_mut(0..mask_len);
+    let mut z_masks_view = z_masks.raw_mut().slice_mut(0..mask_len);
+    let thresholds_view = event_thresholds.raw().slice(0..thresholds_len);
+    let mut builder = stream.launch_builder(&func);
+    builder
+        .arg(&mut x_masks_view)
+        .arg(&mut z_masks_view)
+        .arg(&thresholds_view)
+        .arg(&num_events_i)
+        .arg(&chunk_s_words_i)
+        .arg(&tail_mask)
+        .arg(&master_seed)
+        .arg(&batch_offset);
+    // SAFETY: kernel signature matches the call shape. Each thread writes one
+    // unique (event, batch) index inside `x_masks_view` and `z_masks_view`
+    // (`num_events * chunk_s_words`), and reads three `u64` thresholds inside
+    // `thresholds_view` (`num_events * 3`).
+    unsafe { launch_counted(builder, cfg, "bts_generate_noise_masks", ctx.device(), 0) }
+}
+
+pub(crate) fn apply_noise_row_major(ctx: &GpuContext, args: NoiseRowApply<'_>) -> Result<()> {
+    let NoiseRowApply {
         meas_major,
         num_meas,
         s_words,
@@ -522,76 +618,81 @@ pub(crate) fn generate_and_apply_noise_masks_meas_major_by_row(
         chunk_s_words,
         row_event_offsets,
         row_event_entries,
-        event_thresholds,
-        master_seed,
-        batch_offset,
+        x_masks,
+        z_masks,
     } = args;
     if num_meas == 0 || s_words == 0 || chunk_s_words == 0 {
         return Ok(());
     }
 
-    let (stream, func) = stream_and_fn(ctx, "bts_generate_and_apply_noise_meas_major_by_row")?;
-    let num_meas_i = require_i32(
-        "bts_generate_and_apply_noise_meas_major_by_row",
-        "num_meas",
-        num_meas,
-    )?;
-    let s_words_i = require_i32(
-        "bts_generate_and_apply_noise_meas_major_by_row",
-        "s_words",
-        s_words,
-    )?;
-    let word_offset_i = require_i32(
-        "bts_generate_and_apply_noise_meas_major_by_row",
-        "word_offset",
-        word_offset,
-    )?;
-    let chunk_s_words_i = require_i32(
-        "bts_generate_and_apply_noise_meas_major_by_row",
-        "chunk_s_words",
-        chunk_s_words,
-    )?;
+    let end_word = word_offset
+        .checked_add(chunk_s_words)
+        .expect("noise word range overflow");
+    assert!(
+        end_word <= s_words,
+        "noise chunk words ({word_offset} + {chunk_s_words}) exceed s_words ({s_words})"
+    );
+    let meas_len = num_meas.checked_mul(s_words).ok_or_else(|| {
+        super::launch_limit_err("bts_apply_noise_row_major", "meas_len", usize::MAX, "usize")
+    })?;
+    assert!(
+        meas_major.len() >= meas_len,
+        "meas_major buffer ({}) smaller than required {}",
+        meas_major.len(),
+        meas_len
+    );
+    assert!(
+        row_event_offsets.len() > num_meas,
+        "row_event_offsets buffer ({}) smaller than required {}",
+        row_event_offsets.len(),
+        num_meas + 1
+    );
+
+    let (stream, func) = stream_and_fn(ctx, "bts_apply_noise_row_major")?;
+    let num_meas_i = require_i32("bts_apply_noise_row_major", "num_meas", num_meas)?;
+    let s_words_i = require_i32("bts_apply_noise_row_major", "s_words", s_words)?;
+    let word_offset_i = require_i32("bts_apply_noise_row_major", "word_offset", word_offset)?;
+    let chunk_s_words_i = require_i32("bts_apply_noise_row_major", "chunk_s_words", chunk_s_words)?;
     let block_threads = noise_block_threads(chunk_s_words);
     let batch_blocks = div_ceil_grid(
-        "bts_generate_and_apply_noise_meas_major_by_row",
+        "bts_apply_noise_row_major",
         "chunk_s_words",
         chunk_s_words,
         block_threads,
     )?;
-    let num_meas_grid = require_u32(
-        "bts_generate_and_apply_noise_meas_major_by_row",
-        "num_meas",
-        num_meas,
-    )?;
+    if batch_blocks > 65_535 {
+        return Err(super::launch_limit_err(
+            "bts_apply_noise_row_major",
+            "batch_blocks",
+            batch_blocks as usize,
+            "gridDim.y",
+        ));
+    }
+    let num_meas_grid = require_u32("bts_apply_noise_row_major", "num_meas", num_meas)?;
     let cfg = LaunchConfig {
         grid_dim: (num_meas_grid, batch_blocks, 1),
         block_dim: (block_threads, 1, 1),
         shared_mem_bytes: 0,
     };
 
+    let mut meas_view = meas_major.raw_mut().slice_mut(0..meas_len);
+    let offsets_view = row_event_offsets.raw().slice(0..num_meas + 1);
     let mut builder = stream.launch_builder(&func);
     builder
-        .arg(meas_major.raw_mut())
+        .arg(&mut meas_view)
         .arg(&num_meas_i)
         .arg(&s_words_i)
         .arg(&word_offset_i)
-        .arg(row_event_offsets.raw())
+        .arg(&offsets_view)
         .arg(row_event_entries.raw())
-        .arg(event_thresholds.raw())
-        .arg(&chunk_s_words_i)
-        .arg(&master_seed)
-        .arg(&batch_offset);
-    // SAFETY: one thread per (row, batch); register accumulator replaces the
-    // cross-block atomic path. No two threads write the same output index.
-    unsafe {
-        launch_counted(
-            builder,
-            cfg,
-            "bts_generate_and_apply_noise_meas_major_by_row",
-            ctx.device(),
-            0,
-        )
-    }
+        .arg(x_masks.raw())
+        .arg(z_masks.raw())
+        .arg(&chunk_s_words_i);
+    // SAFETY: kernel signature matches the call shape. Each thread owns one
+    // unique `(row, batch)` word at `row * s_words + word_offset + batch` inside
+    // `meas_view` (`num_meas * s_words`), and all CSR and mask reads stay within
+    // the allocated buffers.
+    unsafe { launch_counted(builder, cfg, "bts_apply_noise_row_major", ctx.device(), 0) }
 }
 
 /// One thread per (event, batch) pair, with atomic XOR on rows shared
@@ -1102,24 +1203,100 @@ pub(crate) fn try_count_meas_major(
 
 #[cfg(test)]
 mod tests {
-    use super::launch_bts_transpose_meas_to_shot;
+    use super::{
+        CHUNK_SHOTS, NoiseMaskGenerate, NoiseRowApply, apply_noise_row_major, generate_noise_masks,
+        launch_bts_transpose_meas_to_shot,
+    };
     use crate::gpu::{GpuBuffer, GpuContext};
+    use crate::sim::compiled::shot_tail_mask;
 
-    // 65,538 shot words need one tile row each, three past the 65,535 limit on
-    // gridDim.y, and the last word is partial.
-    #[test]
-    fn transpose_past_the_grid_y_limit_matches_host() {
-        let ctx = match GpuContext::new(0) {
-            Ok(ctx) => ctx,
+    fn try_gpu_ctx() -> Option<std::sync::Arc<GpuContext>> {
+        match GpuContext::new(0) {
+            Ok(ctx) => Some(ctx),
             Err(e) => {
                 assert!(
                     std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
                     "PRISM_REQUIRE_GPU is set but no usable GPU was found ({e})"
                 );
                 eprintln!("SKIP: no usable GPU ({e})");
-                return;
+                None
             }
-        };
+        }
+    }
+
+    fn splitmix64_step(mut x: u64) -> u64 {
+        x ^= x >> 30;
+        x = x.wrapping_mul(0xbf58476d1ce4e5b9);
+        x ^= x >> 27;
+        x = x.wrapping_mul(0x94d049bb133111eb);
+        x ^ (x >> 31)
+    }
+
+    fn host_generate_noise_masks(
+        thresholds: &[[u64; 3]],
+        chunk_shots: usize,
+        master_seed: u64,
+        batch_offset: u64,
+    ) -> (Vec<u64>, Vec<u64>) {
+        let num_events = thresholds.len();
+        let chunk_s_words = chunk_shots.div_ceil(64);
+        let tail_mask = shot_tail_mask(chunk_shots);
+        let mut x_masks = vec![0u64; num_events * chunk_s_words];
+        let mut z_masks = vec![0u64; num_events * chunk_s_words];
+
+        for (event, &[t_x, t_xy, t_p]) in thresholds.iter().enumerate() {
+            if t_p == 0 {
+                continue;
+            }
+            for batch in 0..chunk_s_words {
+                let absolute_batch = batch_offset + batch as u64;
+                let seed = master_seed
+                    ^ ((event as u64).wrapping_mul(0x9e3779b97f4a7c15))
+                    ^ splitmix64_step(absolute_batch);
+                let mut s0 = splitmix64_step(seed);
+                let mut s1 = splitmix64_step(s0);
+                let mut s2 = splitmix64_step(s1);
+                let mut s3 = splitmix64_step(s2);
+
+                let mut x_mask = 0u64;
+                let mut z_mask = 0u64;
+                for bit in 0..64 {
+                    let result = s0.wrapping_add(s3).rotate_left(23).wrapping_add(s0);
+                    let t = s1 << 17;
+                    s2 ^= s0;
+                    s3 ^= s1;
+                    s1 ^= s2;
+                    s0 ^= s3;
+                    s2 ^= t;
+                    s3 = s3.rotate_left(45);
+
+                    let bit_mask = 1u64 << bit;
+                    if result < t_x {
+                        z_mask |= bit_mask;
+                    } else if result < t_xy {
+                        x_mask |= bit_mask;
+                        z_mask |= bit_mask;
+                    } else if result < t_p {
+                        x_mask |= bit_mask;
+                    }
+                }
+                if batch == chunk_s_words - 1 {
+                    x_mask &= tail_mask;
+                    z_mask &= tail_mask;
+                }
+                let out_idx = event * chunk_s_words + batch;
+                x_masks[out_idx] = x_mask;
+                z_masks[out_idx] = z_mask;
+            }
+        }
+        (x_masks, z_masks)
+    }
+
+    // 65,538 shot words need one tile row each, three past the 65,535 limit on
+    // gridDim.y, and the last word is partial.
+    #[test]
+    fn transpose_past_the_grid_y_limit_matches_host() {
+        let Some(ctx) = try_gpu_ctx() else { return };
         let num_meas = 3;
         let num_shots = 65_537 * 64 + 36usize;
         let s_words = num_shots.div_ceil(64);
@@ -1155,5 +1332,261 @@ mod tests {
             });
             assert_eq!(got, want, "shot {shot}");
         }
+    }
+
+    #[test]
+    fn generate_noise_masks_matches_host_xoshiro_across_chunks_and_tail() {
+        let Some(ctx) = try_gpu_ctx() else { return };
+        let device = ctx.device();
+
+        let thresholds: [[u64; 3]; 6] = [
+            [0, 0, 0],
+            [0, 0, u64::MAX / 3],
+            [0, u64::MAX / 2, u64::MAX / 2],
+            [u64::MAX / 4, u64::MAX / 4, u64::MAX / 4],
+            [u64::MAX / 10, (u64::MAX / 10) * 3, (u64::MAX / 10) * 7],
+            [0, 0, u64::MAX],
+        ];
+        let num_events = thresholds.len();
+        let flat_thresholds: Vec<u64> = thresholds.iter().flatten().copied().collect();
+        let thresholds_dev = GpuBuffer::from_host(device, &flat_thresholds).unwrap();
+
+        let max_chunk_words = CHUNK_SHOTS.div_ceil(64);
+        let max_len = num_events * max_chunk_words;
+        let sentinel = vec![0xDEAD_BEEF_CAFE_BABEu64; max_len];
+        let mut x_masks_dev = GpuBuffer::from_host(device, &sentinel).unwrap();
+        let mut z_masks_dev = GpuBuffer::from_host(device, &sentinel).unwrap();
+
+        let master_seed = 0x1234_5678_9ABC_DEF0u64;
+        let total_shots = CHUNK_SHOTS + 129;
+        let mut shot_start = 0usize;
+        while shot_start < total_shots {
+            let chunk_shots = (total_shots - shot_start).min(CHUNK_SHOTS);
+            let chunk_s_words = chunk_shots.div_ceil(64);
+            let batch_offset = (shot_start / 64) as u64;
+            let tail_mask = shot_tail_mask(chunk_shots);
+
+            // Re-dirty the active prefix to verify t_p == 0 overwrites stale bits.
+            let mask_len = num_events * chunk_s_words;
+            x_masks_dev
+                .copy_from_host(device, &sentinel[..mask_len])
+                .unwrap();
+            z_masks_dev
+                .copy_from_host(device, &sentinel[..mask_len])
+                .unwrap();
+
+            generate_noise_masks(
+                &ctx,
+                NoiseMaskGenerate {
+                    x_masks: &mut x_masks_dev,
+                    z_masks: &mut z_masks_dev,
+                    event_thresholds: &thresholds_dev,
+                    num_events,
+                    chunk_s_words,
+                    tail_mask,
+                    master_seed,
+                    batch_offset,
+                },
+            )
+            .unwrap();
+
+            let mut got_x = vec![0u64; max_len];
+            let mut got_z = vec![0u64; max_len];
+            x_masks_dev.copy_to_host(device, &mut got_x).unwrap();
+            z_masks_dev.copy_to_host(device, &mut got_z).unwrap();
+
+            let (want_x, want_z) =
+                host_generate_noise_masks(&thresholds, chunk_shots, master_seed, batch_offset);
+            assert_eq!(
+                &got_x[..mask_len],
+                want_x.as_slice(),
+                "shot_start={shot_start}"
+            );
+            assert_eq!(
+                &got_z[..mask_len],
+                want_z.as_slice(),
+                "shot_start={shot_start}"
+            );
+            for event in 0..num_events {
+                let last = event * chunk_s_words + (chunk_s_words - 1);
+                assert_eq!(got_x[last] & !tail_mask, 0, "x padding dirty event {event}");
+                assert_eq!(got_z[last] & !tail_mask, 0, "z padding dirty event {event}");
+            }
+            shot_start += chunk_shots;
+        }
+
+        // Non-zero batch_offset with partial word (131 shots = 2 full words + 3 bits).
+        let tail_shots = 131usize;
+        let tail_words = tail_shots.div_ceil(64);
+        let tail_mask = shot_tail_mask(tail_shots);
+        let tail_len = num_events * tail_words;
+        x_masks_dev
+            .copy_from_host(device, &sentinel[..tail_len])
+            .unwrap();
+        z_masks_dev
+            .copy_from_host(device, &sentinel[..tail_len])
+            .unwrap();
+        generate_noise_masks(
+            &ctx,
+            NoiseMaskGenerate {
+                x_masks: &mut x_masks_dev,
+                z_masks: &mut z_masks_dev,
+                event_thresholds: &thresholds_dev,
+                num_events,
+                chunk_s_words: tail_words,
+                tail_mask,
+                master_seed,
+                batch_offset: 7,
+            },
+        )
+        .unwrap();
+        let mut got_x = vec![0u64; max_len];
+        let mut got_z = vec![0u64; max_len];
+        x_masks_dev.copy_to_host(device, &mut got_x).unwrap();
+        z_masks_dev.copy_to_host(device, &mut got_z).unwrap();
+        let (want_x, want_z) = host_generate_noise_masks(&thresholds, tail_shots, master_seed, 7);
+        assert_eq!(&got_x[..tail_len], want_x.as_slice());
+        assert_eq!(&got_z[..tail_len], want_z.as_slice());
+    }
+
+    #[test]
+    fn apply_noise_row_major_accumulates_csr_and_preserves_neighbors() {
+        let Some(ctx) = try_gpu_ctx() else { return };
+        let device = ctx.device();
+
+        let num_meas = 5usize;
+        let s_words = 10usize;
+        let word_offset = 3usize;
+        let chunk_s_words = 4usize;
+        let num_events = 4usize;
+
+        let x_masks: Vec<u64> = (0..num_events * chunk_s_words)
+            .map(|i| 0x1111_2222_3333_4444u64.wrapping_add((i as u64 + 1) * 0x0102_0304_0506_0708))
+            .collect();
+        let z_masks: Vec<u64> = (0..num_events * chunk_s_words)
+            .map(|i| {
+                0x8888_7777_6666_5555u64 ^ ((i as u64 + 1).wrapping_mul(0x1020_3040_5060_7080))
+            })
+            .collect();
+
+        // Row 0: empty; Row 1: e0(X); Row 2: e1(Z);
+        // Row 3: e2(Y), e2(X), e2(Z) cancel + e3(Y);
+        // Row 4: e0(X), e1(Z), e3(X).
+        let pack = |event: u32, flag: u32| (event << 2) | flag;
+        let row_event_offsets = vec![0u32, 0, 1, 2, 6, 9];
+        let row_event_entries = vec![
+            pack(0, 1),
+            pack(1, 2),
+            pack(2, 3),
+            pack(2, 1),
+            pack(2, 2),
+            pack(3, 3),
+            pack(0, 1),
+            pack(1, 2),
+            pack(3, 1),
+        ];
+
+        let initial_meas: Vec<u64> = (0..num_meas * s_words)
+            .map(|i| 0xA5A5_5A5A_F0F0_0F0Fu64.wrapping_mul(i as u64 + 3))
+            .collect();
+        let mut expected = initial_meas.clone();
+        for row in 0..num_meas {
+            let start = row_event_offsets[row] as usize;
+            let end = row_event_offsets[row + 1] as usize;
+            for batch in 0..chunk_s_words {
+                let mut acc = 0u64;
+                for &entry in &row_event_entries[start..end] {
+                    let event = (entry >> 2) as usize;
+                    let flag = entry & 3;
+                    let idx = event * chunk_s_words + batch;
+                    if flag & 1 != 0 {
+                        acc ^= x_masks[idx];
+                    }
+                    if flag & 2 != 0 {
+                        acc ^= z_masks[idx];
+                    }
+                }
+                expected[row * s_words + word_offset + batch] ^= acc;
+            }
+        }
+
+        let mut meas_dev = GpuBuffer::from_host(device, &initial_meas).unwrap();
+        let offsets_dev = GpuBuffer::from_host(device, &row_event_offsets).unwrap();
+        let entries_dev = GpuBuffer::from_host(device, &row_event_entries).unwrap();
+        let x_dev = GpuBuffer::from_host(device, &x_masks).unwrap();
+        let z_dev = GpuBuffer::from_host(device, &z_masks).unwrap();
+
+        apply_noise_row_major(
+            &ctx,
+            NoiseRowApply {
+                meas_major: &mut meas_dev,
+                num_meas,
+                s_words,
+                word_offset,
+                chunk_s_words,
+                row_event_offsets: &offsets_dev,
+                row_event_entries: &entries_dev,
+                x_masks: &x_dev,
+                z_masks: &z_dev,
+            },
+        )
+        .unwrap();
+
+        let mut got = vec![0u64; num_meas * s_words];
+        meas_dev.copy_to_host(device, &mut got).unwrap();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn two_kernel_noise_split_empty_inputs_are_noops() {
+        let Some(ctx) = try_gpu_ctx() else { return };
+        let device = ctx.device();
+
+        let sentinel = [0x5555_AAAA_5555_AAAAu64; 4];
+        let mut x_dev = GpuBuffer::from_host(device, &sentinel).unwrap();
+        let mut z_dev = GpuBuffer::from_host(device, &sentinel).unwrap();
+        let thresholds_dev = GpuBuffer::<u64>::alloc_zeros(device, 3).unwrap();
+        let mut meas_dev = GpuBuffer::from_host(device, &sentinel).unwrap();
+        let offsets_dev = GpuBuffer::<u32>::alloc_zeros(device, 2).unwrap();
+        let entries_dev = GpuBuffer::<u32>::alloc_zeros(device, 1).unwrap();
+
+        for (num_events, chunk_s_words) in [(0, 4), (2, 0), (0, 0)] {
+            generate_noise_masks(
+                &ctx,
+                NoiseMaskGenerate {
+                    x_masks: &mut x_dev,
+                    z_masks: &mut z_dev,
+                    event_thresholds: &thresholds_dev,
+                    num_events,
+                    chunk_s_words,
+                    tail_mask: u64::MAX,
+                    master_seed: 42,
+                    batch_offset: 0,
+                },
+            )
+            .unwrap();
+        }
+
+        for (num_meas, s_words, chunk_s_words) in [(0, 4, 2), (2, 0, 2), (2, 4, 0)] {
+            apply_noise_row_major(
+                &ctx,
+                NoiseRowApply {
+                    meas_major: &mut meas_dev,
+                    num_meas,
+                    s_words,
+                    word_offset: 0,
+                    chunk_s_words,
+                    row_event_offsets: &offsets_dev,
+                    row_event_entries: &entries_dev,
+                    x_masks: &x_dev,
+                    z_masks: &z_dev,
+                },
+            )
+            .unwrap();
+        }
+
+        let mut got_meas = [0u64; 4];
+        meas_dev.copy_to_host(device, &mut got_meas).unwrap();
+        assert_eq!(got_meas, sentinel);
     }
 }

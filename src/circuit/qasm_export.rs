@@ -278,7 +278,7 @@ fn spell_2q(mat: &[[Complex64; 4]; 4]) -> Option<String> {
     if close_4x4(&gate_library::sqrt_iswap_matrix(-1.0), mat) {
         return Some("sqrt_iswap_inv".to_string());
     }
-    let (theta, beta) = xy_params(mat[1][1], mat[1][2]);
+    let (theta, beta) = xy_params(mat[1][1], mat[2][1]);
     if close_4x4(&gate_library::xx_plus_yy_matrix(theta, beta), mat) {
         return Some(format!("xx_plus_yy({theta}, {beta})"));
     }

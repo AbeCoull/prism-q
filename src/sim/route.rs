@@ -22,7 +22,13 @@ pub(super) fn plan_probability_route(
     limits: &ResolvedLimits,
 ) -> ProbabilityRoute {
     let (decompose, has_partial_independence) = analyze_independence(circuit);
+    let direct = ProbabilityRoute::Direct {
+        has_partial_independence,
+    };
     if let Some((components, clifford_only)) = decompose {
+        if circuit.save_points().next().is_some() {
+            return direct;
+        }
         let max_block = components.iter().map(|c| c.len()).max().unwrap_or(0);
         let auto_takes_it = kind.is_auto()
             && circuit.num_qubits >= MIN_FACTORED_STABILIZER_QUBITS
@@ -32,14 +38,14 @@ pub(super) fn plan_probability_route(
         }
         return ProbabilityRoute::Decomposed(components);
     }
-    if has_temporal_clifford_opportunity(kind, circuit, limits) {
+    if has_temporal_clifford_opportunity(kind, circuit, limits)
+        && circuit.save_points().next().is_none()
+    {
         return ProbabilityRoute::TemporalClifford {
             has_partial_independence,
         };
     }
-    ProbabilityRoute::Direct {
-        has_partial_independence,
-    }
+    direct
 }
 
 /// True when the auto probability route falls through to direct family
@@ -48,6 +54,9 @@ pub(super) fn auto_terminal_statevector_candidate(
     circuit: &Circuit,
     limits: &ResolvedLimits,
 ) -> bool {
+    if circuit.num_qubits > limits.statevector_qubits.value {
+        return false;
+    }
     match plan_probability_route(&BackendKind::Auto, circuit, limits) {
         ProbabilityRoute::Direct {
             has_partial_independence,
@@ -136,21 +145,71 @@ const TENSOR_ROUTE_MPS_BLOCKS_PER_OBSERVABLE: usize = 24;
 /// Bracketed by `auto/expectation_above_cap` (`rcs_d4/128` against `brickwork_d8_local/64`).
 const TENSOR_ROUTE_MPS_BLOCKS_PER_CONE_GATE: usize = 2;
 
+/// Fixed [`mps_apply_cost`] units per observable for scalar tensor planning
+/// (`plan_pairs`), subtracted from `mps_cost` before converting the remaining
+/// MPS budget into planned element budget.
+const TENSOR_PLAN_MPS_COST_PER_OBSERVABLE: f64 = 4_000.0;
+
 /// [`mps_apply_cost`] units one planned tensor-network element costs: 60 to
 /// 140 ns per element contracted against 50 to 70 ns per unit on brickwork
 /// circuits, both on one thread.
 /// Bracketed by `auto/expectation_above_cap` (`brickwork_d8_local/128` against `brickwork_d10_zz/48`).
-const TENSOR_ELEMENT_MPS_COST: f64 = 2.0;
+const TENSOR_ELEMENT_MPS_COST: f64 = 1.5;
 
 /// The scalar tensor route for an `Auto` expectation above the statevector cap,
 /// where the alternative is the MPS `Auto` resolves to rather than a dense run.
 /// `None` when `Auto` resolves to another backend, when the MPS estimate is
 /// under [`TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE`] per observable and the block count
 /// either under [`TENSOR_ROUTE_MPS_BLOCKS_PER_OBSERVABLE`] per observable or under
-/// [`TENSOR_ROUTE_MPS_BLOCKS_PER_CONE_GATE`] per cone gate, or when the
-/// planned contraction would cost more than the MPS estimate or hold an
-/// intermediate over the tensor peak cap. The dry run stops as soon as the planned
-/// elements overspend, so a declined plan costs a fraction of the MPS run.
+/// [`TENSOR_ROUTE_MPS_BLOCKS_PER_CONE_GATE`] per cone gate, when planning overhead
+/// exceeds the MPS estimate, or when the planned contraction would cost more than
+/// the remaining MPS estimate or hold an intermediate over the tensor peak cap. The
+/// dry run stops as soon as the planned elements overspend, so a declined plan costs
+/// a fraction of the MPS run.
+fn decide_tensor_over_mps_for_plan(
+    circuit: &Circuit,
+    observables: &[Vec<PauliTerm>],
+    plan: &BackendPlan,
+    limits: &ResolvedLimits,
+) -> Option<Result<crate::backend::tensornetwork::BoundedExpectations>> {
+    if observables.is_empty() || !matches!(plan, BackendPlan::Mps { .. }) {
+        return None;
+    }
+    let (mps_cost, block_cuts) = mps_apply_cost(circuit, limits.auto_mps_bond_dim.value);
+    let over_cost = mps_cost >= TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE * observables.len() as f64;
+    if !over_cost && block_cuts < TENSOR_ROUTE_MPS_BLOCKS_PER_OBSERVABLE * observables.len() {
+        return None;
+    }
+    for observable in observables {
+        if let Err(e) = validate_observable(observable, circuit.num_qubits) {
+            return Some(Err(e));
+        }
+    }
+    let remaining_mps_cost =
+        mps_cost - TENSOR_PLAN_MPS_COST_PER_OBSERVABLE * observables.len() as f64;
+    if remaining_mps_cost <= 0.0 {
+        return None;
+    }
+    let cone_limit = block_cuts / TENSOR_ROUTE_MPS_BLOCKS_PER_CONE_GATE;
+    if !over_cost
+        && crate::backend::tensornetwork::cone_entangling_gates(circuit, observables, cone_limit)
+            > cone_limit
+    {
+        return None;
+    }
+    let planned = match crate::backend::tensornetwork::plan_bounded_expectations(
+        circuit,
+        observables,
+        limits.tn_peak_elements(),
+        (remaining_mps_cost / TENSOR_ELEMENT_MPS_COST) as usize,
+    )? {
+        Ok(planned) => planned,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(Ok(planned.with_limits(limits)))
+}
+
+#[cfg(test)]
 pub(super) fn decide_tensor_over_mps(
     circuit: &Circuit,
     observables: &[Vec<PauliTerm>],
@@ -173,31 +232,7 @@ pub(super) fn decide_tensor_over_mps(
     ) else {
         return None;
     };
-    if !matches!(plan, BackendPlan::Mps { .. }) {
-        return None;
-    }
-    for observable in observables {
-        if let Err(e) = validate_observable(observable, circuit.num_qubits) {
-            return Some(Err(e));
-        }
-    }
-    let cone_limit = block_cuts / TENSOR_ROUTE_MPS_BLOCKS_PER_CONE_GATE;
-    if !over_cost
-        && crate::backend::tensornetwork::cone_entangling_gates(circuit, observables, cone_limit)
-            > cone_limit
-    {
-        return None;
-    }
-    let planned = match crate::backend::tensornetwork::plan_bounded_expectations(
-        circuit,
-        observables,
-        limits.tn_peak_elements(),
-        (mps_cost / TENSOR_ELEMENT_MPS_COST) as usize,
-    )? {
-        Ok(planned) => planned,
-        Err(e) => return Some(Err(e)),
-    };
-    Some(Ok(planned.with_limits(limits)))
+    decide_tensor_over_mps_for_plan(circuit, observables, &plan, limits)
 }
 
 /// Statevector instruction-amplitudes that one register amplitude costs per pass over
@@ -497,22 +532,40 @@ pub(super) fn decide_native(
     sampling: bool,
     limits: &ResolvedLimits,
 ) -> Result<Option<BackendPlan>> {
+    decide_native_with_probe(kind, circuit, sampling, limits).map(|(plan, _)| plan)
+}
+
+pub(super) fn decide_native_with_probe(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    sampling: bool,
+    limits: &ResolvedLimits,
+) -> Result<(
+    Option<BackendPlan>,
+    Option<crate::backend::sparse::SparseBackend>,
+)> {
     validate_explicit_backend(kind, circuit, limits)?;
     let (decomposed, partial) = match plan_probability_route(kind, circuit, limits) {
         ProbabilityRoute::Direct {
             has_partial_independence,
         } => (false, has_partial_independence),
         ProbabilityRoute::Decomposed(_) => (true, false),
-        _ => return Ok(None),
+        _ => return Ok((None, None)),
     };
-    let ExecutionPlan::Backend(plan) = resolve(kind, circuit, partial, limits) else {
-        return Ok(None);
+    let (ExecutionPlan::Backend(plan), probe) =
+        super::dispatch::resolve_with_probe(kind, circuit, partial, limits)
+    else {
+        return Ok((None, None));
     };
     if decomposed && !matches!(plan, BackendPlan::ProductState) {
-        return Ok(None);
+        return Ok((None, None));
     }
     let capable = !sampling || plan.supports_native_sampling();
-    Ok(capable.then_some(plan))
+    if capable {
+        Ok((Some(plan), probe))
+    } else {
+        Ok((None, None))
+    }
 }
 
 pub(super) fn decide_shots(
@@ -521,25 +574,37 @@ pub(super) fn decide_shots(
     num_shots: usize,
     limits: &ResolvedLimits,
 ) -> Result<ShotRoute> {
+    decide_shots_with_probe(kind, circuit, num_shots, limits).map(|(route, _)| route)
+}
+
+pub(super) fn decide_shots_with_probe(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    num_shots: usize,
+    limits: &ResolvedLimits,
+) -> Result<(ShotRoute, Option<crate::backend::sparse::SparseBackend>)> {
     if should_use_compiled_clifford_sampling(kind, circuit, num_shots) {
-        return Ok(ShotRoute::Compiled(None));
+        return Ok((ShotRoute::Compiled(None), None));
     }
     if should_use_deferred_clifford_sampling(kind, circuit, num_shots)
         && let Ok(deferred) = compiled::defer_guarded_circuit(circuit)
     {
-        return Ok(if deferred.guarded.is_empty() {
-            ShotRoute::Compiled(Some(deferred.circuit))
-        } else {
-            ShotRoute::Guarded(Box::new(deferred))
-        });
+        return Ok((
+            if deferred.guarded.is_empty() {
+                ShotRoute::Compiled(Some(deferred.circuit))
+            } else {
+                ShotRoute::Guarded(Box::new(deferred))
+            },
+            None,
+        ));
     }
     if kind.is_auto() && decide_clifford_register(circuit, limits) {
-        return Ok(ShotRoute::StabilizerRank);
+        return Ok((ShotRoute::StabilizerRank, None));
     }
     if kind.is_auto()
         && decide_mid_circuit_clifford_t(circuit, num_shots, limits) != MidCircuitRoute::Decline
     {
-        return Ok(ShotRoute::StabilizerRank);
+        return Ok((ShotRoute::StabilizerRank, None));
     }
     let terminal_only = circuit.has_terminal_measurements_only();
     let terminal = if terminal_only {
@@ -553,12 +618,12 @@ pub(super) fn decide_shots(
     };
     let terminal = match terminal {
         Some(terminal) if terminal_statevector_candidate(kind, &terminal.circuit, limits) => {
-            return Ok(ShotRoute::TerminalStatevector(terminal));
+            return Ok((ShotRoute::TerminalStatevector(terminal), None));
         }
         terminal => terminal,
     };
     if matches!(kind, BackendKind::StabilizerRank) && circuit.has_t_gates() {
-        return Ok(ShotRoute::StabilizerRank);
+        return Ok((ShotRoute::StabilizerRank, None));
     }
     if terminal_only
         || kind.is_density_matrix() && circuit.has_terminal_measurements_under_reset_channel()
@@ -568,21 +633,22 @@ pub(super) fn decide_shots(
             meas_map: circuit.measurement_map(),
         });
         return Ok(
-            match decide_native(kind, &terminal.circuit, true, limits)? {
-                Some(plan) => ShotRoute::Native(plan, terminal),
-                None if terminal.circuit.num_qubits > 64
-                    && matches!(
-                        plan_probability_route(kind, &terminal.circuit, limits),
-                        ProbabilityRoute::Decomposed(_)
-                    ) =>
+            match decide_native_with_probe(kind, &terminal.circuit, true, limits)? {
+                (Some(plan), probe) => (ShotRoute::Native(plan, terminal), probe),
+                (None, _)
+                    if terminal.circuit.num_qubits > 64
+                        && matches!(
+                            plan_probability_route(kind, &terminal.circuit, limits),
+                            ProbabilityRoute::Decomposed(_)
+                        ) =>
                 {
-                    ShotRoute::PerShot
+                    (ShotRoute::PerShot, None)
                 }
-                None => ShotRoute::TerminalProbabilities(terminal),
+                (None, _) => (ShotRoute::TerminalProbabilities(terminal), None),
             },
         );
     }
-    Ok(ShotRoute::PerShot)
+    Ok((ShotRoute::PerShot, None))
 }
 
 pub(super) enum ExpectationRoute {
@@ -625,25 +691,22 @@ pub(super) fn decide_expectations(
                 return Ok(ExpectationRoute::Register(Box::new(plan)));
             }
             let above_cap = circuit.num_qubits > limits.statevector_qubits.value;
-            let tensor = if above_cap {
-                decide_tensor_over_mps(circuit, observables, limits)
-            } else {
-                decide_tensor_expectations(circuit, observables, limits)
-            };
-            if let Some(planned) = tensor {
+            if above_cap {
+                let plan = decide_native_expectations(kind, circuit, limits)?;
+                if let Some(planned) =
+                    decide_tensor_over_mps_for_plan(circuit, observables, &plan, limits)
+                {
+                    return Ok(ExpectationRoute::Tensor(planned?, RouteRule::TensorOverMps));
+                }
+                return Ok(ExpectationRoute::Native(plan));
+            }
+            if let Some(planned) = decide_tensor_expectations(circuit, observables, limits) {
                 return Ok(ExpectationRoute::Tensor(
                     planned?,
-                    if above_cap {
-                        RouteRule::TensorOverMps
-                    } else {
-                        RouteRule::TensorExpectation
-                    },
+                    RouteRule::TensorExpectation,
                 ));
             }
-            if !above_cap {
-                return Ok(ExpectationRoute::Statevector);
-            }
-            decide_native_expectations(kind, circuit, limits).map(ExpectationRoute::Native)
+            Ok(ExpectationRoute::Statevector)
         }
         BackendKind::Statevector => Ok(ExpectationRoute::Statevector),
         #[cfg(feature = "gpu")]
@@ -774,19 +837,31 @@ pub(super) fn decide_marginals_after_spd(
             .map(|q| vec![PauliTerm::z(q)])
             .collect::<Vec<_>>();
         let above = circuit.num_qubits > limits.statevector_qubits.value;
-        let tensor = if above {
-            decide_tensor_over_mps(circuit, &observables, limits)
-        } else {
-            decide_tensor_expectations(circuit, &observables, limits)
-        };
-        if let Some(planned) = tensor {
+        if above {
+            let (decomposed, partial) = match plan_probability_route(kind, circuit, limits) {
+                ProbabilityRoute::Direct {
+                    has_partial_independence,
+                } => (false, has_partial_independence),
+                ProbabilityRoute::Decomposed(_) => (true, false),
+                _ => return Ok(MarginalRoute::Probabilities),
+            };
+            let ExecutionPlan::Backend(plan) = resolve(kind, circuit, partial, limits) else {
+                return Ok(MarginalRoute::Probabilities);
+            };
+            if let Some(planned) =
+                decide_tensor_over_mps_for_plan(circuit, &observables, &plan, limits)
+            {
+                return Ok(MarginalRoute::Tensor(planned?, RouteRule::TensorOverMps));
+            }
+            if decomposed && !matches!(plan, BackendPlan::ProductState) {
+                return Ok(MarginalRoute::Probabilities);
+            }
+            return Ok(MarginalRoute::Native(plan));
+        }
+        if let Some(planned) = decide_tensor_expectations(circuit, &observables, limits) {
             return Ok(MarginalRoute::Tensor(
                 planned?,
-                if above {
-                    RouteRule::TensorOverMps
-                } else {
-                    RouteRule::TensorExpectation
-                },
+                RouteRule::TensorExpectation,
             ));
         }
     }

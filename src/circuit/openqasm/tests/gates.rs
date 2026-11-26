@@ -975,12 +975,12 @@ fn test_xx_plus_minus_yy_matrices() {
         [
             zero,
             plus_c,
-            plus_s * num_complex::Complex64::from_polar(1.0, -plus_beta),
+            plus_s * num_complex::Complex64::from_polar(1.0, plus_beta),
             zero,
         ],
         [
             zero,
-            plus_s * num_complex::Complex64::from_polar(1.0, plus_beta),
+            plus_s * num_complex::Complex64::from_polar(1.0, -plus_beta),
             plus_c,
             zero,
         ],
@@ -1890,4 +1890,80 @@ fn an_annotation_is_skipped_where_a_statement_starts() {
          @bind q[0] to a \"sensor\"\ng q[0];\ninv @h q[1];",
         "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\ninv @ h q[1];",
     );
+}
+
+#[test]
+fn xx_plus_yy_matches_rz_conjugation_on_first_target() {
+    let theta = 0.7;
+    let beta = 0.4;
+    let qasm = format!("OPENQASM 3.0;\nqubit[2] q;\nxx_plus_yy({theta}, {beta}) q[0], q[1];\n");
+    let conjugated = format!(
+        "OPENQASM 3.0;\nqubit[2] q;\nrz({beta}) q[0];\nxx_plus_yy({theta}, 0) q[0], q[1];\nrz(-{beta}) q[0];\n"
+    );
+    let direct_c = parse(&qasm).unwrap();
+    let conj_c = parse(&conjugated).unwrap();
+    let mut b1 = crate::backend::statevector::StatevectorBackend::new(42);
+    let mut b2 = crate::backend::statevector::StatevectorBackend::new(42);
+    crate::sim::run_on(
+        &mut b1,
+        &parse("OPENQASM 3.0;\nqubit[2] q;\nh q[0];\nx q[1];\n").unwrap(),
+    )
+    .unwrap();
+    crate::sim::run_on(
+        &mut b2,
+        &parse("OPENQASM 3.0;\nqubit[2] q;\nh q[0];\nx q[1];\n").unwrap(),
+    )
+    .unwrap();
+    use crate::backend::Backend;
+    for inst in &direct_c.instructions {
+        b1.apply(inst).unwrap();
+    }
+    for inst in &conj_c.instructions {
+        b2.apply(inst).unwrap();
+    }
+    for (a, b) in b1.state_vector().iter().zip(b2.state_vector().iter()) {
+        assert!((a - b).norm() < 1e-12, "{a} vs {b}");
+    }
+}
+
+#[test]
+fn user_gate_shadows_decomposed_builtins_and_composes_with_modifiers() {
+    same_instructions(
+        "OPENQASM 3.0;\nqubit[2] q;\ngate cswap a, b { cx a, b; }\ncswap q[0], q[1];",
+        "OPENQASM 3.0;\nqubit[2] q;\ncx q[0], q[1];",
+    );
+    same_instructions(
+        "OPENQASM 3.0;\nqubit[2] q;\ngate u3(a) q { rx(a) q; }\ninv @ u3(0.4) q[0];\npow(2) @ u3(0.3) q[1];",
+        "OPENQASM 3.0;\nqubit[2] q;\ninv @ rx(0.4) q[0];\nrx(0.3) q[1];\nrx(0.3) q[1];",
+    );
+    same_instructions(
+        "OPENQASM 3.0;\nqubit[4] q;\ngate iswap a, b { rz(0.2) a; cz a, b; }\nctrl @ negctrl @ iswap q[0], q[1], q[2], q[3];",
+        "OPENQASM 3.0;\nqubit[4] q;\ngate my_iswap a, b { rz(0.2) a; cz a, b; }\nctrl @ negctrl @ my_iswap q[0], q[1], q[2], q[3];",
+    );
+    let (tagged, _) = crate::circuit::openqasm::parse_parametric(
+        "OPENQASM 3.0;\ninput float t;\nqubit[1] q;\ngate u3(a) q { rz(a) q; }\nu3(t) q[0];",
+    )
+    .unwrap();
+    assert_eq!(tagged.instructions.len(), 1);
+}
+
+#[test]
+fn gphase_power_overflow_is_rejected_without_nan() {
+    for source in [
+        "OPENQASM 3.0;\nqubit[1] q;\npow(2) @ gphase(1e308);",
+        "OPENQASM 3.0;\nqubit[1] q;\npow(0) @ pow(2) @ gphase(1e308);",
+        "OPENQASM 3.0;\nqubit[1] q;\nctrl @ pow(2) @ gphase(1e308) q[0];",
+        "OPENQASM 3.0;\nqubit[1] q;\npow(1e6) @ gphase(1e303);",
+        "OPENQASM 3.0;\nqubit[1] q;\npow(999999.5) @ pow(999999.5) @ gphase(1e297);",
+    ] {
+        let err = parse(source).unwrap_err();
+        assert!(matches!(err, PrismError::Parse { .. }), "{source}: {err:?}");
+    }
+    for source in [
+        "OPENQASM 3.0;\ninput float t;\nqubit[1] q;\npow(2) @ gphase(t + 1e308);",
+        "OPENQASM 3.0;\ninput float t;\nqubit[1] q;\npow(0) @ pow(2) @ gphase(t + 1e308);",
+    ] {
+        let err = crate::circuit::openqasm::parse_parametric(source).unwrap_err();
+        assert!(matches!(err, PrismError::Parse { .. }), "{source}: {err:?}");
+    }
 }

@@ -110,7 +110,7 @@ use crate::backend::{
 };
 use crate::circuit::Instruction;
 use crate::error::Result;
-use crate::gates::Gate;
+use crate::gates::{DiagEntry, Gate};
 use crate::limits::ResolvedLimits;
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
@@ -143,12 +143,41 @@ pub use slice::last_slice_count;
 
 type LegId = usize;
 
+const UNITARY_EPS: f64 = 1e-9;
+
+fn is_unitary_phase(phase: Complex64) -> bool {
+    phase.is_finite() && (phase.norm_sqr() - 1.0).abs() <= UNITARY_EPS
+}
+
+fn is_unitary_dense(mat: &[Complex64], dim: usize) -> bool {
+    if mat.iter().any(|entry| !entry.is_finite()) {
+        return false;
+    }
+    for i in 0..dim {
+        for j in i..dim {
+            let mut dot = Complex64::new(0.0, 0.0);
+            for row in 0..dim {
+                dot += mat[row * dim + i].conj() * mat[row * dim + j];
+            }
+            if i == j {
+                dot -= Complex64::new(1.0, 0.0);
+            }
+            let norm = dot.norm();
+            if !norm.is_finite() || norm > UNITARY_EPS {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Tensor-network simulation backend with deferred contraction.
 pub struct TensorNetworkBackend {
     num_qubits: usize,
     tensors: Vec<Tensor>,
     output_legs: Vec<LegId>,
     next_leg: usize,
+    is_unitary: Vec<bool>,
     classical_bits: Vec<bool>,
     rng: ChaCha8Rng,
     tolerance: Option<f64>,
@@ -193,6 +222,7 @@ impl TensorNetworkBackend {
             tensors: Vec::new(),
             output_legs: Vec::new(),
             next_leg: 0,
+            is_unitary: Vec::new(),
             classical_bits: Vec::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
             tolerance,
@@ -344,6 +374,7 @@ impl TensorNetworkBackend {
         let tensors = self.tensors.clone();
         let output_legs = self.output_legs.clone();
         let next_leg = self.next_leg;
+        let is_unitary = self.is_unitary.clone();
 
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         for shot in 0..num_shots {
@@ -352,6 +383,7 @@ impl TensorNetworkBackend {
             self.tensors.clone_from(&tensors);
             self.output_legs.clone_from(&output_legs);
             self.next_leg = next_leg;
+            self.is_unitary.clone_from(&is_unitary);
             drawn?;
         }
         Ok(samples)
@@ -388,6 +420,7 @@ impl TensorNetworkBackend {
             .expect("every output leg has an owner");
         self.tensors[owner] = contract(&self.tensors[owner], &projector);
         self.output_legs[qubit] = out_leg;
+        self.is_unitary[qubit] = false;
     }
 
     fn append_matrix(&mut self, qubits: &[usize], data: Vec<Complex64>) {
@@ -416,16 +449,66 @@ impl TensorNetworkBackend {
         (0..self.next_leg).map(|leg| leg + self.next_leg).collect()
     }
 
-    /// Pair every tensor with a conjugated twin whose legs are read off `bra_legs`.
-    fn double_through(&self, bra_legs: &[LegId]) -> Vec<Tensor> {
-        let mut network = Vec::with_capacity(self.tensors.len() * 2);
-        for tensor in &self.tensors {
-            network.push(tensor.clone());
-            network.push(Tensor {
-                data: tensor.data.iter().map(Complex64::conj).collect(),
-                shape: tensor.shape.clone(),
-                legs: tensor.legs.iter().map(|&leg| bra_legs[leg]).collect(),
-            });
+    /// Double the backward light cone of open and non-unitary qubits against
+    /// its conjugate.
+    ///
+    /// Unitary components with closed output legs cancel to identity and are
+    /// skipped before doubling. Any closed leg held by a single kept tensor
+    /// (either a non-unitary output leg or an internal leg whose downstream
+    /// unitary gate was pruned) is closed directly against its bra twin.
+    fn double_cone(&self, is_open: impl Fn(usize) -> bool) -> Vec<Tensor> {
+        let mut needed = vec![false; self.next_leg];
+        let mut open_legs = vec![false; self.next_leg];
+        for (q, &leg) in self.output_legs.iter().enumerate() {
+            if is_open(q) {
+                open_legs[leg] = true;
+                needed[leg] = true;
+            } else if !self.is_unitary[q] {
+                needed[leg] = true;
+            }
+        }
+
+        let mut keep = vec![false; self.tensors.len()];
+        let mut kept_count = 0usize;
+        for (slot, tensor) in keep.iter_mut().zip(&self.tensors).rev() {
+            if tensor.legs.iter().any(|&leg| needed[leg]) {
+                *slot = true;
+                kept_count += 1;
+                for &leg in &tensor.legs {
+                    needed[leg] = true;
+                }
+            }
+        }
+        if kept_count == 0 {
+            return Vec::new();
+        }
+
+        let mut holders = vec![0u8; self.next_leg];
+        for (tensor, &kept) in self.tensors.iter().zip(&keep) {
+            if kept {
+                for &leg in &tensor.legs {
+                    holders[leg] += 1;
+                }
+            }
+        }
+
+        let mut bra_legs = self.bra_leg_map();
+        for leg in 0..self.next_leg {
+            if holders[leg] == 1 && !open_legs[leg] {
+                bra_legs[leg] = leg;
+            }
+        }
+
+        let mut network = Vec::with_capacity(kept_count * 2);
+        for (tensor, &kept) in self.tensors.iter().zip(&keep) {
+            if kept {
+                network.push(tensor.clone());
+                network.push(Tensor {
+                    data: tensor.data.iter().map(Complex64::conj).collect(),
+                    shape: tensor.shape.clone(),
+                    legs: tensor.legs.iter().map(|&leg| bra_legs[leg]).collect(),
+                });
+            }
         }
         network
     }
@@ -436,13 +519,11 @@ impl TensorNetworkBackend {
     /// A kept qubit's ket leg is its output leg and its bra leg is that id plus
     /// [`Self::next_leg`].
     fn double_for_partial_trace(&self, kept: &[usize]) -> Vec<Tensor> {
-        let mut bra_legs = self.bra_leg_map();
-        for (q, &leg) in self.output_legs.iter().enumerate() {
-            if !kept.contains(&q) {
-                bra_legs[leg] = leg;
-            }
+        let mut open = vec![false; self.num_qubits];
+        for &q in kept {
+            open[q] = true;
         }
-        self.double_through(&bra_legs)
+        self.double_cone(|q| open[q])
     }
 
     /// Contract `tr_{q != qubit} |psi><psi|` to its four entries, replaying
@@ -494,19 +575,14 @@ impl TensorNetworkBackend {
     /// leg closed directly against its twin rather than a tensor appended, which
     /// keeps `n - k` tensors out of the network for a weight-`k` observable.
     fn contract_pauli_sandwich(&self, axes: &[Option<PauliAxis>]) -> Result<f64> {
-        let mut bra_legs = self.bra_leg_map();
-        for (q, axis) in axes.iter().enumerate() {
-            if axis.is_none() {
-                let leg = self.output_legs[q];
-                bra_legs[leg] = leg;
-            }
+        let mut network = self.double_cone(|q| axes[q].is_some());
+        if network.is_empty() {
+            return Ok(1.0);
         }
-
-        let mut network = self.double_through(&bra_legs);
         for (q, &axis) in axes.iter().enumerate() {
-            if axis.is_some() {
+            if let Some(axis) = axis {
                 let ket_leg = self.output_legs[q];
-                network.push(pauli_tensor(axis, bra_legs[ket_leg], ket_leg));
+                network.push(pauli_tensor(Some(axis), ket_leg + self.next_leg, ket_leg));
             }
         }
 
@@ -573,7 +649,95 @@ impl TensorNetworkBackend {
                 GateTensorOp::NQ(qubits, matrix) => self.append_matrix(qubits, matrix),
             }
             Ok(())
-        })
+        })?;
+        self.record_gate_unitarity(gate, targets);
+        Ok(())
+    }
+
+    fn record_gate_unitarity(&mut self, gate: &Gate, targets: &[usize]) {
+        match gate {
+            Gate::Fused(mat) => {
+                if !is_unitary_dense(mat.as_flattened(), 2) {
+                    self.is_unitary[targets[0]] = false;
+                }
+            }
+            Gate::Fused2q(mat) => {
+                if !is_unitary_dense(mat.as_flattened(), 4) {
+                    self.is_unitary[targets[0]] = false;
+                    self.is_unitary[targets[1]] = false;
+                }
+            }
+            Gate::Cu(mat) => {
+                if !is_unitary_dense(mat.as_flattened(), 2) {
+                    self.is_unitary[targets[0]] = false;
+                    self.is_unitary[targets[1]] = false;
+                }
+            }
+            Gate::Mcu(data) => {
+                if !is_unitary_dense(data.mat().as_flattened(), 2) {
+                    for &q in targets {
+                        self.is_unitary[q] = false;
+                    }
+                }
+            }
+            Gate::MultiFused(data) => {
+                for &(q, ref mat) in data.gates() {
+                    if !is_unitary_dense(mat.as_flattened(), 2) {
+                        self.is_unitary[q] = false;
+                    }
+                }
+            }
+            Gate::Multi2q(data) => {
+                for &(q0, q1, ref mat) in data.gates() {
+                    if !is_unitary_dense(mat.as_flattened(), 4) {
+                        self.is_unitary[q0] = false;
+                        self.is_unitary[q1] = false;
+                    }
+                }
+            }
+            Gate::BatchPhase(data) => {
+                for &(q1, phase) in data.phases() {
+                    if !is_unitary_phase(phase) {
+                        self.is_unitary[targets[0]] = false;
+                        self.is_unitary[q1] = false;
+                    }
+                }
+            }
+            Gate::DiagonalBatch(data) => {
+                for entry in data.entries() {
+                    match *entry {
+                        DiagEntry::Phase1q { qubit, d0, d1 } => {
+                            if !(is_unitary_phase(d0) && is_unitary_phase(d1)) {
+                                self.is_unitary[qubit] = false;
+                            }
+                        }
+                        DiagEntry::Phase2q { q0, q1, phase } => {
+                            if !is_unitary_phase(phase) {
+                                self.is_unitary[q0] = false;
+                                self.is_unitary[q1] = false;
+                            }
+                        }
+                        DiagEntry::Parity2q {
+                            q0, q1, same, diff, ..
+                        } => {
+                            if !(is_unitary_phase(same) && is_unitary_phase(diff)) {
+                                self.is_unitary[q0] = false;
+                                self.is_unitary[q1] = false;
+                            }
+                        }
+                    }
+                }
+            }
+            Gate::Unitary(data) => {
+                let dim = 1usize << data.num_qubits();
+                if !is_unitary_dense(data.matrix(), dim) {
+                    for &q in targets {
+                        self.is_unitary[q] = false;
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -627,6 +791,7 @@ impl Backend for TensorNetworkBackend {
         self.num_qubits = num_qubits;
         self.tensors = Vec::new();
         self.next_leg = 0;
+        self.is_unitary = vec![true; num_qubits];
         self.run_discarded = 0.0;
         self.query_discarded.set(0.0);
         self.worst_query_discarded.set(0.0);
@@ -683,6 +848,7 @@ impl Backend for TensorNetworkBackend {
 
     fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
         self.append_matrix(&[qubit], matrix.as_flattened().to_vec());
+        self.is_unitary[qubit] = false;
         Ok(())
     }
 
@@ -834,8 +1000,12 @@ impl Backend for TensorNetworkBackend {
     fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
         let mut axes: Vec<Option<PauliAxis>> = vec![None; self.num_qubits];
         let mut expectations = Vec::with_capacity(observables.len());
-        let norm_sq = self.contract_pauli_sandwich(&axes)?;
-        let norm_discarded = self.query_discarded.replace(0.0);
+        let (norm_sq, norm_discarded) = if self.is_unitary.iter().all(|&u| u) {
+            (1.0, 0.0)
+        } else {
+            let norm_sq = self.contract_pauli_sandwich(&axes)?;
+            (norm_sq, self.query_discarded.replace(0.0))
+        };
 
         for observable in observables {
             observable_axes(observable, &mut axes, "tensor-network")?;

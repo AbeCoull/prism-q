@@ -944,3 +944,499 @@ fn a_whole_part_of_26_qubits_is_identical_on_one_and_many_threads() {
     };
     assert_eq!(shots(1), shots(4));
 }
+
+fn unpruned_value(
+    readout: &WalshReadout,
+    q: RegisterPauli,
+    rotations: usize,
+    calls: &mut usize,
+) -> f64 {
+    *calls += 1;
+    if rotations == 0 {
+        return readout.product_value(q);
+    }
+    let (r, cos, sin) = readout.excess[rotations - 1];
+    if ((q.x & r.z) ^ (q.z & r.x)).count_ones() & 1 == 0 {
+        return unpruned_value(readout, q, rotations - 1, calls);
+    }
+    let mut qr = q.mul(r);
+    qr.phase4 = (qr.phase4 + 3) & 3;
+    cos * unpruned_value(readout, q, rotations - 1, calls)
+        + sin * unpruned_value(readout, qr, rotations - 1, calls)
+}
+
+fn counted_pruned_value(
+    readout: &WalshReadout,
+    q: RegisterPauli,
+    rotations: usize,
+    calls: &mut usize,
+) -> f64 {
+    *calls += 1;
+    if rotations == 0 {
+        return readout.product_value(q);
+    }
+    let xs = q.x & !q.z;
+    let ys = q.x & q.z;
+    if (xs & readout.frozen_blind_x[rotations]) | (ys & readout.frozen_blind_y[rotations]) != 0 {
+        return 0.0;
+    }
+    let (r, cos, sin) = readout.excess[rotations - 1];
+    if ((q.x & r.z) ^ (q.z & r.x)).count_ones() & 1 == 0 {
+        return counted_pruned_value(readout, q, rotations - 1, calls);
+    }
+    let mut qr = q.mul(r);
+    qr.phase4 = (qr.phase4 + 3) & 3;
+    cos * counted_pruned_value(readout, q, rotations - 1, calls)
+        + sin * counted_pruned_value(readout, qr, rotations - 1, calls)
+}
+
+fn unpruned_walsh_table(readout: &WalshReadout, rank: usize) -> Vec<f64> {
+    let mut table = vec![0.0f64; 1 << rank];
+    let mut calls = 0usize;
+    for (s, entry) in table.iter_mut().enumerate() {
+        let q = readout.product(s);
+        *entry = unpruned_value(readout, q, readout.excess.len(), &mut calls);
+    }
+    walsh_hadamard(&mut table);
+    let scale = 0.5f64.powi(rank as i32);
+    for p in &mut table {
+        *p = (*p * scale).max(0.0);
+    }
+    table
+}
+
+fn assert_all_paulis_bit_exact(readout: &WalshReadout, width: usize, label: &str) {
+    let limit = 1usize << width;
+    let mut unpruned_calls = 0usize;
+    let mut pruned_calls = 0usize;
+    for k in 0..=readout.excess.len() {
+        for x in 0..limit {
+            for z in 0..limit {
+                for phase4 in [0u8, 2u8] {
+                    let q = RegisterPauli {
+                        x: x as u64,
+                        z: z as u64,
+                        phase4,
+                    };
+                    let got = readout.value(q, k);
+                    let want = unpruned_value(readout, q, k, &mut unpruned_calls);
+                    let counted = counted_pruned_value(readout, q, k, &mut pruned_calls);
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "{label}: k={k}, x={x:#x}, z={z:#x}, phase4={phase4}: {got} vs {want}"
+                    );
+                    assert_eq!(counted.to_bits(), got.to_bits(), "{label}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn walsh_pruning_matches_unpruned_on_tiers_and_partial_rank() {
+    let (mut excess, mut partial) = (0, 0);
+    let partial_rank = (0..40u64).map(|seed| {
+        let mut circuit = linked_units(&[4, 3], 30, 8000 + seed);
+        let first = circuit
+            .instructions
+            .iter()
+            .position(|i| matches!(i, Instruction::Measure { .. }))
+            .unwrap();
+        circuit.instructions.remove(first);
+        (format!("partial seed {seed}"), circuit, SPLIT_LIMITS)
+    });
+    let tiers = tier_circuits()
+        .into_iter()
+        .map(|(label, circuit)| (label, circuit, TIER_LIMITS));
+    for (label, circuit, limits) in tiers.chain(partial_rank) {
+        let Some(plan) = SplitPlan::with_limits(&circuit, limits).unwrap() else {
+            continue;
+        };
+        for (part, basis) in whole_parts(&plan) {
+            excess += usize::from(!part.excess.is_empty());
+            partial += usize::from(part.rank < part.mask.count_ones() as usize);
+            let readout = WalshReadout::new(&plan.gauge, part.mask, &part.excess, &basis);
+            assert_eq!(readout.frozen_blind_x.len(), readout.excess.len() + 1);
+            assert_eq!(readout.frozen_blind_y.len(), readout.excess.len() + 1);
+            let mut calls = 0usize;
+            for s in 0..1usize << basis.len() {
+                let q = readout.product(s);
+                let got = readout.value(q, readout.excess.len());
+                let want = unpruned_value(&readout, q, readout.excess.len(), &mut calls);
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "{label}: subset {s}: {got} vs {want}"
+                );
+            }
+            let got_table = plan.walsh_table(part, &basis);
+            let want_table = unpruned_walsh_table(&readout, basis.len());
+            assert_eq!(got_table.len(), want_table.len(), "{label}");
+            for (t, (g, w)) in got_table.iter().zip(&want_table).enumerate() {
+                assert_eq!(
+                    g.to_bits(),
+                    w.to_bits(),
+                    "{label}: table entry {t}: {g} vs {w}"
+                );
+            }
+            let dense = plan.dense_table(part, &basis);
+            for (t, (g, d)) in got_table.iter().zip(&dense).enumerate() {
+                assert!((g - d).abs() < 1e-12, "{label}: entry {t}: {g} vs {d}");
+            }
+        }
+    }
+    assert!(
+        excess > 0 && partial > 0,
+        "{excess} with excess, {partial} partial"
+    );
+}
+
+#[test]
+fn walsh_pruning_handles_zero_excess_and_all_x_or_all_y_anchors() {
+    let build_four = |y_mask: u8, with_excess: bool| {
+        let mut c = Circuit::new(4, 4);
+        for q in 0..4 {
+            if (y_mask >> q) & 1 == 1 {
+                c.add_gate(Gate::S, &[q]);
+            }
+            c.add_gate(Gate::H, &[q]);
+            c.add_gate(Gate::T, &[q]);
+        }
+        if with_excess {
+            c.add_gate(Gate::Cx, &[0, 1]);
+            c.add_gate(Gate::T, &[1]);
+            c.add_gate(Gate::Cx, &[0, 1]);
+            c.add_gate(Gate::Cx, &[1, 2]);
+            c.add_gate(Gate::Tdg, &[2]);
+            c.add_gate(Gate::Cx, &[1, 2]);
+            c.add_gate(Gate::Cx, &[2, 3]);
+            c.add_gate(Gate::T, &[3]);
+            c.add_gate(Gate::Cx, &[2, 3]);
+        }
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_gate(Gate::Cx, &[0, 2]);
+        c.add_gate(Gate::Cx, &[0, 3]);
+        c.add_gate(Gate::H, &[0]);
+        c.measure_all();
+        c
+    };
+
+    // Zero excess rotations (rotations == 0) with mixed X and Y blind anchors.
+    let zero_excess = build_four(0b1100, false);
+    let plan = SplitPlan::new(&zero_excess).unwrap().unwrap();
+    let parts = whole_parts(&plan);
+    assert_eq!(parts.len(), 1);
+    let (part, basis) = &parts[0];
+    assert!(part.excess.is_empty());
+    assert_eq!(part.mask, 0b1111);
+    let readout = WalshReadout::new(&plan.gauge, part.mask, &part.excess, basis);
+    assert_eq!(readout.frozen_blind_x, vec![readout.blind[0]]);
+    assert_eq!(readout.frozen_blind_y, vec![readout.blind[1]]);
+    assert_all_paulis_bit_exact(&readout, 4, "zero_excess");
+    let got_table = plan.walsh_table(part, basis);
+    let want_table = unpruned_walsh_table(&readout, basis.len());
+    for (g, w) in got_table.iter().zip(&want_table) {
+        assert_eq!(g.to_bits(), w.to_bits());
+    }
+    let dense = plan.dense_table(part, basis);
+    assert_close("zero_excess", &got_table, &dense, 1e-12);
+
+    // All-X (H; T) vs all-Y (S; H; T) blind anchors with excess rotations.
+    for (label, y_mask, want_blind) in [
+        ("all_x", 0b0000u8, [0b1111u64, 0u64]),
+        ("all_y", 0b1111u8, [0u64, 0b1111u64]),
+    ] {
+        let circuit = build_four(y_mask, true);
+        let plan = SplitPlan::new(&circuit).unwrap().unwrap();
+        let parts = whole_parts(&plan);
+        assert_eq!(parts.len(), 1, "{label}");
+        let (part, basis) = &parts[0];
+        assert_eq!(part.excess.len(), 3, "{label}");
+        let readout = WalshReadout::new(&plan.gauge, part.mask, &part.excess, basis);
+        assert_eq!(readout.blind, want_blind, "{label}");
+        assert_all_paulis_bit_exact(&readout, 4, label);
+        let got_table = plan.walsh_table(part, basis);
+        let want_table = unpruned_walsh_table(&readout, basis.len());
+        for (g, w) in got_table.iter().zip(&want_table) {
+            assert_eq!(g.to_bits(), w.to_bits(), "{label}");
+        }
+        let dense = plan.dense_table(part, basis);
+        assert_close(label, &got_table, &dense, 1e-12);
+    }
+}
+
+#[test]
+fn walsh_pruning_stages_frozen_blind_across_excess_rotations() {
+    // Untouched anchor (qubit 3) merged into the same part via canonical_parts.
+    let mut untouched = Circuit::new(4, 4);
+    for q in 0..4 {
+        if q == 1 {
+            untouched.add_gate(Gate::S, &[q]);
+        }
+        untouched.add_gate(Gate::H, &[q]);
+        untouched.add_gate(Gate::T, &[q]);
+    }
+    untouched.add_gate(Gate::Cx, &[0, 1]);
+    untouched.add_gate(Gate::T, &[1]);
+    untouched.add_gate(Gate::Cx, &[0, 1]);
+    untouched.add_gate(Gate::Cx, &[0, 2]);
+    untouched.add_gate(Gate::Tdg, &[2]);
+    untouched.add_gate(Gate::Cx, &[0, 2]);
+    untouched.add_gate(Gate::Cx, &[0, 1]);
+    untouched.add_gate(Gate::Cx, &[0, 2]);
+    untouched.add_gate(Gate::Cx, &[0, 3]);
+    untouched.add_gate(Gate::H, &[0]);
+    untouched.measure_all();
+
+    let plan = SplitPlan::new(&untouched).unwrap().unwrap();
+    let parts = whole_parts(&plan);
+    assert_eq!(parts.len(), 1);
+    let (part, basis) = &parts[0];
+    assert_eq!(part.mask, 0b1111);
+    assert_eq!(part.excess.len(), 2);
+    let readout = WalshReadout::new(&plan.gauge, part.mask, &part.excess, basis);
+    assert_eq!(readout.blind, [0b1101, 0b0010]);
+    assert_eq!(readout.frozen_blind_x, vec![0b1101, 0b1100, 0b1000]);
+    assert_eq!(readout.frozen_blind_y, vec![0b0010, 0b0000, 0b0000]);
+    assert_all_paulis_bit_exact(&readout, 4, "untouched_merged");
+    let got_table = plan.walsh_table(part, basis);
+    let want_table = unpruned_walsh_table(&readout, basis.len());
+    for (g, w) in got_table.iter().zip(&want_table) {
+        assert_eq!(g.to_bits(), w.to_bits());
+    }
+    assert_close(
+        "untouched_merged",
+        &got_table,
+        &plan.dense_table(part, basis),
+        1e-12,
+    );
+
+    // Anchor 3 touched only by the last rotation excess[E - 1].
+    let mut staged = Circuit::new(4, 4);
+    for q in 0..4 {
+        if q == 1 {
+            staged.add_gate(Gate::S, &[q]);
+        }
+        staged.add_gate(Gate::H, &[q]);
+        staged.add_gate(Gate::T, &[q]);
+    }
+    staged.add_gate(Gate::Cx, &[0, 1]);
+    staged.add_gate(Gate::T, &[1]);
+    staged.add_gate(Gate::Cx, &[0, 1]);
+    staged.add_gate(Gate::Cx, &[1, 2]);
+    staged.add_gate(Gate::Tdg, &[2]);
+    staged.add_gate(Gate::Cx, &[1, 2]);
+    staged.add_gate(Gate::Cx, &[2, 3]);
+    staged.add_gate(Gate::T, &[3]);
+    staged.add_gate(Gate::Cx, &[2, 3]);
+    for q in 0..4 {
+        staged.add_gate(Gate::H, &[q]);
+    }
+    staged.measure_all();
+
+    let plan = SplitPlan::new(&staged).unwrap().unwrap();
+    let parts = whole_parts(&plan);
+    assert_eq!(parts.len(), 1);
+    let (part, basis) = &parts[0];
+    let readout = WalshReadout::new(&plan.gauge, part.mask, &part.excess, basis);
+    assert_eq!(readout.frozen_blind_x, vec![0b1101, 0b1100, 0b1000, 0b0000]);
+    assert_eq!(readout.frozen_blind_y, vec![0b0010, 0b0000, 0b0000, 0b0000]);
+    assert_all_paulis_bit_exact(&readout, 4, "staged_last_rotation");
+    let got_table = plan.walsh_table(part, basis);
+    let want_table = unpruned_walsh_table(&readout, basis.len());
+    for (g, w) in got_table.iter().zip(&want_table) {
+        assert_eq!(g.to_bits(), w.to_bits());
+    }
+    assert_close(
+        "staged_last_rotation",
+        &got_table,
+        &plan.dense_table(part, basis),
+        1e-12,
+    );
+}
+
+#[test]
+fn walsh_pruning_works_above_64_circuit_qubits_via_high_bit_compress() {
+    let n = 72;
+    let mut circuit = Circuit::new(n, n);
+    for q in 0..56 {
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::T, &[q]);
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for q in 56..66 {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for q in 66..72 {
+        if q == 67 {
+            circuit.add_gate(Gate::S, &[q]);
+        }
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::T, &[q]);
+    }
+    circuit.add_gate(Gate::Cx, &[66, 67]);
+    circuit.add_gate(Gate::T, &[67]);
+    circuit.add_gate(Gate::Cx, &[66, 67]);
+    circuit.add_gate(Gate::Cx, &[66, 68]);
+    circuit.add_gate(Gate::Tdg, &[68]);
+    circuit.add_gate(Gate::Cx, &[66, 68]);
+    for q in 0..3 {
+        circuit.add_gate(Gate::Cx, &[66 + q, 69 + q]);
+        circuit.add_gate(Gate::H, &[66 + q]);
+    }
+    circuit.measure_all();
+
+    let plan = SplitPlan::new(&circuit).unwrap().unwrap();
+    let (part, basis) = whole_parts(&plan)
+        .into_iter()
+        .find(|(part, _)| part.mask >> 56 != 0)
+        .expect("high-bit register part");
+    assert_eq!(part.mask.count_ones(), 6);
+    assert!(part.walsh);
+    let readout = WalshReadout::new(&plan.gauge, part.mask, &part.excess, &basis);
+    assert_eq!(readout.frozen_blind_x, vec![0b111101, 0b111100, 0b111000]);
+    assert_eq!(readout.frozen_blind_y, vec![0b000010, 0b000000, 0b000000]);
+    let mut calls = 0usize;
+    for s in 0..1usize << basis.len() {
+        let q = readout.product(s);
+        for k in 0..=readout.excess.len() {
+            let got = readout.value(q, k);
+            let want = unpruned_value(&readout, q, k, &mut calls);
+            assert_eq!(got.to_bits(), want.to_bits(), "s={s}, k={k}");
+        }
+    }
+    let got_table = plan.walsh_table(part, &basis);
+    let want_table = unpruned_walsh_table(&readout, basis.len());
+    for (g, w) in got_table.iter().zip(&want_table) {
+        assert_eq!(g.to_bits(), w.to_bits());
+    }
+    assert_close(
+        "above_64q_high_bit",
+        &got_table,
+        &plan.dense_table(part, &basis),
+        1e-12,
+    );
+}
+
+#[test]
+fn walsh_pruning_reduces_visited_nodes_and_triggers_frozen_blind() {
+    // Directly exercise WalshReadout::value's frozen_blind branch independently of blind[].
+    let synthetic = WalshReadout {
+        rows: Vec::new(),
+        blind: [0, 0],
+        frozen_blind_x: vec![0, 0b01],
+        frozen_blind_y: vec![0, 0b10],
+        negative: [0, 0, 0],
+        scale: [1.0; 65],
+        excess: vec![(
+            RegisterPauli {
+                x: 0,
+                z: 0b01,
+                phase4: 0,
+            },
+            FRAC_1_SQRT_2,
+            FRAC_1_SQRT_2,
+        )],
+    };
+    let x0 = RegisterPauli {
+        x: 0b01,
+        z: 0,
+        phase4: 0,
+    };
+    let y1 = RegisterPauli {
+        x: 0b10,
+        z: 0b10,
+        phase4: 0,
+    };
+    let z0 = RegisterPauli {
+        x: 0,
+        z: 0b01,
+        phase4: 0,
+    };
+    assert_eq!(synthetic.value(x0, 1).to_bits(), 0.0f64.to_bits());
+    assert_eq!(synthetic.value(y1, 1).to_bits(), 0.0f64.to_bits());
+    assert_ne!(synthetic.value(z0, 1), 0.0);
+
+    // Part with 6 anchors, 4 excess rotations on qubits 0..3, and 3 frozen anchors merged via canonical_parts.
+    let mut circuit = Circuit::new(6, 6);
+    for q in 0..6 {
+        if q % 2 == 1 {
+            circuit.add_gate(Gate::S, &[q]);
+        }
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::T, &[q]);
+    }
+    for &(a, b) in &[(0, 1), (1, 2), (0, 2), (0, 1)] {
+        circuit.add_gate(Gate::Cx, &[a, b]);
+        circuit.add_gate(Gate::T, &[b]);
+        circuit.add_gate(Gate::Cx, &[a, b]);
+    }
+    for q in 0..3 {
+        circuit.add_gate(Gate::Cx, &[q, q + 3]);
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    circuit.measure_all();
+
+    let plan = SplitPlan::new(&circuit).unwrap().unwrap();
+    let parts = whole_parts(&plan);
+    assert_eq!(parts.len(), 1);
+    let (part, basis) = &parts[0];
+    assert_eq!(part.mask.count_ones(), 6);
+    assert_eq!(part.excess.len(), 4);
+    let readout = WalshReadout::new(&plan.gauge, part.mask, &part.excess, basis);
+    let mut unpruned_calls = 0usize;
+    let mut pruned_calls = 0usize;
+    for s in 0..1usize << basis.len() {
+        let q = readout.product(s);
+        let got = readout.value(q, readout.excess.len());
+        let want = unpruned_value(&readout, q, readout.excess.len(), &mut unpruned_calls);
+        let counted = counted_pruned_value(&readout, q, readout.excess.len(), &mut pruned_calls);
+        assert_eq!(got.to_bits(), want.to_bits());
+        assert_eq!(counted.to_bits(), got.to_bits());
+    }
+    assert!(
+        pruned_calls * 2 < unpruned_calls,
+        "expected >2x call reduction from blind-bit pruning, got pruned={pruned_calls}, unpruned={unpruned_calls}"
+    );
+}
+
+#[test]
+fn walsh_readout_work_accounts_for_pruning_and_preserves_baselines() {
+    // 0-excess preserves WALSH_TERM_UNITS.
+    for (width, rank) in [(4usize, 4usize), (16, 12), (26, 26)] {
+        let expected =
+            2f64.powi(rank as i32) * (WALSH_TERM_UNITS + WALSH_LEVEL_UNITS * rank as f64);
+        assert_eq!(walsh_readout_work(width, rank, []), expected);
+    }
+
+    // u_k == 0 for all k preserves 1.5^E.
+    let width = 8usize;
+    let rank = 8usize;
+    let full = (1u64 << width) - 1;
+    for excess in 1..=8usize {
+        let got = walsh_readout_work(width, rank, std::iter::repeat_n(full, excess));
+        let want = 2f64.powi(rank as i32)
+            * (WALSH_TERM_UNITS * 1.5f64.powi(excess as i32) + WALSH_LEVEL_UNITS * rank as f64);
+        assert!(
+            (got - want).abs() < 1e-9,
+            "excess={excess}: {got} vs {want}"
+        );
+    }
+
+    // u_k > 0 scales expected surviving calls by (3/4)^{u_k}.
+    let zero = walsh_readout_work(12, 12, []);
+    let partial = walsh_readout_work(12, 12, std::iter::repeat_n(0b111u64, 6));
+    let unpruned = walsh_readout_work(12, 12, std::iter::repeat_n((1u64 << 12) - 1, 6));
+    assert!(zero < partial && partial < unpruned);
+    let sum: f64 = (1..=6).map(|k| 1.5f64.powi(6 - k) * 0.75f64.powi(9)).sum();
+    let expected_partial =
+        2f64.powi(12) * (WALSH_TERM_UNITS * (1.0 + 0.5 * sum) + WALSH_LEVEL_UNITS * 12.0);
+    assert!((partial - expected_partial).abs() < 1e-6);
+
+    // Transform work WALSH_LEVEL_UNITS * rank stays intact so width 25..=26 cut choices hold.
+    let min_wide = walsh_readout_work(26, 26, [0u64; 2]);
+    assert!(min_wide > 1.1e9, "wide transform floor: {min_wide}");
+    let plan = plan_with_wide_part(&two_linked_units(13, 13, 128, 42), SPLIT_LIMITS, 26, true);
+    assert!(plan.parts.iter().any(|p| p.cut.is_some()));
+}

@@ -16,8 +16,8 @@ use super::{
     BackendKind, ExecutionPlan, FactoredBlock, Probabilities, ProbabilityRoute, RunMetadata,
     RunOutcome, ShotsResult, SimOptions,
     dispatch::{BackendPlan, TemporalCliffordPlan},
-    ensure_saves_recorded, execute_circuit, expand_for_backend, fuse_for_backend,
-    plan_probability_route, plan_temporal_clifford, resolve, run_route, run_temporal_clifford,
+    execute_circuit, expand_for_backend, fuse_for_backend, plan_probability_route,
+    plan_temporal_clifford, resolve, run_route, run_temporal_clifford,
 };
 
 pub(super) const MIN_DECOMPOSITION_QUBITS: usize = 8;
@@ -87,7 +87,7 @@ pub(super) fn run_decomposed(
     let partitions = circuit.partition_subcircuits(components);
     let k = partitions.len();
 
-    let block_opts = if circuit.num_qubits > 64 {
+    let block_opts = if circuit.num_qubits >= usize::BITS as usize {
         SimOptions::classical_only()
     } else {
         *opts
@@ -150,18 +150,16 @@ impl BlockRoute {
         opts: &SimOptions,
         limits: &ResolvedLimits,
     ) -> Result<RunOutcome> {
-        let outcome = match self {
+        match self {
             BlockRoute::TemporalClifford(plan) => {
-                run_temporal_clifford(plan, seed, opts.probabilities)?
+                run_temporal_clifford(plan, seed, opts.probabilities)
             }
             BlockRoute::Backend { plan, fused } => {
                 let mut backend = plan.build(seed, limits);
-                execute_circuit(&mut *backend, fused, opts)?
+                execute_circuit(&mut *backend, fused, opts)
             }
-            BlockRoute::Route(route) => run_route(kind, block, seed, *opts, route, limits)?,
-        };
-        ensure_saves_recorded(block, &outcome)?;
-        Ok(outcome)
+            BlockRoute::Route(route) => run_route(kind, block, seed, *opts, route, limits),
+        }
     }
 }
 
@@ -203,7 +201,7 @@ impl PreparedBlocks {
         opts: &SimOptions,
         limits: &ResolvedLimits,
     ) -> Result<RunOutcome> {
-        let block_opts = if circuit.num_qubits > 64 {
+        let block_opts = if circuit.num_qubits >= usize::BITS as usize {
             SimOptions::classical_only()
         } else {
             *opts
@@ -250,7 +248,7 @@ fn merge_decomposed_results(
         }
 
         if opts.probabilities
-            && num_qubits <= 64
+            && num_qubits < usize::BITS as usize
             && let Some(probs) = result.probabilities
         {
             let dense = probs.to_vec();
@@ -291,7 +289,7 @@ pub(super) fn run_decomposed_prefused(
     limits: &ResolvedLimits,
 ) -> Result<RunOutcome> {
     let k = partitions.len();
-    let block_opts = if original_circuit.num_qubits > 64 {
+    let block_opts = if original_circuit.num_qubits >= usize::BITS as usize {
         SimOptions::classical_only()
     } else {
         *opts

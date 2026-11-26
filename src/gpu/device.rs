@@ -46,10 +46,131 @@ enum DeviceInner {
         _module: Arc<CudaModule>,
         functions: HashMap<&'static str, CudaFunction>,
         #[cfg(feature = "parallel")]
-        staging: Mutex<Option<Box<super::memory::HostStaging>>>,
+        staging: StagingCell<Box<super::memory::HostStaging>>,
+        #[cfg(all(test, feature = "parallel"))]
+        staged_chunks: std::sync::atomic::AtomicUsize,
     },
     #[cfg_attr(not(test), allow(dead_code))]
     Stub,
+}
+
+#[cfg(feature = "parallel")]
+#[derive(Debug)]
+enum StagingSlotState<T> {
+    Empty,
+    Idle(T),
+    CheckedOut,
+}
+
+#[cfg(feature = "parallel")]
+#[derive(Debug)]
+struct StagingCell<T>(Mutex<StagingSlotState<T>>);
+
+#[cfg(feature = "parallel")]
+impl<T> StagingCell<T> {
+    fn new() -> Self {
+        Self(Mutex::new(StagingSlotState::Empty))
+    }
+
+    fn try_checkout_with(
+        &self,
+        init: impl FnOnce() -> Result<T>,
+    ) -> Result<Option<StagingGuard<'_, T>>> {
+        let needs_init = {
+            let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            match std::mem::replace(&mut *state, StagingSlotState::CheckedOut) {
+                StagingSlotState::Empty => true,
+                StagingSlotState::Idle(value) => {
+                    drop(state);
+                    return Ok(Some(StagingGuard {
+                        cell: self,
+                        value: Some(value),
+                    }));
+                }
+                StagingSlotState::CheckedOut => return Ok(None),
+            }
+        };
+        debug_assert!(needs_init);
+        // Guard restores Empty if `init` returns an error or unwinds.
+        let mut guard = StagingGuard {
+            cell: self,
+            value: None,
+        };
+        let value = init()?;
+        guard.value = Some(value);
+        Ok(Some(guard))
+    }
+}
+
+#[cfg(feature = "parallel")]
+#[derive(Debug)]
+struct StagingGuard<'a, T> {
+    cell: &'a StagingCell<T>,
+    value: Option<T>,
+}
+
+#[cfg(feature = "parallel")]
+impl<T> std::ops::Deref for StagingGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.value.as_ref().expect("staging guard value present")
+    }
+}
+
+#[cfg(feature = "parallel")]
+impl<T> std::ops::DerefMut for StagingGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.value.as_mut().expect("staging guard value present")
+    }
+}
+
+#[cfg(feature = "parallel")]
+impl<T> Drop for StagingGuard<'_, T> {
+    fn drop(&mut self) {
+        let next = match self.value.take() {
+            Some(value) => StagingSlotState::Idle(value),
+            None => StagingSlotState::Empty,
+        };
+        let mut state = self.cell.0.lock().unwrap_or_else(PoisonError::into_inner);
+        *state = next;
+    }
+}
+
+/// Exclusive checkout of a device's pinned readback slots. Dropping restores the slots to
+/// the device without holding a lock during CUDA or Rayon transfers.
+#[cfg(feature = "parallel")]
+#[derive(Debug)]
+pub(crate) struct StagingCheckout<'a> {
+    guard: StagingGuard<'a, Box<super::memory::HostStaging>>,
+    #[cfg(test)]
+    staged_chunks: &'a std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(feature = "parallel")]
+impl std::ops::Deref for StagingCheckout<'_> {
+    type Target = super::memory::HostStaging;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+#[cfg(feature = "parallel")]
+impl std::ops::DerefMut for StagingCheckout<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+#[cfg(all(test, feature = "parallel"))]
+impl Drop for StagingCheckout<'_> {
+    fn drop(&mut self) {
+        if let Some(staging) = self.guard.value.as_ref() {
+            self.staged_chunks
+                .store(staging.chunks, std::sync::atomic::Ordering::Release);
+        }
+    }
 }
 
 impl GpuDevice {
@@ -90,7 +211,9 @@ impl GpuDevice {
                 _module: module,
                 functions,
                 #[cfg(feature = "parallel")]
-                staging: Mutex::new(None),
+                staging: StagingCell::new(),
+                #[cfg(all(test, feature = "parallel"))]
+                staged_chunks: std::sync::atomic::AtomicUsize::new(0),
             },
             #[cfg(feature = "bench-internal")]
             census: PassCounters::default(),
@@ -222,36 +345,53 @@ impl GpuDevice {
         }
     }
 
-    /// Run `f` on the pinned readback slots, allocating them on first use. A failed
-    /// pinned allocation returns its error, and the next call allocates again.
+    /// Check out the pinned readback slots for exclusive use without holding a lock across
+    /// CUDA or Rayon transfers. Returns `Ok(None)` when another readback holds the slots.
+    #[cfg(feature = "parallel")]
+    pub(crate) fn checkout_staging(&self) -> Result<Option<StagingCheckout<'_>>> {
+        match &self.inner {
+            DeviceInner::Real {
+                stream,
+                staging,
+                #[cfg(test)]
+                staged_chunks,
+                ..
+            } => {
+                let guard = staging
+                    .try_checkout_with(|| Ok(Box::new(super::memory::HostStaging::new(stream)?)))?;
+                Ok(guard.map(|guard| StagingCheckout {
+                    guard,
+                    #[cfg(test)]
+                    staged_chunks,
+                }))
+            }
+            DeviceInner::Stub => Err(Self::stub_unsupported("staged readback")),
+        }
+    }
+
+    /// Run `f` on the pinned readback slots, allocating them on first use, or on a transient
+    /// staging buffer when the shared slots are already checked out. A failed pinned
+    /// allocation returns its error, and the next call allocates again.
     #[cfg(feature = "parallel")]
     pub(crate) fn with_staging<R>(
         &self,
         f: impl FnOnce(&mut super::memory::HostStaging) -> Result<R>,
     ) -> Result<R> {
-        match &self.inner {
-            DeviceInner::Real {
-                stream, staging, ..
-            } => {
-                let mut slot = staging.lock().unwrap_or_else(PoisonError::into_inner);
-                if slot.is_none() {
-                    *slot = Some(Box::new(super::memory::HostStaging::new(stream)?));
-                }
-                f(slot.as_mut().unwrap())
-            }
-            DeviceInner::Stub => Err(Self::stub_unsupported("staged readback")),
+        if let Some(mut guard) = self.checkout_staging()? {
+            return f(&mut guard);
         }
+        let stream = self.stream()?;
+        let mut temp = super::memory::HostStaging::new(stream)?;
+        f(&mut temp)
     }
 
     /// Chunks enqueued through the pinned readback slots since the device opened.
     #[cfg(all(test, feature = "parallel"))]
     pub(crate) fn staged_chunks(&self) -> usize {
         match &self.inner {
-            DeviceInner::Real { staging, .. } => staging
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .as_ref()
-                .map_or(0, |staging| staging.chunks),
+            DeviceInner::Real { staged_chunks, .. } => {
+                staged_chunks.load(std::sync::atomic::Ordering::Acquire)
+            }
             DeviceInner::Stub => 0,
         }
     }

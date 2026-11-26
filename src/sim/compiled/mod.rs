@@ -78,6 +78,7 @@ impl PauliVec {
         }
     }
 
+    #[cfg(test)]
     pub fn z_on_qubit(num_words: usize, qubit: usize) -> Self {
         let mut pv = Self::new(num_words);
         pv.z[qubit / 64] |= 1u64 << (qubit % 64);
@@ -1846,6 +1847,7 @@ fn require_compilable(circuit: &Circuit) -> Result<()> {
     if crate::sim::supports_compiled_measurement_sampling(circuit) {
         return Ok(());
     }
+    super::decline_saves(circuit, "CompiledSampler", "compiled measurement sampling")?;
     require_clifford(circuit)?;
 
     let has_measurements = circuit
@@ -1996,6 +1998,7 @@ pub fn compile_detector_sampler(
     observable_rows: Vec<Vec<usize>>,
     seed: u64,
 ) -> Result<CompiledDetectorSampler> {
+    super::decline_saves(circuit, "CompiledSampler", "detector sampling")?;
     let measurement_circuit = if circuit.has_resets() || !circuit.has_terminal_measurements_only() {
         defer_measure_reset_circuit(circuit)?
     } else {

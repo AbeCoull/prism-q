@@ -14,9 +14,13 @@ use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 ///
 /// Emits one `Gate::QftBlock` over `0..n`. CPU statevector runs the native
 /// FFT path; other backends expand the block before execution.
+///
+/// # Panics
+/// Panics if `n == 0` or `n > 255`.
 pub fn qft_circuit(n: usize) -> Circuit {
+    assert!(n >= 1, "qft_circuit needs at least 1 qubit");
+    assert!(n <= u8::MAX as usize, "QFT block size must fit in u8");
     let mut c = Circuit::new(n, 0);
-    debug_assert!(n <= u8::MAX as usize, "QFT block size must fit in u8");
     let targets: Vec<usize> = (0..n).collect();
     c.add_gate(
         Gate::QftBlock {
@@ -47,7 +51,7 @@ pub fn random_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
             c.add_gate(singles[rng.random_range(0..singles.len())].clone(), &[q]);
         }
         let offset = layer % 2;
-        for q in (offset..n - 1).step_by(2) {
+        for q in (offset..n.saturating_sub(1)).step_by(2) {
             let keep = rng.random_bool(0.5);
             if layer < 2 || keep {
                 c.add_gate(Gate::Cx, &[q, q + 1]);
@@ -66,7 +70,7 @@ pub fn hardware_efficient_ansatz(n: usize, layers: usize, seed: u64) -> Circuit 
             c.add_gate(Gate::Ry(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
             c.add_gate(Gate::Rz(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
         }
-        for q in 0..n - 1 {
+        for q in 0..n.saturating_sub(1) {
             c.add_gate(Gate::Cx, &[q, q + 1]);
         }
     }
@@ -86,7 +90,7 @@ pub fn clifford_heavy_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
             );
         }
         let offset = layer % 2;
-        for q in (offset..n - 1).step_by(2) {
+        for q in (offset..n.saturating_sub(1)).step_by(2) {
             c.add_gate(Gate::Cx, &[q, q + 1]);
         }
     }
@@ -285,7 +289,7 @@ pub fn qaoa_circuit(n: usize, layers: usize, seed: u64) -> Circuit {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut c = Circuit::new(n, 0);
     for _ in 0..layers {
-        for q in 0..n - 1 {
+        for q in 0..n.saturating_sub(1) {
             let gamma: f64 = rng.random::<f64>() * std::f64::consts::TAU;
             c.add_gate(Gate::Rzz(gamma), &[q, q + 1]);
         }
@@ -454,7 +458,11 @@ pub fn clifford_t_circuit(n: usize, depth: usize, t_fraction: f64, seed: u64) ->
 /// A cascade of controlled rotations, each lowered to two `Ry` and two `Cx`,
 /// hands the excitation from qubit `i` to `i + 1` with the weight that leaves
 /// `1/n` behind.
+///
+/// # Panics
+/// Panics if `n == 0`.
 pub fn w_state_circuit(n: usize) -> Circuit {
+    assert!(n >= 1, "w_state_circuit needs at least 1 qubit");
     let mut c = Circuit::new(n, 0);
     c.add_gate(Gate::X, &[0]);
     for i in 0..n - 1 {
@@ -732,7 +740,8 @@ pub(crate) fn apply_inverse_qft(c: &mut Circuit, start: usize, n: usize) {
     }
     for q in 0..n {
         for k in (0..q).rev() {
-            let theta = std::f64::consts::TAU / (1u64 << (q - k + 1)) as f64;
+            let theta = i32::try_from(q - k + 1)
+                .map_or(0.0, |exp| std::f64::consts::TAU * 0.5f64.powi(exp));
             c.add_gate(Gate::cphase(-theta), &[start + k, start + q]);
         }
         c.add_gate(Gate::H, &[start + q]);
@@ -755,7 +764,11 @@ pub fn phase_estimation_circuit(n: usize) -> Circuit {
         c.add_gate(Gate::H, &[i]);
     }
     for k in 0..n_counting {
-        let theta = std::f64::consts::FRAC_PI_4 * (1u64 << k) as f64;
+        let theta = if k < 3 {
+            std::f64::consts::FRAC_PI_4 * (1u64 << k) as f64
+        } else {
+            0.0
+        };
         c.add_gate(Gate::cphase(theta), &[k, target]);
     }
     apply_inverse_qft(&mut c, 0, n_counting);
@@ -776,6 +789,10 @@ pub fn jordan_wigner_hamiltonian(
     max_terms: usize,
     seed: u64,
 ) -> Vec<(f64, Vec<PauliTerm>)> {
+    if n == 0 || max_terms == 0 {
+        return Vec::new();
+    }
+
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut accumulated: std::collections::HashMap<Vec<PauliTerm>, Complex64> =
         std::collections::HashMap::new();
@@ -808,25 +825,27 @@ pub fn jordan_wigner_hamiltonian(
         }
     }
 
-    for _ in 0..3 * n * n {
-        let mut pair = || loop {
-            let a = rng.random_range(0..n);
-            let b = rng.random_range(0..n);
-            if a != b {
-                return (a.min(b), a.max(b));
-            }
-        };
-        let (p, q) = pair();
-        let (r, s) = pair();
-        let v = rng.random::<f64>() * 2.0 - 1.0;
-        absorb(
-            ladder_product(n, &[(p, true), (q, true), (r, false), (s, false)]),
-            v,
-        );
-        absorb(
-            ladder_product(n, &[(s, true), (r, true), (q, false), (p, false)]),
-            v,
-        );
+    if n >= 2 {
+        for _ in 0..3 * n * n {
+            let mut pair = || loop {
+                let a = rng.random_range(0..n);
+                let b = rng.random_range(0..n);
+                if a != b {
+                    return (a.min(b), a.max(b));
+                }
+            };
+            let (p, q) = pair();
+            let (r, s) = pair();
+            let v = rng.random::<f64>() * 2.0 - 1.0;
+            absorb(
+                ladder_product(n, &[(p, true), (q, true), (r, false), (s, false)]),
+                v,
+            );
+            absorb(
+                ladder_product(n, &[(s, true), (r, true), (q, false), (p, false)]),
+                v,
+            );
+        }
     }
 
     let mut terms: Vec<(f64, Vec<PauliTerm>)> = accumulated

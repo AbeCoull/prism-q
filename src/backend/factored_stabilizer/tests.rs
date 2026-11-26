@@ -1246,3 +1246,17 @@ fn entanglement_entropy_matches_the_dense_tableau_across_many_clusters() {
         );
     }
 }
+
+#[test]
+fn block_probabilities_declined_at_64_qubits() {
+    let mut c = Circuit::new(64, 0);
+    for q in 0..64 {
+        c.add_gate(Gate::H, &[q]);
+    }
+    let mut fact = FactoredStabilizerBackend::new(42);
+    fact.init(64, 0).unwrap();
+    for inst in &c.instructions {
+        fact.apply(inst).unwrap();
+    }
+    assert!(fact.block_probabilities().is_none());
+}

@@ -79,3 +79,56 @@ fn phase_estimation_circuit_rejects_zero_qubits() {
 fn phase_estimation_circuit_rejects_one_qubit() {
     phase_estimation_circuit(1);
 }
+
+#[test]
+#[should_panic(expected = "qft_circuit needs at least 1 qubit")]
+fn qft_circuit_rejects_zero_qubits() {
+    qft_circuit(0);
+}
+
+#[test]
+#[should_panic(expected = "QFT block size must fit in u8")]
+fn qft_circuit_rejects_more_than_255_qubits() {
+    qft_circuit(256);
+}
+
+#[test]
+#[should_panic(expected = "w_state_circuit needs at least 1 qubit")]
+fn w_state_circuit_rejects_zero_qubits() {
+    w_state_circuit(0);
+}
+
+#[test]
+fn phase_estimation_circuit_65_qubits_succeeds_without_shift_overflow() {
+    let c = phase_estimation_circuit(65);
+    assert_eq!(c.num_qubits, 65);
+    for inst in &c.instructions {
+        if let Instruction::Gate {
+            gate: Gate::Fused2q(mat),
+            ..
+        } = inst
+        {
+            assert!(
+                mat.iter()
+                    .flatten()
+                    .all(|z| z.re.is_finite() && z.im.is_finite())
+            );
+        }
+    }
+}
+
+#[test]
+fn jordan_wigner_hamiltonian_handles_zero_one_and_zero_terms() {
+    assert!(jordan_wigner_hamiltonian(0, 10, SEED).is_empty());
+    assert!(jordan_wigner_hamiltonian(2, 0, SEED).is_empty());
+    let one_mode = jordan_wigner_hamiltonian(1, 10, SEED);
+    assert!(!one_mode.is_empty());
+}
+
+#[test]
+fn zero_qubit_builders_do_not_underflow() {
+    assert_eq!(random_circuit(0, 2, SEED).num_qubits, 0);
+    assert_eq!(hardware_efficient_ansatz(0, 2, SEED).num_qubits, 0);
+    assert_eq!(clifford_heavy_circuit(0, 2, SEED).num_qubits, 0);
+    assert_eq!(qaoa_circuit(0, 2, SEED).num_qubits, 0);
+}

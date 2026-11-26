@@ -51,6 +51,7 @@ pub struct CircuitBuilder {
     circuit: Circuit,
     params: Parameters,
     parity_scratch: Option<usize>,
+    in_guarded: bool,
 }
 
 macro_rules! gate_1q {
@@ -91,6 +92,7 @@ impl CircuitBuilder {
             circuit: Circuit::new(num_qubits, num_classical_bits),
             params: Parameters::new(0),
             parity_scratch: None,
+            in_guarded: false,
         }
     }
 
@@ -151,9 +153,14 @@ impl CircuitBuilder {
     /// The declared slot count grows to cover the highest slot named here.
     ///
     /// # Panics
-    /// Panics if no gate has been appended yet, or if the last instruction is
-    /// not a gate carrying an angle (`Rx`, `Ry`, `Rz`, `Rzz`, `P`).
+    /// Panics if called inside a [`guarded`](Self::guarded) region, if no gate
+    /// has been appended yet, or if the last instruction is not a gate carrying
+    /// an angle (`Rx`, `Ry`, `Rz`, `Rzz`, `P`).
     pub fn param(&mut self, slot: usize) -> &mut Self {
+        assert!(
+            !self.in_guarded,
+            "param() is not supported inside a guarded region"
+        );
         let last = self
             .circuit
             .instructions
@@ -397,7 +404,15 @@ impl CircuitBuilder {
             .unwrap_or_else(|err| panic!("{err}"));
         let mut inner = CircuitBuilder::new(self.circuit.num_qubits);
         inner.circuit.num_classical_bits = self.circuit.num_classical_bits;
+        inner.parity_scratch = self.parity_scratch;
+        inner.in_guarded = true;
         body(&mut inner);
+        self.circuit.num_qubits = self.circuit.num_qubits.max(inner.circuit.num_qubits);
+        self.circuit.num_classical_bits = self
+            .circuit
+            .num_classical_bits
+            .max(inner.circuit.num_classical_bits);
+        self.parity_scratch = inner.parity_scratch.or(self.parity_scratch);
         if let Some(inst) = guarded(condition, inner.circuit.instructions) {
             self.circuit.instructions.push(inst);
         }

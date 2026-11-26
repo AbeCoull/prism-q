@@ -155,6 +155,12 @@ impl<'a> Parser<'a> {
                 }
                 ast::Modifier::Pow(expr) => {
                     let exponent = self.value_of(expr, line)?;
+                    if !exponent.is_finite() {
+                        return Err(parse_error(
+                            line,
+                            format!("pow({exponent}) exponent is not finite"),
+                        ));
+                    }
                     if exponent.fract() == 0.0 && exponent.abs() > MAX_POW_REPEATS as f64 {
                         return Err(parse_error(
                             line,

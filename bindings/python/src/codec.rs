@@ -633,6 +633,14 @@ fn read_instructions(r: &mut Reader<'_>) -> PyPrismResult<Vec<Instruction>> {
             6 => {
                 let condition = read_condition(r)?;
                 let body = read_instructions(r)?;
+                if body
+                    .iter()
+                    .any(|inst| matches!(inst, Instruction::Save { .. }))
+                {
+                    return Err(invalid(
+                        "save points are not supported inside a guarded region",
+                    ));
+                }
                 Instruction::Region(Box::new(GuardedRegion::new(condition, body)))
             }
             other => return Err(bad_tag("instruction", other)),

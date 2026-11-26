@@ -175,7 +175,7 @@ impl PySimulation {
     fn run(&self, py: Python<'_>) -> PyPrismResult<PyRunOutcome> {
         let owned_noise = self.owned_noise(py);
         let outcome: RunOutcome = py.detach(|| self.core(owned_noise.as_ref()).run())?;
-        Ok(PyRunOutcome::from_outcome(outcome))
+        Ok(PyRunOutcome::from_outcome_with_limits(outcome, self.limits))
     }
 
     /// Sample `num_shots` measurement records.
@@ -1423,17 +1423,51 @@ pub struct PyRunOutcome {
     probabilities: Option<Probabilities>,
     metadata: PyRunMetadata,
     saves: Vec<SaveRecord>,
+    limits: Option<Limits>,
 }
 
 impl PyRunOutcome {
     pub(crate) fn from_outcome(outcome: RunOutcome) -> Self {
+        Self::from_outcome_with_limits(outcome, None)
+    }
+
+    pub(crate) fn from_outcome_with_limits(outcome: RunOutcome, limits: Option<Limits>) -> Self {
         Self {
             classical_bits: outcome.classical_bits,
             probabilities: outcome.probabilities,
             metadata: PyRunMetadata::new(outcome.metadata),
             saves: outcome.saves,
+            limits,
         }
     }
+}
+
+fn check_factored_probabilities_allowed(
+    total_qubits: usize,
+    limits: Option<Limits>,
+) -> Result<(), prism_q::PrismError> {
+    if total_qubits >= usize::BITS as usize {
+        return Err(prism_q::PrismError::BackendUnsupported {
+            backend: "factored".to_string(),
+            operation: format!(
+                "probabilities for {total_qubits} qubits (exceeds addressable memory)"
+            ),
+        });
+    }
+    let mut probe_limits = limits.unwrap_or_default();
+    probe_limits.max_statevector_qubits = Some(usize::MAX);
+    let mut probe = Circuit::new(total_qubits, 0);
+    for q in 0..total_qubits.saturating_sub(1) {
+        probe.add_gate(prism_q::Gate::Cx, &[q, q + 1]);
+    }
+    let plan = core_simulate(&probe)
+        .backend(BackendKind::Statevector)
+        .limits(probe_limits)
+        .plan(prism_q::Query::Run)?;
+    if let Some(err) = plan.would_fail {
+        return Err(err);
+    }
+    Ok(())
 }
 
 #[pymethods]
@@ -1486,10 +1520,28 @@ impl PyRunOutcome {
     /// entries. Read `num_basis_states` first, or take the blocks from
     /// `probabilities_factored()`.
     #[getter]
-    fn probabilities<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
-        self.probabilities
-            .as_ref()
-            .map(|p| f64_array(py, py.detach(|| p.to_vec())))
+    fn probabilities<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyPrismResult<Option<Bound<'py, PyArray1<f64>>>> {
+        let Some(p) = self.probabilities.as_ref() else {
+            return Ok(None);
+        };
+        if let Probabilities::Factored { total_qubits, .. } = p {
+            check_factored_probabilities_allowed(*total_qubits, self.limits)?;
+            let n = 1usize << *total_qubits;
+            let mut probe = Vec::<f64>::new();
+            probe
+                .try_reserve_exact(n)
+                .map_err(|_| prism_q::PrismError::BackendUnsupported {
+                    backend: "factored".to_string(),
+                    operation: format!(
+                        "probabilities for {total_qubits} qubits (failed to reserve {n} floats)"
+                    ),
+                })?;
+            drop(probe);
+        }
+        Ok(Some(f64_array(py, py.detach(|| p.to_vec()))))
     }
 
     /// Per-block distributions of a factored result, or `None` when the run
@@ -1508,7 +1560,7 @@ impl PyRunOutcome {
                 .iter()
                 .map(|block| {
                     let qubits = (0..u64::BITS as usize)
-                        .filter(|bit| block.mask & (1 << bit) != 0)
+                        .filter(|bit| block.mask & (1u64 << bit) != 0)
                         .collect();
                     (qubits, f64_array(py, block.probs.clone()))
                 })
@@ -1520,7 +1572,13 @@ impl PyRunOutcome {
     /// materializing it. `None` when the backend exposed no distribution.
     #[getter]
     fn num_basis_states(&self) -> Option<usize> {
-        self.probabilities.as_ref().map(Probabilities::len)
+        match self.probabilities.as_ref()? {
+            Probabilities::Dense(v) => Some(v.len()),
+            Probabilities::Factored { total_qubits, .. } => u32::try_from(*total_qubits)
+                .ok()
+                .and_then(|bits| 1usize.checked_shl(bits)),
+            other => Some(other.len()),
+        }
     }
 
     #[getter]
@@ -1657,5 +1715,65 @@ impl PyCountsResult {
             self.counts.len(),
             self.num_classical_bits
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_factored_probabilities_allowed;
+    use prism_q::{Limits, PrismError};
+
+    #[test]
+    fn factored_probabilities_respects_max_probability_qubits() {
+        let err =
+            check_factored_probabilities_allowed(10, Some(Limits::new().max_probability_qubits(4)))
+                .expect_err("10 qubits above max_probability_qubits(4) should fail");
+        assert!(
+            matches!(err, PrismError::ResourceLimit(_)),
+            "expected ResourceLimit, got {err:?}"
+        );
+
+        check_factored_probabilities_allowed(10, Some(Limits::new().max_probability_qubits(10)))
+            .expect("10 qubits within max_probability_qubits(10) should pass");
+    }
+
+    #[test]
+    fn factored_probabilities_rejects_64_qubits() {
+        let err = check_factored_probabilities_allowed(64, None)
+            .expect_err("64 qubits should be refused before probing");
+        assert!(
+            matches!(err, PrismError::BackendUnsupported { .. }),
+            "expected BackendUnsupported, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn factored_probabilities_rejects_40_qubits_under_limit_and_budget() {
+        let err_cap = check_factored_probabilities_allowed(
+            40,
+            Some(Limits::new().max_probability_qubits(10)),
+        )
+        .expect_err("40 qubits above max_probability_qubits(10) should fail");
+        assert!(
+            matches!(err_cap, PrismError::ResourceLimit(_)),
+            "expected ResourceLimit, got {err_cap:?}"
+        );
+
+        let err_budget = check_factored_probabilities_allowed(
+            40,
+            Some(Limits::new().memory_budget_bytes(1024 * 1024)),
+        )
+        .expect_err("40 qubits above 1 MiB budget should fail");
+        assert!(
+            matches!(err_budget, PrismError::ResourceLimit(_)),
+            "expected ResourceLimit, got {err_budget:?}"
+        );
+
+        let err_default = check_factored_probabilities_allowed(40, Some(Limits::default()))
+            .expect_err("40 qubits under default host budget should fail");
+        assert!(
+            matches!(err_default, PrismError::ResourceLimit(_)),
+            "expected ResourceLimit, got {err_default:?}"
+        );
     }
 }

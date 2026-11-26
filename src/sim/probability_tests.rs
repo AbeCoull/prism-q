@@ -127,3 +127,86 @@ fn factored_to_vec_parallel_path() {
         assert!((p.get(i) - val).abs() < 1e-12);
     }
 }
+
+#[test]
+fn checked_len_returns_none_at_64_qubits() {
+    let p = Probabilities::Factored {
+        blocks: vec![FactoredBlock {
+            probs: vec![1.0, 0.0],
+            mask: 1u64 << 63,
+        }],
+        total_qubits: 64,
+    };
+    assert_eq!(p.checked_len(), None);
+}
+
+#[test]
+#[should_panic(expected = "number of basis states overflows usize")]
+fn factored_len_panics_at_64_qubits() {
+    let p = Probabilities::Factored {
+        blocks: vec![FactoredBlock {
+            probs: vec![1.0, 0.0],
+            mask: 1u64 << 63,
+        }],
+        total_qubits: 64,
+    };
+    let _ = p.len();
+}
+
+#[test]
+#[should_panic(expected = "number of basis states overflows usize")]
+fn factored_iter_panics_at_64_qubits() {
+    let p = Probabilities::Factored {
+        blocks: vec![FactoredBlock {
+            probs: vec![1.0, 0.0],
+            mask: 1u64 << 63,
+        }],
+        total_qubits: 64,
+    };
+    let _ = p.iter();
+}
+
+#[test]
+#[should_panic(expected = "number of basis states overflows usize")]
+fn factored_to_vec_panics_at_64_qubits() {
+    let p = Probabilities::Factored {
+        blocks: vec![FactoredBlock {
+            probs: vec![1.0, 0.0],
+            mask: 1u64 << 63,
+        }],
+        total_qubits: 64,
+    };
+    let _ = p.to_vec();
+}
+
+#[test]
+#[should_panic(expected = "out of range")]
+fn subset_marginal_panics_on_out_of_range_qubit() {
+    let p = factored_2x3();
+    let _ = p.subset_marginal(&[3]);
+}
+
+#[test]
+#[should_panic(expected = "index out of bounds")]
+fn factored_get_panics_at_len() {
+    let p = factored_2x3();
+    let _ = p.get(p.len());
+}
+
+#[test]
+#[should_panic(expected = "index out of bounds")]
+fn factored_get_panics_at_usize_max() {
+    let p = factored_2x3();
+    let _ = p.get(usize::MAX);
+}
+
+#[test]
+#[should_panic(expected = "index out of bounds")]
+fn factored_get_panics_out_of_bounds_at_zero_qubits() {
+    let p = Probabilities::Factored {
+        blocks: Vec::new(),
+        total_qubits: 0,
+    };
+    assert_eq!(p.get(0), 1.0);
+    let _ = p.get(1);
+}

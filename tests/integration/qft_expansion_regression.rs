@@ -132,3 +132,26 @@ fn qpe_recovers_known_eigenphase() {
         );
     }
 }
+
+#[test]
+fn qft_textbook_steps_65_qubits_avoid_shift_overflow() {
+    use prism_q::circuit::{QftTextbookStep, qft_textbook_steps};
+
+    let c = qft_circuit(65);
+    let expanded = expand_qft_blocks(&c);
+    assert!(expanded.instructions.len() > 65);
+
+    let wide_thetas: Vec<f64> = qft_textbook_steps(0, 65, false, true, false)
+        .filter_map(|step| match step {
+            QftTextbookStep::CPhase {
+                control: 0,
+                target,
+                theta,
+            } if target >= 63 => Some(theta),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(wide_thetas.len(), 2);
+    assert!((wide_thetas[0] - std::f64::consts::TAU * 0.5f64.powi(65)).abs() < 1e-30);
+    assert!((wide_thetas[1] - std::f64::consts::TAU * 0.5f64.powi(64)).abs() < 1e-30);
+}

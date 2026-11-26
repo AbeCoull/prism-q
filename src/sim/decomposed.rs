@@ -87,7 +87,7 @@ pub(super) fn run_decomposed(
     let partitions = circuit.partition_subcircuits(components);
     let k = partitions.len();
 
-    let block_opts = if circuit.num_qubits > 64 {
+    let block_opts = if circuit.num_qubits >= usize::BITS as usize {
         SimOptions::classical_only()
     } else {
         *opts
@@ -201,7 +201,7 @@ impl PreparedBlocks {
         opts: &SimOptions,
         limits: &ResolvedLimits,
     ) -> Result<RunOutcome> {
-        let block_opts = if circuit.num_qubits > 64 {
+        let block_opts = if circuit.num_qubits >= usize::BITS as usize {
             SimOptions::classical_only()
         } else {
             *opts
@@ -248,7 +248,7 @@ fn merge_decomposed_results(
         }
 
         if opts.probabilities
-            && num_qubits <= 64
+            && num_qubits < usize::BITS as usize
             && let Some(probs) = result.probabilities
         {
             let dense = probs.to_vec();
@@ -289,7 +289,7 @@ pub(super) fn run_decomposed_prefused(
     limits: &ResolvedLimits,
 ) -> Result<RunOutcome> {
     let k = partitions.len();
-    let block_opts = if original_circuit.num_qubits > 64 {
+    let block_opts = if original_circuit.num_qubits >= usize::BITS as usize {
         SimOptions::classical_only()
     } else {
         *opts

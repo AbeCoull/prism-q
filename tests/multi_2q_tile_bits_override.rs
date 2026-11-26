@@ -53,3 +53,56 @@ fn multi_2q_at_the_widest_tile_applies_each_gate_once() {
         );
     }
 }
+
+#[test]
+fn multi_2q_override_preserves_order_from_untiled_to_in_place_tier() {
+    caps::set_once(&[("PRISM_MULTI_2Q_TILE_BITS", "18")]);
+    let n = 22;
+    let cx = Gate::Cx.matrix_4x4();
+    let mat = sample_4x4();
+    let mut gates = vec![(0, 21, cx)];
+    for q in (6..19).step_by(2) {
+        gates.push((q, q + 1, mat));
+    }
+    gates.push((0, 1, mat));
+
+    let mut batched = StatevectorBackend::new(42);
+    batched.init(n, 0).unwrap();
+    let mut reference = StatevectorBackend::new(42);
+    reference.init(n, 0).unwrap();
+    for q in 0..n {
+        batched
+            .apply(&g(Gate::Ry(0.3 + 0.05 * q as f64), &[q]))
+            .unwrap();
+        reference
+            .apply(&g(Gate::Ry(0.3 + 0.05 * q as f64), &[q]))
+            .unwrap();
+    }
+
+    for &(q0, q1, m) in &gates {
+        reference
+            .apply(&g(Gate::Fused2q(Box::new(m)), &[q0, q1]))
+            .unwrap();
+    }
+    let mut targets: Vec<usize> = gates.iter().flat_map(|&(a, b, _)| [a, b]).collect();
+    targets.sort_unstable();
+    targets.dedup();
+    batched
+        .apply(&g(
+            Gate::Multi2q(Box::new(Multi2qData::new(gates))),
+            &targets,
+        ))
+        .unwrap();
+
+    for (i, (a, b)) in batched
+        .state_vector()
+        .iter()
+        .zip(reference.state_vector())
+        .enumerate()
+    {
+        assert!(
+            (a - b).norm() < 1e-12 * b.norm().max(1.0),
+            "amplitude {i}: batched {a}, reference {b}"
+        );
+    }
+}

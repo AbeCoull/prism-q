@@ -38,13 +38,11 @@ pub(crate) fn multi_2q_small_tile(num_qubits: usize) -> usize {
 const MULTI_GATE_L3_TILE: usize = 131_072;
 pub(crate) const MULTI_GATE_MAX_L3_TARGET: usize = max_target_for_tile(MULTI_GATE_L3_TILE);
 
-/// Length of the longest prefix of `gates` that
-/// [`StatevectorBackend::apply_multi_2q`] applies in list order on a
-/// `num_qubits` state: every gate sits in the in-place tile, so the tiered pass
-/// runs one tier, or the prefix fits a [`subcube_plan`]. Past both, the tiered
-/// pass reorders gates across tiers, so callers that need list order beyond
-/// one batch (the density-matrix registers) cut the list into runs of this
-/// length. At least 1 for a non-empty list, since one gate is always in order.
+/// Length of the longest prefix of `gates` that fits the in-place tile or a
+/// [`subcube_plan`] on a `num_qubits` state. Used by [`StatevectorBackend::apply_multi_2q`]
+/// and the density-matrix registers to split batches whose tiers descend across
+/// `max(q0, q1)` into ordered sub-runs. At least 1 for a non-empty list, since one
+/// gate is always in order.
 pub(crate) fn multi_2q_ordered_prefix(
     gates: &[(usize, usize, [[Complex64; 4]; 4])],
     num_qubits: usize,
@@ -204,23 +202,25 @@ pub(crate) fn split_multi_2q_tiers<'a>(
     }
 }
 
-/// Whether [`StatevectorBackend::apply_multi_2q`] applies `gates` in their stored order
-/// on a `num_qubits` state. The subcube pass keeps any order; the tiered pass runs tier
-/// by tier, which keeps it only when no entry precedes one from a lower tier.
-#[cfg(any(feature = "distributed", test))]
-pub(crate) fn multi_2q_keeps_order(
-    gates: &[(usize, usize, [[Complex64; 4]; 4])],
-    num_qubits: usize,
-) -> bool {
-    if gates.len() <= 1 || subcube_plan(gates, num_qubits).is_some() {
-        return true;
-    }
+fn tiers_keep_order(gates: &[(usize, usize, [[Complex64; 4]; 4])], num_qubits: usize) -> bool {
     let max_small = max_target_for_tile(multi_2q_small_tile(num_qubits));
     let tier =
         |&(q0, q1, _): &(usize, usize, [[Complex64; 4]; 4])| multi_2q_tier(q0.max(q1), max_small);
     gates
         .windows(2)
         .all(|pair| tier(&pair[0]) <= tier(&pair[1]))
+}
+
+/// Whether a `Multi2q` batch keeps list order in a single tiered or subcube pass
+/// on a `num_qubits` state.
+#[cfg(test)]
+pub(crate) fn multi_2q_keeps_order(
+    gates: &[(usize, usize, [[Complex64; 4]; 4])],
+    num_qubits: usize,
+) -> bool {
+    gates.len() <= 1
+        || subcube_plan(gates, num_qubits).is_some()
+        || tiers_keep_order(gates, num_qubits)
 }
 
 thread_local! {
@@ -906,10 +906,7 @@ impl StatevectorBackend {
         }
     }
 
-    pub(in crate::backend::statevector) fn apply_multi_1q_diagonal(
-        &mut self,
-        gates: &[(usize, [[Complex64; 2]; 2])],
-    ) {
+    pub(crate) fn apply_multi_1q_diagonal(&mut self, gates: &[(usize, [[Complex64; 2]; 2])]) {
         if gates.is_empty() {
             return;
         }
@@ -1032,11 +1029,12 @@ impl StatevectorBackend {
     /// A batch that sits entirely below the tile bits (14 by default) tiles the
     /// state in place. Any other list falls back to the tiered pass by
     /// `max(q0, q1)`: L2 tiles up to qubit 13, L3 tiles up to 16, one full pass
-    /// per gate above that. That pass runs tier by tier, so it keeps application
-    /// order only within a tier. In a parallel pass the L3 tier stays one sweep even
-    /// where the state is a single L3 tile: at 17 qubits per-gate parallel passes in
-    /// its place read 28% slower on `statevector/random_d10/17`.
-    #[inline(always)]
+    /// per gate above that. Batches exceeding the subcube budget whose tiers
+    /// descend in `max(q0, q1)` split at [`multi_2q_ordered_prefix`] and apply
+    /// each sub-run recursively so list order always holds. In a parallel pass
+    /// the L3 tier stays one sweep even where the state is a single L3 tile: at
+    /// 17 qubits per-gate parallel passes in its place read 28% slower on
+    /// `statevector/random_d10/17`.
     pub(crate) fn apply_multi_2q(&mut self, gates: &[(usize, usize, [[Complex64; 4]; 4])]) {
         if gates.is_empty() {
             return;
@@ -1053,6 +1051,14 @@ impl StatevectorBackend {
             }
             self.apply_multi_2q_subcube(gates, &plan);
             return;
+        }
+        if !tiers_keep_order(gates, self.num_qubits) {
+            let split = multi_2q_ordered_prefix(gates, self.num_qubits);
+            if split < gates.len() {
+                self.apply_multi_2q(&gates[..split]);
+                self.apply_multi_2q(&gates[split..]);
+                return;
+            }
         }
 
         #[cfg(feature = "parallel")]

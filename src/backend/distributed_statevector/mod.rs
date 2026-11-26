@@ -131,7 +131,6 @@ mod tests;
 #[cfg(any(test, feature = "bench-internal"))]
 pub mod tiled;
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use num_complex::Complex64;
@@ -141,7 +140,7 @@ use rand_chacha::ChaCha8Rng;
 use crate::backend::reduced_density::{dense_reduced_density, normalize_trace};
 use crate::backend::simd;
 use crate::backend::statevector::StatevectorBackend;
-use crate::backend::statevector::kernels::multi_2q_keeps_order;
+use crate::backend::statevector::kernels::apply_parity2q;
 use crate::backend::{
     Backend, BasisSamples, dense_probability_len, dense_statevector_len, measurement_inv_norm,
 };
@@ -160,9 +159,10 @@ use shard::PAR_SHARD_LEN;
 #[cfg(any(test, feature = "bench-internal"))]
 use shard::for_each_gate_qubit;
 use shard::{
-    add_shard, butterfly_shard, combine_shard, for_each_pair_tile, gather_indexed, half_norm_sqr,
-    pair_rdm_sums, required_local_qubits, scale_shard, scale_shard_masked, scatter_indexed,
-    zero_shard,
+    add_shard, apply_batch_phase_local, apply_batch_rzz_local, apply_diagonal_batch_local,
+    apply_multi_fused_local, butterfly_shard, combine_shard, for_each_pair_tile, gather_indexed,
+    half_norm_sqr, pair_rdm_sums, required_local_qubits, scale_shard, scale_shard_masked,
+    scatter_indexed, zero_shard,
 };
 
 pub(crate) const BACKEND_NAME: &str = "distributed_statevector";
@@ -712,22 +712,14 @@ impl DistributedStatevectorBackend {
 
         match (q0 < local, q1 < local) {
             (true, true) => {
-                // Both qubits are local, so use the inner diagonal batch kernel.
-                use crate::gates::{DiagEntry, DiagonalBatchData};
-                let entry = DiagEntry::Parity2q {
+                apply_parity2q(
+                    &mut self.inner.state,
+                    self.inner.num_qubits,
                     q0,
                     q1,
-                    same: phase_same,
-                    diff: phase_diff,
-                };
-                self.inner
-                    .apply(&Instruction::Gate {
-                        gate: Gate::DiagonalBatch(Box::new(DiagonalBatchData {
-                            entries: vec![entry],
-                        })),
-                        targets: smallvec![q0, q1],
-                    })
-                    .expect("local parity diagonal");
+                    phase_same,
+                    phase_diff,
+                );
             }
             (false, false) => {
                 let parity =
@@ -1099,34 +1091,30 @@ impl DistributedStatevectorBackend {
                 Ok(())
             }
             Gate::MultiFused(data) => {
-                for &(q, ref mat) in &data.gates {
-                    if q < self.local_qubits() {
-                        self.inner.apply_1q_matrix(q, mat).expect("local 1q matrix");
-                    } else if is_diagonal_2x2(mat) {
-                        self.apply_global_diagonal_1q(q, mat[0][0], mat[1][1]);
-                    } else {
-                        self.apply_global_1q(q, *mat);
-                    }
+                let local = self.local_qubits();
+                let rank = self.context.rank();
+                let global_nondiag = apply_multi_fused_local(&mut self.inner, data, local, rank);
+                for (q, mat) in global_nondiag {
+                    self.apply_global_1q(q, mat);
                 }
                 Ok(())
             }
             Gate::BatchPhase(data) => {
-                let control = targets[0];
-                for &(target, phase) in &data.phases {
-                    self.apply_controlled_phase_dist(&[control, target], phase);
-                }
+                let local = self.local_qubits();
+                let rank = self.context.rank();
+                apply_batch_phase_local(&mut self.inner, targets[0], &data.phases, local, rank);
                 Ok(())
             }
             Gate::BatchRzz(data) => {
-                for &(q0, q1, theta) in &data.edges {
-                    self.apply_rzz_dist(q0, q1, theta);
-                }
+                let local = self.local_qubits();
+                let rank = self.context.rank();
+                apply_batch_rzz_local(&mut self.inner, &data.edges, local, rank);
                 Ok(())
             }
             Gate::DiagonalBatch(data) => {
-                for entry in &data.entries {
-                    self.apply_diag_entry_dist(entry);
-                }
+                let local = self.local_qubits();
+                let rank = self.context.rank();
+                apply_diagonal_batch_local(&mut self.inner, &data.entries, local, rank);
                 Ok(())
             }
             Gate::Unitary(_) => Err(self.unsupported(&format!(
@@ -1134,37 +1122,6 @@ impl DistributedStatevectorBackend {
                 gate.name()
             ))),
             _ => Err(self.unsupported("gate spanning a global qubit")),
-        }
-    }
-
-    /// Apply a single [`DiagEntry`](crate::gates::DiagEntry) across any local or global split.
-    fn apply_diag_entry_dist(&mut self, entry: &crate::gates::DiagEntry) {
-        use crate::gates::DiagEntry;
-        match *entry {
-            DiagEntry::Phase1q { qubit, d0, d1 } => {
-                if qubit < self.local_qubits() {
-                    self.inner
-                        .apply_1q_matrix(
-                            qubit,
-                            &[
-                                [d0, Complex64::new(0.0, 0.0)],
-                                [Complex64::new(0.0, 0.0), d1],
-                            ],
-                        )
-                        .expect("local diagonal 1q");
-                } else {
-                    self.apply_global_diagonal_1q(qubit, d0, d1);
-                }
-            }
-            DiagEntry::Phase2q { q0, q1, phase } => {
-                self.apply_controlled_phase_dist(&[q0, q1], phase);
-            }
-            DiagEntry::Parity2q {
-                q0, q1, same, diff, ..
-            } => {
-                // These are the parity phases for Rzz(theta).
-                self.apply_rzz_phases_dist(q0, q1, same, diff);
-            }
         }
     }
 
@@ -1372,21 +1329,30 @@ impl DistributedStatevectorBackend {
         }
         let (pgate, ptargets) = self.to_physical(gate, targets);
         if self.instruction_qubits_local(&pgate, &ptargets) {
-            // A remapped batch can straddle the tiers fusion kept it inside, and the
-            // tiered kernel would then reorder entries that do not commute.
-            if let Cow::Owned(Gate::Multi2q(data)) = &pgate
-                && !multi_2q_keeps_order(&data.gates, self.local_qubits())
-            {
-                for &(q0, q1, ref mat) in &data.gates {
-                    self.inner.apply_fused_2q(q0, q1, mat);
-                }
-                return Ok(());
-            }
             self.inner.dispatch_gate(pgate.as_ref(), &ptargets);
             return Ok(());
         }
         let pgate = pgate.as_ref();
-        if pgate.num_qubits() == 1 {
+        if matches!(
+            pgate,
+            Gate::Id
+                | Gate::X
+                | Gate::Y
+                | Gate::Z
+                | Gate::H
+                | Gate::S
+                | Gate::Sdg
+                | Gate::T
+                | Gate::Tdg
+                | Gate::SX
+                | Gate::SXdg
+                | Gate::Rx(_)
+                | Gate::Ry(_)
+                | Gate::Rz(_)
+                | Gate::P(_)
+                | Gate::Fused(_)
+        ) || matches!(pgate, Gate::PauliRot(data) if data.axes.len() == 1)
+        {
             let target = ptargets[0];
             let mat = pgate.matrix_2x2();
             if pgate.is_diagonal_1q() {

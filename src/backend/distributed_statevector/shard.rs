@@ -5,14 +5,21 @@ use num_complex::Complex64;
 
 #[cfg(feature = "parallel")]
 use crate::backend::SendPtr;
+use crate::backend::is_phase_one;
 use crate::backend::simd;
-use crate::backend::statevector::rdm_pair_sums;
+use crate::backend::statevector::kernels::{
+    apply_cu_phase, apply_diagonal, apply_parity2q, rzz_phases,
+};
 #[cfg(feature = "parallel")]
 use crate::backend::statevector::rdm_sum_add;
+use crate::backend::statevector::{StatevectorBackend, rdm_pair_sums};
 #[cfg(feature = "parallel")]
 use crate::backend::{MIN_PAR_ELEMS, MIN_PAR_REDUCE_ELEMS, chunk_min_len};
 use crate::circuit::SmallVec;
-use crate::gates::{DiagEntry, Gate, is_diagonal_2x2};
+use crate::gates::{
+    BatchPhaseData, BatchRzzData, DiagEntry, DiagonalBatchData, Gate, MultiFusedData,
+    is_diagonal_2x2,
+};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -379,4 +386,588 @@ pub(super) fn required_local_qubits(gate: &Gate, targets: &[usize]) -> SmallVec<
         _ => {}
     }
     req
+}
+
+const ONE: Complex64 = Complex64::new(1.0, 0.0);
+
+#[inline(always)]
+fn rank_bit_set(rank: usize, local: usize, q: usize) -> bool {
+    (rank >> (q - local)) & 1 == 1
+}
+
+/// Whether `entries` fits the lookup table groups of `DiagonalBatch` without
+/// hitting the per-entry fallback.
+pub(super) fn diagonal_batch_fits(entries: &[DiagEntry]) -> bool {
+    const MAX_BITS: usize = 64;
+    let mut used = [false; MAX_BITS];
+    let mut parent: [u8; MAX_BITS] = std::array::from_fn(|i| i as u8);
+    let find_root = |parent: &mut [u8; MAX_BITS], mut x: u8| -> u8 {
+        while parent[x as usize] != x {
+            let p = parent[x as usize];
+            parent[x as usize] = parent[p as usize];
+            x = parent[x as usize];
+        }
+        x
+    };
+    for entry in entries {
+        match *entry {
+            DiagEntry::Phase1q { qubit, .. } => {
+                if qubit >= MAX_BITS {
+                    return false;
+                }
+                used[qubit] = true;
+            }
+            DiagEntry::Phase2q { q0, q1, .. } | DiagEntry::Parity2q { q0, q1, .. } => {
+                if q0 >= MAX_BITS || q1 >= MAX_BITS {
+                    return false;
+                }
+                used[q0] = true;
+                used[q1] = true;
+                let r0 = find_root(&mut parent, q0 as u8);
+                let r1 = find_root(&mut parent, q1 as u8);
+                if r0 != r1 {
+                    parent[r0 as usize] = r1;
+                }
+            }
+        }
+    }
+    let mut sizes = [0usize; MAX_BITS];
+    for (q, &is_used) in used.iter().enumerate() {
+        if is_used {
+            let r = find_root(&mut parent, q as u8) as usize;
+            sizes[r] += 1;
+        }
+    }
+    let mut components: SmallVec<[usize; MAX_BITS]> =
+        sizes.into_iter().filter(|&len| len > 0).collect();
+    components.sort_unstable_by(|a, b| b.cmp(a));
+    let mut groups = [0usize; DiagonalBatchData::MAX_GROUPS];
+    components.iter().all(|&len| {
+        match groups
+            .iter_mut()
+            .find(|used| **used + len <= DiagonalBatchData::MAX_QUBITS_PER_GROUP)
+        {
+            Some(group) => {
+                *group += len;
+                true
+            }
+            None => false,
+        }
+    })
+}
+
+pub(super) struct MultiFusedSplit {
+    pub(super) scalar: Complex64,
+    pub(super) local_gates: SmallVec<[(usize, [[Complex64; 2]; 2]); 32]>,
+    pub(super) global_nondiag: SmallVec<[(usize, [[Complex64; 2]; 2]); 8]>,
+}
+
+pub(super) fn split_multi_fused(
+    gates: &[(usize, [[Complex64; 2]; 2])],
+    local: usize,
+    rank: usize,
+) -> MultiFusedSplit {
+    let mut scalar = ONE;
+    let mut local_gates = SmallVec::new();
+    let mut global_nondiag = SmallVec::new();
+    for &(q, mat) in gates {
+        if q < local {
+            local_gates.push((q, mat));
+        } else if is_diagonal_2x2(&mat) {
+            scalar *= if rank_bit_set(rank, local, q) {
+                mat[1][1]
+            } else {
+                mat[0][0]
+            };
+        } else {
+            global_nondiag.push((q, mat));
+        }
+    }
+    MultiFusedSplit {
+        scalar,
+        local_gates,
+        global_nondiag,
+    }
+}
+
+pub(super) enum BatchPhaseSplit {
+    Inactive,
+    GlobalControl {
+        scalar: Complex64,
+        local_1q: SmallVec<[(usize, Complex64); 16]>,
+    },
+    LocalControl {
+        ctrl_phase: Complex64,
+        local_phases: SmallVec<[(usize, Complex64); 16]>,
+    },
+}
+
+pub(super) fn split_batch_phase(
+    control: usize,
+    phases: &[(usize, Complex64)],
+    local: usize,
+    rank: usize,
+) -> BatchPhaseSplit {
+    if control >= local {
+        if !rank_bit_set(rank, local, control) {
+            return BatchPhaseSplit::Inactive;
+        }
+        let mut scalar = ONE;
+        let mut local_1q = SmallVec::new();
+        for &(target, phase) in phases {
+            if target < local {
+                local_1q.push((target, phase));
+            } else if rank_bit_set(rank, local, target) {
+                scalar *= phase;
+            }
+        }
+        BatchPhaseSplit::GlobalControl { scalar, local_1q }
+    } else {
+        let mut ctrl_phase = ONE;
+        let mut local_phases = SmallVec::new();
+        for &(target, phase) in phases {
+            if target < local {
+                local_phases.push((target, phase));
+            } else if rank_bit_set(rank, local, target) {
+                ctrl_phase *= phase;
+            }
+        }
+        BatchPhaseSplit::LocalControl {
+            ctrl_phase,
+            local_phases,
+        }
+    }
+}
+
+pub(super) struct BatchRzzSplit {
+    pub(super) scalar: Complex64,
+    pub(super) local_1q: SmallVec<[(usize, f64); 16]>,
+    pub(super) local_edges: Vec<(usize, usize, f64)>,
+}
+
+pub(super) fn split_batch_rzz(
+    edges: &[(usize, usize, f64)],
+    local: usize,
+    rank: usize,
+) -> BatchRzzSplit {
+    let mut scalar_angle = 0.0f64;
+    let mut local_1q: SmallVec<[(usize, f64); 16]> = SmallVec::new();
+    let mut local_edges = Vec::new();
+    for &(q0, q1, theta) in edges {
+        match (q0 < local, q1 < local) {
+            (true, true) => local_edges.push((q0, q1, theta)),
+            (false, false) => {
+                let diff = rank_bit_set(rank, local, q0) ^ rank_bit_set(rank, local, q1);
+                scalar_angle += if diff { 0.5 * theta } else { -0.5 * theta };
+            }
+            (true, false) | (false, true) => {
+                let (lq, gq) = if q0 < local { (q0, q1) } else { (q1, q0) };
+                let signed = if rank_bit_set(rank, local, gq) {
+                    -theta
+                } else {
+                    theta
+                };
+                match local_1q.iter_mut().find(|(q, _)| *q == lq) {
+                    Some((_, acc)) => *acc += signed,
+                    None => local_1q.push((lq, signed)),
+                }
+            }
+        }
+    }
+    local_1q.retain(|(_, angle)| *angle != 0.0);
+    let scalar = if scalar_angle == 0.0 {
+        ONE
+    } else {
+        Complex64::from_polar(1.0, scalar_angle)
+    };
+    BatchRzzSplit {
+        scalar,
+        local_1q,
+        local_edges,
+    }
+}
+
+pub(super) fn split_diagonal_batch(
+    entries: &[DiagEntry],
+    local: usize,
+    rank: usize,
+) -> (Complex64, Vec<DiagEntry>) {
+    let mut scalar = ONE;
+    let mut local_entries = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match *entry {
+            DiagEntry::Phase1q { qubit, d0, d1 } => {
+                if qubit < local {
+                    local_entries.push(DiagEntry::Phase1q { qubit, d0, d1 });
+                } else {
+                    scalar *= if rank_bit_set(rank, local, qubit) {
+                        d1
+                    } else {
+                        d0
+                    };
+                }
+            }
+            DiagEntry::Phase2q { q0, q1, phase } => match (q0 < local, q1 < local) {
+                (true, true) => local_entries.push(DiagEntry::Phase2q { q0, q1, phase }),
+                (false, false) => {
+                    if rank_bit_set(rank, local, q0) && rank_bit_set(rank, local, q1) {
+                        scalar *= phase;
+                    }
+                }
+                (true, false) | (false, true) => {
+                    let (lq, gq) = if q0 < local { (q0, q1) } else { (q1, q0) };
+                    if rank_bit_set(rank, local, gq) {
+                        local_entries.push(DiagEntry::Phase1q {
+                            qubit: lq,
+                            d0: ONE,
+                            d1: phase,
+                        });
+                    }
+                }
+            },
+            DiagEntry::Parity2q { q0, q1, same, diff } => match (q0 < local, q1 < local) {
+                (true, true) => local_entries.push(DiagEntry::Parity2q { q0, q1, same, diff }),
+                (false, false) => {
+                    let parity =
+                        (rank_bit_set(rank, local, q0) ^ rank_bit_set(rank, local, q1)) as usize;
+                    scalar *= [same, diff][parity];
+                }
+                (true, false) | (false, true) => {
+                    let (lq, gq) = if q0 < local { (q0, q1) } else { (q1, q0) };
+                    let g = rank_bit_set(rank, local, gq) as usize;
+                    local_entries.push(DiagEntry::Phase1q {
+                        qubit: lq,
+                        d0: [same, diff][g],
+                        d1: [same, diff][g ^ 1],
+                    });
+                }
+            },
+        }
+    }
+    (scalar, local_entries)
+}
+
+pub(super) fn apply_multi_fused_local(
+    inner: &mut StatevectorBackend,
+    data: &MultiFusedData,
+    local: usize,
+    rank: usize,
+) -> SmallVec<[(usize, [[Complex64; 2]; 2]); 8]> {
+    let mut split = split_multi_fused(&data.gates, local, rank);
+    if split.local_gates.is_empty() {
+        if !is_phase_one(split.scalar) {
+            scale_shard(&mut inner.state, split.scalar);
+        }
+    } else {
+        if !is_phase_one(split.scalar) {
+            for row in &mut split.local_gates[0].1 {
+                for entry in row {
+                    *entry *= split.scalar;
+                }
+            }
+        }
+        if data.all_diagonal
+            || split
+                .local_gates
+                .iter()
+                .all(|(_, mat)| is_diagonal_2x2(mat))
+        {
+            inner.apply_multi_1q_diagonal(&split.local_gates);
+        } else {
+            inner.apply_multi_1q(&split.local_gates);
+        }
+    }
+    split.global_nondiag
+}
+
+pub(super) fn apply_batch_phase_local(
+    inner: &mut StatevectorBackend,
+    control: usize,
+    phases: &[(usize, Complex64)],
+    local: usize,
+    rank: usize,
+) {
+    match split_batch_phase(control, phases, local, rank) {
+        BatchPhaseSplit::Inactive => {}
+        BatchPhaseSplit::GlobalControl { scalar, local_1q } => match local_1q.len() {
+            0 => {
+                if !is_phase_one(scalar) {
+                    scale_shard(&mut inner.state, scalar);
+                }
+            }
+            1 => {
+                let (q, phase) = local_1q[0];
+                apply_diagonal(
+                    &mut inner.state,
+                    inner.num_qubits,
+                    q,
+                    scalar,
+                    scalar * phase,
+                );
+            }
+            _ => {
+                let entries: Vec<DiagEntry> = local_1q
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(qubit, phase))| {
+                        let s = if i == 0 { scalar } else { ONE };
+                        DiagEntry::Phase1q {
+                            qubit,
+                            d0: s,
+                            d1: s * phase,
+                        }
+                    })
+                    .collect();
+                if diagonal_batch_fits(&entries) {
+                    inner.dispatch_gate(
+                        &Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(entries))),
+                        &[],
+                    );
+                } else {
+                    let gates: SmallVec<[(usize, [[Complex64; 2]; 2]); 32]> =
+                        entries.iter().filter_map(DiagEntry::as_1q_matrix).collect();
+                    inner.apply_multi_1q_diagonal(&gates);
+                }
+            }
+        },
+        BatchPhaseSplit::LocalControl {
+            ctrl_phase,
+            local_phases,
+        } => {
+            if local_phases.is_empty() {
+                if !is_phase_one(ctrl_phase) {
+                    apply_diagonal(&mut inner.state, inner.num_qubits, control, ONE, ctrl_phase);
+                }
+            } else if is_phase_one(ctrl_phase) {
+                if local_phases.len() == 1 {
+                    apply_cu_phase(
+                        &mut inner.state,
+                        inner.num_qubits,
+                        control,
+                        local_phases[0].0,
+                        local_phases[0].1,
+                    );
+                } else {
+                    inner.dispatch_gate(
+                        &Gate::BatchPhase(Box::new(BatchPhaseData::new(local_phases))),
+                        &[control],
+                    );
+                }
+            } else if local_phases.len() < DiagonalBatchData::MAX_QUBITS_PER_GROUP {
+                let mut entries = Vec::with_capacity(1 + local_phases.len());
+                entries.push(DiagEntry::Phase1q {
+                    qubit: control,
+                    d0: ONE,
+                    d1: ctrl_phase,
+                });
+                for (q1, phase) in local_phases {
+                    entries.push(DiagEntry::Phase2q {
+                        q0: control,
+                        q1,
+                        phase,
+                    });
+                }
+                inner.dispatch_gate(
+                    &Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(entries))),
+                    &[],
+                );
+            } else {
+                inner.dispatch_gate(
+                    &Gate::BatchPhase(Box::new(BatchPhaseData::new(local_phases))),
+                    &[control],
+                );
+                apply_diagonal(&mut inner.state, inner.num_qubits, control, ONE, ctrl_phase);
+            }
+        }
+    }
+}
+
+fn apply_rzz_1q_residual(
+    inner: &mut StatevectorBackend,
+    local_1q: &[(usize, f64)],
+    scalar: Complex64,
+) {
+    let zero = Complex64::new(0.0, 0.0);
+    match local_1q.len() {
+        0 => {
+            if !is_phase_one(scalar) {
+                scale_shard(&mut inner.state, scalar);
+            }
+        }
+        1 => {
+            let (q, angle) = local_1q[0];
+            let (d0, d1) = rzz_phases(angle);
+            apply_diagonal(
+                &mut inner.state,
+                inner.num_qubits,
+                q,
+                d0 * scalar,
+                d1 * scalar,
+            );
+        }
+        _ => {
+            let mut gates: SmallVec<[(usize, [[Complex64; 2]; 2]); 32]> = local_1q
+                .iter()
+                .map(|&(q, angle)| {
+                    let (d0, d1) = rzz_phases(angle);
+                    (q, [[d0, zero], [zero, d1]])
+                })
+                .collect();
+            if !is_phase_one(scalar) {
+                gates[0].1[0][0] *= scalar;
+                gates[0].1[1][1] *= scalar;
+            }
+            inner.apply_multi_1q_diagonal(&gates);
+        }
+    }
+}
+
+pub(super) fn apply_batch_rzz_local(
+    inner: &mut StatevectorBackend,
+    edges: &[(usize, usize, f64)],
+    local: usize,
+    rank: usize,
+) {
+    let split = split_batch_rzz(edges, local, rank);
+    if split.local_edges.is_empty() {
+        apply_rzz_1q_residual(inner, &split.local_1q, split.scalar);
+    } else if split.local_edges.len() == 1 && split.local_1q.is_empty() {
+        let (q0, q1, theta) = split.local_edges[0];
+        let (same, diff) = rzz_phases(theta);
+        apply_parity2q(
+            &mut inner.state,
+            inner.num_qubits,
+            q0,
+            q1,
+            same * split.scalar,
+            diff * split.scalar,
+        );
+    } else if split.local_1q.is_empty() && is_phase_one(split.scalar) {
+        inner.dispatch_gate(
+            &Gate::BatchRzz(Box::new(BatchRzzData::new(split.local_edges))),
+            &[],
+        );
+    } else {
+        let mut entries = Vec::with_capacity(
+            split
+                .local_1q
+                .len()
+                .max(usize::from(!is_phase_one(split.scalar)))
+                + split.local_edges.len(),
+        );
+        for (i, &(qubit, angle)) in split.local_1q.iter().enumerate() {
+            let (mut d0, mut d1) = rzz_phases(angle);
+            if i == 0 && !is_phase_one(split.scalar) {
+                d0 *= split.scalar;
+                d1 *= split.scalar;
+            }
+            entries.push(DiagEntry::Phase1q { qubit, d0, d1 });
+        }
+        if split.local_1q.is_empty() && !is_phase_one(split.scalar) {
+            entries.push(DiagEntry::Phase1q {
+                qubit: split.local_edges[0].0,
+                d0: split.scalar,
+                d1: split.scalar,
+            });
+        }
+        for &(q0, q1, theta) in &split.local_edges {
+            let (same, diff) = rzz_phases(theta);
+            entries.push(DiagEntry::Parity2q { q0, q1, same, diff });
+        }
+        if diagonal_batch_fits(&entries) {
+            inner.dispatch_gate(
+                &Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(entries))),
+                &[],
+            );
+        } else {
+            if split.local_edges.len() == 1 {
+                let (q0, q1, theta) = split.local_edges[0];
+                let (same, diff) = rzz_phases(theta);
+                apply_parity2q(&mut inner.state, inner.num_qubits, q0, q1, same, diff);
+            } else {
+                inner.dispatch_gate(
+                    &Gate::BatchRzz(Box::new(BatchRzzData::new(split.local_edges))),
+                    &[],
+                );
+            }
+            apply_rzz_1q_residual(inner, &split.local_1q, split.scalar);
+        }
+    }
+}
+
+pub(super) fn apply_diagonal_batch_local(
+    inner: &mut StatevectorBackend,
+    entries: &[DiagEntry],
+    local: usize,
+    rank: usize,
+) {
+    let (scalar, mut local_entries) = split_diagonal_batch(entries, local, rank);
+    match local_entries.len() {
+        0 => {
+            if !is_phase_one(scalar) {
+                scale_shard(&mut inner.state, scalar);
+            }
+        }
+        1 => match local_entries[0] {
+            DiagEntry::Phase1q { qubit, d0, d1 } => {
+                apply_diagonal(
+                    &mut inner.state,
+                    inner.num_qubits,
+                    qubit,
+                    d0 * scalar,
+                    d1 * scalar,
+                );
+            }
+            DiagEntry::Parity2q { q0, q1, same, diff } => {
+                apply_parity2q(
+                    &mut inner.state,
+                    inner.num_qubits,
+                    q0,
+                    q1,
+                    same * scalar,
+                    diff * scalar,
+                );
+            }
+            DiagEntry::Phase2q { q0, q1, phase } => {
+                if is_phase_one(scalar) {
+                    apply_cu_phase(&mut inner.state, inner.num_qubits, q0, q1, phase);
+                } else {
+                    local_entries.push(DiagEntry::Phase1q {
+                        qubit: q0,
+                        d0: scalar,
+                        d1: scalar,
+                    });
+                    inner.dispatch_gate(
+                        &Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(local_entries))),
+                        &[],
+                    );
+                }
+            }
+        },
+        _ => {
+            if !is_phase_one(scalar) {
+                if let Some(DiagEntry::Phase1q { d0, d1, .. }) = local_entries
+                    .iter_mut()
+                    .find(|e| matches!(e, DiagEntry::Phase1q { .. }))
+                {
+                    *d0 *= scalar;
+                    *d1 *= scalar;
+                } else {
+                    let qubit = match local_entries[0] {
+                        DiagEntry::Phase1q { qubit, .. } => qubit,
+                        DiagEntry::Phase2q { q0, .. } | DiagEntry::Parity2q { q0, .. } => q0,
+                    };
+                    local_entries.push(DiagEntry::Phase1q {
+                        qubit,
+                        d0: scalar,
+                        d1: scalar,
+                    });
+                }
+            }
+            inner.dispatch_gate(
+                &Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(local_entries))),
+                &[],
+            );
+        }
+    }
 }

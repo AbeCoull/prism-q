@@ -3054,3 +3054,733 @@ fn a_dense_unitary_on_a_global_qubit_declines_by_name() {
     .swap_remove(0);
     assert!(message.contains("unitary"), "{message}");
 }
+
+fn assert_circuit_state_matches(
+    circuit: &Circuit,
+    initial: &[Complex64],
+    sizes: &[usize],
+    relabels: &[bool],
+    label: &str,
+) {
+    let mut sv = StatevectorBackend::new(SEED);
+    sv.init_from_amplitudes(initial.to_vec(), 0).unwrap();
+    sv.apply_instructions(&circuit.instructions).unwrap();
+    let expected = sv.export_statevector().unwrap();
+
+    for &relabel in relabels {
+        for &size in sizes {
+            let results = run_ranks(size, |ctx| {
+                let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+                backend.set_relabel(relabel);
+                backend.init_from_amplitudes(initial.to_vec(), 0).unwrap();
+                backend.apply_instructions(&circuit.instructions).unwrap();
+                backend.export_statevector().unwrap()
+            });
+            for (rank, actual) in results.iter().enumerate() {
+                assert_amplitudes_match(
+                    &expected,
+                    actual,
+                    &format!("{label} (size={size}, relabel={relabel}, rank={rank})"),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn loopback_local_multi_2q_borrowed_and_owned_keep_non_monotonic_order() {
+    use crate::gates::{Gate, Multi2qData};
+    relax_min_local_qubits();
+
+    let n = 19usize;
+    let local_qubits = 18usize;
+    let cx = Gate::Cx.matrix_4x4();
+    let dense = dense_2q();
+    let budget = crate::gates::multi_2q_high_budget_for(local_qubits);
+    let low = crate::gates::multi_2q_low_bits();
+
+    let mut local_gates = vec![(0usize, local_qubits - 1, cx)];
+    let mut distinct = 0usize;
+    let mut q = low;
+    while distinct <= budget && q < local_qubits - 1 {
+        if q != local_qubits - 1 {
+            local_gates.push((q, q + 1, dense));
+            distinct += 2;
+        }
+        q += 2;
+    }
+    local_gates.push((0, 1, dense));
+    let mut local_targets: Vec<usize> = local_gates.iter().flat_map(|&(a, b, _)| [a, b]).collect();
+    local_targets.sort_unstable();
+    local_targets.dedup();
+
+    let mut init_b = CircuitBuilder::new(n);
+    for qubit in 0..n {
+        init_b.ry(0.25 + 0.03 * qubit as f64, qubit);
+    }
+    let init_circuit = init_b.build();
+    let mut sv_init = StatevectorBackend::new(SEED);
+    sv_init.init(n, 0).unwrap();
+    sv_init
+        .apply_instructions(&init_circuit.instructions)
+        .unwrap();
+    let initial = sv_init.export_statevector().unwrap();
+
+    // Cow::Borrowed path: map_identity == true, all qubits in 0..local_qubits.
+    let mut borrowed = Circuit::new(n, 0);
+    borrowed.add_gate(
+        Gate::Multi2q(Box::new(Multi2qData::new(local_gates.clone()))),
+        &local_targets,
+    );
+    assert_circuit_state_matches(&borrowed, &initial, &[2], &[true], "Multi2q Cow::Borrowed");
+
+    // Cow::Owned path: leading Swap(0, 2) permutes local map entries so to_physical rewrites.
+    let mut owned = Circuit::new(n, 0);
+    owned.add_gate(Gate::Swap, &[0, 2]);
+    owned.add_gate(
+        Gate::Multi2q(Box::new(Multi2qData::new(local_gates))),
+        &local_targets,
+    );
+    assert_circuit_state_matches(&owned, &initial, &[2], &[true], "Multi2q Cow::Owned");
+
+    // Relabeled-from-global Multi2q: touches qubit 18 with <= local_qubits distinct qubits,
+    // triggering make_local + Cow::Owned with non-monotonic physical tiers.
+    let mut relabeled_gates = vec![(0usize, n - 1, cx)];
+    let mut distinct = 0usize;
+    let mut q = low;
+    while distinct <= budget && q < local_qubits - 1 {
+        relabeled_gates.push((q, q + 1, dense));
+        distinct += 2;
+        q += 2;
+    }
+    relabeled_gates.push((0, 1, dense));
+    let mut relabeled_targets: Vec<usize> = relabeled_gates
+        .iter()
+        .flat_map(|&(a, b, _)| [a, b])
+        .collect();
+    relabeled_targets.sort_unstable();
+    relabeled_targets.dedup();
+    assert!(relabeled_targets.len() <= local_qubits);
+
+    let mut relabeled = Circuit::new(n, 0);
+    relabeled.add_gate(
+        Gate::Multi2q(Box::new(Multi2qData::new(relabeled_gates))),
+        &relabeled_targets,
+    );
+    assert_circuit_state_matches(
+        &relabeled,
+        &initial,
+        &[2],
+        &[true],
+        "Multi2q relabeled from global",
+    );
+}
+
+#[test]
+fn loopback_global_multi_fused_all_splits_match_statevector() {
+    use crate::gates::{Gate, MultiFusedData};
+    relax_min_local_qubits();
+
+    let n = 6usize;
+    let initial = random_state(n, SEED + 10);
+    let diag = |a: f64, b: f64| {
+        let z = Complex64::new(0.0, 0.0);
+        [[Complex64::cis(a), z], [z, Complex64::cis(b)]]
+    };
+    let rx = |theta: f64| Gate::Rx(theta).matrix_2x2();
+    let ry = |theta: f64| Gate::Ry(theta).matrix_2x2();
+
+    // 1. Mixed local (diag + non-diag) + global diag + global non-diag, touching all qubits
+    // so relabel = true cannot evict all targets at 4 or 8 ranks.
+    let mut mixed = Circuit::new(n, 0);
+    let mixed_gates = vec![
+        (0, diag(0.2, -0.3)),
+        (1, rx(0.7)),
+        (2, ry(0.4)),
+        (3, diag(0.5, 0.9)),
+        (4, rx(1.1)),
+        (5, diag(-0.4, 0.8)),
+    ];
+    mixed.add_gate(
+        Gate::MultiFused(Box::new(MultiFusedData::new(mixed_gates))),
+        &[0, 1, 2, 3, 4, 5],
+    );
+    assert_circuit_state_matches(
+        &mixed,
+        &initial,
+        &[2, 4, 8],
+        &[false, true],
+        "MultiFused mixed local+global",
+    );
+
+    // 2. All-diagonal spanning local + global qubits (apply_multi_1q_diagonal + scalar).
+    let mut all_diag = Circuit::new(n, 0);
+    let diag_gates = vec![
+        (0, diag(0.15, -0.25)),
+        (2, diag(0.4, 0.6)),
+        (3, diag(-0.7, 0.3)),
+        (5, diag(0.9, -0.1)),
+    ];
+    all_diag.add_gate(
+        Gate::MultiFused(Box::new(MultiFusedData::new(diag_gates))),
+        &[0, 2, 3, 5],
+    );
+    assert_circuit_state_matches(
+        &all_diag,
+        &initial,
+        &[2, 4, 8],
+        &[false, true],
+        "MultiFused all-diagonal",
+    );
+
+    // 3. Global-only diagonal (non-identity and identity).
+    let mut global_only = Circuit::new(n, 0);
+    global_only.add_gate(
+        Gate::MultiFused(Box::new(MultiFusedData::new(vec![
+            (3, diag(0.3, -0.5)),
+            (5, diag(0.8, 0.2)),
+        ]))),
+        &[3, 5],
+    );
+    global_only.add_gate(
+        Gate::MultiFused(Box::new(MultiFusedData::new(vec![
+            (3, diag(0.0, 0.0)),
+            (4, diag(0.0, 0.0)),
+        ]))),
+        &[3, 4],
+    );
+    assert_circuit_state_matches(
+        &global_only,
+        &initial,
+        &[2, 4, 8],
+        &[false, true],
+        "MultiFused global-only diagonal",
+    );
+}
+
+#[test]
+fn loopback_global_batch_phase_all_splits_match_statevector() {
+    use crate::gates::{BatchPhaseData, Gate};
+    relax_min_local_qubits();
+
+    // 6-qubit cases across 2, 4, 8 ranks.
+    let n = 6usize;
+    let initial = random_state(n, SEED + 20);
+    let p = |a: f64| Complex64::cis(a);
+
+    // Global control with global-only, 1 local + global, and multiple local + global targets.
+    let mut global_ctrl = Circuit::new(n, 0);
+    global_ctrl.add_gate(
+        Gate::BatchPhase(Box::new(BatchPhaseData::new([(3, p(0.3)), (4, p(-0.5))]))),
+        &[5, 3, 4],
+    );
+    global_ctrl.add_gate(
+        Gate::BatchPhase(Box::new(BatchPhaseData::new([(0, p(0.4)), (4, p(0.8))]))),
+        &[5, 0, 4],
+    );
+    global_ctrl.add_gate(
+        Gate::BatchPhase(Box::new(BatchPhaseData::new([
+            (0, p(0.2)),
+            (1, p(0.6)),
+            (2, p(-0.3)),
+            (3, p(0.7)),
+        ]))),
+        &[5, 0, 1, 2, 3],
+    );
+    assert_circuit_state_matches(
+        &global_ctrl,
+        &initial,
+        &[2, 4, 8],
+        &[false, true],
+        "BatchPhase global control",
+    );
+
+    // Local control with global-only, 1 local + global, and <= 9 local + global targets.
+    let mut local_ctrl = Circuit::new(n, 0);
+    local_ctrl.add_gate(
+        Gate::BatchPhase(Box::new(BatchPhaseData::new([(3, p(0.35)), (5, p(-0.45))]))),
+        &[0, 3, 5],
+    );
+    local_ctrl.add_gate(
+        Gate::BatchPhase(Box::new(BatchPhaseData::new([(1, p(0.55)), (5, p(0.25))]))),
+        &[0, 1, 5],
+    );
+    local_ctrl.add_gate(
+        Gate::BatchPhase(Box::new(BatchPhaseData::new([
+            (1, p(0.1)),
+            (2, p(0.3)),
+            (4, p(-0.7)),
+            (5, p(0.9)),
+        ]))),
+        &[0, 1, 2, 4, 5],
+    );
+    assert_circuit_state_matches(
+        &local_ctrl,
+        &initial,
+        &[2, 4, 8],
+        &[false, true],
+        "BatchPhase local control small",
+    );
+
+    // >= MAX_QUBITS_PER_GROUP (10) local targets + global targets on 14 qubits.
+    let n_wide = 14usize;
+    let wide_init = random_state(n_wide, SEED + 21);
+    let mut wide = Circuit::new(n_wide, 0);
+    let mut phases: Vec<(usize, Complex64)> = (1..=10).map(|q| (q, p(0.07 * q as f64))).collect();
+    phases.push((11, p(0.41)));
+    phases.push((13, p(-0.53)));
+    let mut targets = vec![0usize];
+    targets.extend(phases.iter().map(|&(q, _)| q));
+    wide.add_gate(
+        Gate::BatchPhase(Box::new(BatchPhaseData::new(phases))),
+        &targets,
+    );
+    assert_circuit_state_matches(
+        &wide,
+        &wide_init,
+        &[2, 4, 8],
+        &[false, true],
+        "BatchPhase local control >= 10 local targets",
+    );
+}
+
+#[test]
+fn loopback_global_batch_rzz_all_splits_match_statevector() {
+    use crate::gates::{BatchRzzData, Gate};
+    relax_min_local_qubits();
+
+    let n = 6usize;
+    let initial = random_state(n, SEED + 30);
+
+    // Mixed (false, false), (true, false), (false, true) with repeated and canceling
+    // global neighbors on the same local qubit, plus (true, true).
+    let mut mixed = Circuit::new(n, 0);
+    let edges = vec![
+        (3, 5, 0.4),
+        (4, 5, -0.2),
+        (0, 5, 0.3),
+        (4, 0, 0.6),
+        (1, 3, 0.5),
+        (3, 1, -0.5),
+        (0, 1, 0.7),
+        (1, 2, -0.3),
+    ];
+    mixed.add_gate(
+        Gate::BatchRzz(Box::new(BatchRzzData::new(edges))),
+        &[0, 1, 2, 3, 4, 5],
+    );
+    // Global-only + single local edge (apply_parity2q with scalar != 1).
+    mixed.add_gate(
+        Gate::BatchRzz(Box::new(BatchRzzData::new(vec![(4, 5, 0.8), (0, 1, 0.35)]))),
+        &[0, 1, 4, 5],
+    );
+    // Global-only + multiple local edges (no mixed edges).
+    mixed.add_gate(
+        Gate::BatchRzz(Box::new(BatchRzzData::new(vec![
+            (4, 5, 0.25),
+            (0, 1, 0.45),
+            (1, 2, -0.15),
+        ]))),
+        &[0, 1, 2, 4, 5],
+    );
+    assert_circuit_state_matches(
+        &mixed,
+        &initial,
+        &[2, 4, 8],
+        &[false, true],
+        "BatchRzz mixed splits",
+    );
+
+    // > 10-local-qubit connected component (12 local qubits on 4 ranks) + mixed/global edges,
+    // exercising diagonal_batch_fits == false fallback to BatchRzz + apply_multi_1q_diagonal.
+    let n_wide = 14usize;
+    let wide_init = random_state(n_wide, SEED + 31);
+    let mut wide_edges: Vec<(usize, usize, f64)> =
+        (0..11).map(|q| (q, q + 1, 0.1 + 0.03 * q as f64)).collect();
+    wide_edges.push((0, 12, 0.33));
+    wide_edges.push((1, 13, -0.27));
+    wide_edges.push((12, 13, 0.51));
+    let mut wide = Circuit::new(n_wide, 0);
+    wide.add_gate(
+        Gate::BatchRzz(Box::new(BatchRzzData::new(wide_edges))),
+        &(0..n_wide).collect::<Vec<_>>(),
+    );
+    assert_circuit_state_matches(
+        &wide,
+        &wide_init,
+        &[2, 4],
+        &[false, true],
+        "BatchRzz > 10-qubit local component",
+    );
+}
+
+#[test]
+fn loopback_global_diagonal_batch_and_rzz_phases_match_statevector() {
+    use crate::gates::{DiagEntry, DiagonalBatchData, Gate};
+    relax_min_local_qubits();
+
+    let n = 6usize;
+    let initial = random_state(n, SEED + 40);
+    let p = |a: f64| Complex64::cis(a);
+
+    // 1. All DiagEntry variants across all (local, global) combinations.
+    let mut all_kinds = Circuit::new(n, 0);
+    all_kinds.add_gate(
+        Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(vec![
+            DiagEntry::Phase1q {
+                qubit: 0,
+                d0: p(0.1),
+                d1: p(-0.2),
+            },
+            DiagEntry::Phase1q {
+                qubit: 5,
+                d0: p(0.3),
+                d1: p(0.7),
+            },
+            DiagEntry::Phase2q {
+                q0: 0,
+                q1: 1,
+                phase: p(0.4),
+            },
+            DiagEntry::Phase2q {
+                q0: 1,
+                q1: 4,
+                phase: p(-0.5),
+            },
+            DiagEntry::Phase2q {
+                q0: 5,
+                q1: 2,
+                phase: p(0.6),
+            },
+            DiagEntry::Phase2q {
+                q0: 3,
+                q1: 5,
+                phase: p(0.8),
+            },
+            DiagEntry::Parity2q {
+                q0: 1,
+                q1: 2,
+                same: p(0.2),
+                diff: p(-0.2),
+            },
+            DiagEntry::Parity2q {
+                q0: 0,
+                q1: 3,
+                same: p(0.15),
+                diff: p(0.45),
+            },
+            DiagEntry::Parity2q {
+                q0: 4,
+                q1: 5,
+                same: p(-0.3),
+                diff: p(0.5),
+            },
+        ]))),
+        &[0, 1, 2, 3, 4, 5],
+    );
+    // Global-only DiagonalBatch.
+    all_kinds.add_gate(
+        Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(vec![
+            DiagEntry::Phase1q {
+                qubit: 4,
+                d0: p(0.12),
+                d1: p(-0.34),
+            },
+            DiagEntry::Phase2q {
+                q0: 3,
+                q1: 5,
+                phase: p(0.56),
+            },
+            DiagEntry::Parity2q {
+                q0: 4,
+                q1: 5,
+                same: p(0.22),
+                diff: p(-0.22),
+            },
+        ]))),
+        &[3, 4, 5],
+    );
+    // Single-local-entry cases: Phase1q, Parity2q, Phase2q (with scalar == 1 and scalar != 1).
+    all_kinds.add_gate(
+        Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(vec![
+            DiagEntry::Phase1q {
+                qubit: 5,
+                d0: p(0.2),
+                d1: p(0.4),
+            },
+            DiagEntry::Phase1q {
+                qubit: 0,
+                d0: p(-0.1),
+                d1: p(0.3),
+            },
+        ]))),
+        &[0, 5],
+    );
+    all_kinds.add_gate(
+        Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(vec![
+            DiagEntry::Phase1q {
+                qubit: 5,
+                d0: p(0.3),
+                d1: p(0.6),
+            },
+            DiagEntry::Parity2q {
+                q0: 0,
+                q1: 1,
+                same: p(0.25),
+                diff: p(-0.25),
+            },
+        ]))),
+        &[0, 1, 5],
+    );
+    all_kinds.add_gate(
+        Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(vec![
+            DiagEntry::Phase1q {
+                qubit: 5,
+                d0: p(0.35),
+                d1: p(-0.15),
+            },
+            DiagEntry::Phase2q {
+                q0: 0,
+                q1: 1,
+                phase: p(0.75),
+            },
+        ]))),
+        &[0, 1, 5],
+    );
+    // Multi-entry local with no Phase1q + non-unit global scalar.
+    all_kinds.add_gate(
+        Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(vec![
+            DiagEntry::Phase1q {
+                qubit: 5,
+                d0: p(0.11),
+                d1: p(0.29),
+            },
+            DiagEntry::Phase2q {
+                q0: 0,
+                q1: 1,
+                phase: p(0.41),
+            },
+            DiagEntry::Parity2q {
+                q0: 1,
+                q1: 2,
+                same: p(0.17),
+                diff: p(-0.17),
+            },
+        ]))),
+        &[0, 1, 2, 5],
+    );
+    assert_circuit_state_matches(
+        &all_kinds,
+        &initial,
+        &[2, 4, 8],
+        &[false, true],
+        "DiagonalBatch all splits",
+    );
+
+    // 2. Direct Gate::Rzz across all 4 (local, global) splits, plus leading boundary Swap.
+    let mut rzz_direct = Circuit::new(n, 0);
+    rzz_direct.add_gate(Gate::Rzz(0.43), &[0, 1]);
+    rzz_direct.add_gate(Gate::Rzz(-0.61), &[1, 4]);
+    rzz_direct.add_gate(Gate::Rzz(0.79), &[5, 2]);
+    rzz_direct.add_gate(Gate::Rzz(0.53), &[3, 5]);
+    assert_circuit_state_matches(
+        &rzz_direct,
+        &initial,
+        &[2, 4, 8],
+        &[false, true],
+        "Gate::Rzz all splits",
+    );
+
+    let mut swapped = Circuit::new(n, 0);
+    swapped.add_gate(Gate::Swap, &[0, 5]);
+    swapped.instructions.extend(all_kinds.instructions);
+    swapped.instructions.extend(rzz_direct.instructions);
+    assert_circuit_state_matches(
+        &swapped,
+        &initial,
+        &[2, 4, 8],
+        &[true],
+        "DiagonalBatch + Rzz after Swap relabel",
+    );
+}
+
+#[test]
+fn loopback_global_one_qubit_batched_gates_match_statevector() {
+    use crate::gates::{
+        BatchPhaseData, DiagEntry, DiagonalBatchData, Gate, MultiFusedData, PauliRotData,
+    };
+    use crate::sim::unified_pauli::PauliAxis;
+    relax_min_local_qubits();
+
+    let n = 5usize;
+    let g = n - 1;
+    let initial = random_state(n, SEED + 50);
+    let p = |a: f64| Complex64::cis(a);
+
+    // Each case isolates one 1-qubit batched gate on a global qubit with no prior
+    // non-diagonal gate on that qubit, so under relabel = true diagonal/empty
+    // variants stay on the rank bit rather than being moved local beforehand.
+    let cases: Vec<(&str, Gate)> = vec![
+        (
+            "MultiFused 1q Rz",
+            Gate::MultiFused(Box::new(MultiFusedData::new(vec![(
+                g,
+                Gate::Rz(0.73).matrix_2x2(),
+            )]))),
+        ),
+        (
+            "MultiFused 1q P",
+            Gate::MultiFused(Box::new(MultiFusedData::new(vec![(
+                g,
+                Gate::P(-0.41).matrix_2x2(),
+            )]))),
+        ),
+        (
+            "MultiFused 1q Rx",
+            Gate::MultiFused(Box::new(MultiFusedData::new(vec![(
+                g,
+                Gate::Rx(0.85).matrix_2x2(),
+            )]))),
+        ),
+        (
+            "MultiFused 1q H",
+            Gate::MultiFused(Box::new(MultiFusedData::new(vec![(
+                g,
+                Gate::H.matrix_2x2(),
+            )]))),
+        ),
+        (
+            "DiagonalBatch 1q Phase1q",
+            Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(vec![DiagEntry::Phase1q {
+                qubit: g,
+                d0: p(0.29),
+                d1: p(-0.63),
+            }]))),
+        ),
+        (
+            "DiagonalBatch 1q repeated Phase1q",
+            Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(vec![
+                DiagEntry::Phase1q {
+                    qubit: g,
+                    d0: p(0.17),
+                    d1: p(-0.31),
+                },
+                DiagEntry::Phase1q {
+                    qubit: g,
+                    d0: p(-0.22),
+                    d1: p(0.54),
+                },
+            ]))),
+        ),
+        (
+            "BatchPhase empty phases",
+            Gate::BatchPhase(Box::new(BatchPhaseData::new([]))),
+        ),
+        (
+            "PauliRot 1q Z",
+            Gate::PauliRot(Box::new(PauliRotData {
+                theta: 0.67,
+                axes: vec![PauliAxis::Z],
+            })),
+        ),
+    ];
+
+    for (label, gate) in &cases {
+        assert_eq!(gate.num_qubits(), 1, "{label}");
+        let mut circuit = Circuit::new(n, 0);
+        circuit.add_gate(gate.clone(), &[g]);
+
+        assert_circuit_state_matches(&circuit, &initial, &[2, 4], &[false, true], label);
+
+        // Also cover per-gate `apply()` under relabel = false and relabel = true.
+        let mut sv = StatevectorBackend::new(SEED);
+        sv.init_from_amplitudes(initial.clone(), 0).unwrap();
+        sv.apply(&circuit.instructions[0]).unwrap();
+        let expected = sv.export_statevector().unwrap();
+
+        for relabel in [false, true] {
+            for size in [2usize, 4] {
+                let results = run_ranks(size, |ctx| {
+                    let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+                    backend.set_relabel(relabel);
+                    backend.init_from_amplitudes(initial.clone(), 0).unwrap();
+                    backend.apply(&circuit.instructions[0]).unwrap();
+                    backend.export_statevector().unwrap()
+                });
+                for (rank, actual) in results.iter().enumerate() {
+                    assert_amplitudes_match(
+                        &expected,
+                        actual,
+                        &format!("{label} per-gate (size={size}, relabel={relabel}, rank={rank})"),
+                    );
+                }
+            }
+        }
+    }
+
+    // Combined sequence and permuted physical map via Swap(0, g) under relabel = true.
+    let mut combined = Circuit::new(n, 0);
+    combined.add_gate(Gate::Swap, &[0, g]);
+    combined.add_gate(
+        Gate::MultiFused(Box::new(MultiFusedData::new(vec![(
+            0,
+            Gate::Rz(0.73).matrix_2x2(),
+        )]))),
+        &[0],
+    );
+    combined.add_gate(
+        Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(vec![DiagEntry::Phase1q {
+            qubit: 0,
+            d0: p(0.29),
+            d1: p(-0.63),
+        }]))),
+        &[0],
+    );
+    combined.add_gate(Gate::BatchPhase(Box::new(BatchPhaseData::new([]))), &[0]);
+    combined.add_gate(
+        Gate::MultiFused(Box::new(MultiFusedData::new(vec![(
+            0,
+            Gate::Rx(0.85).matrix_2x2(),
+        )]))),
+        &[0],
+    );
+    assert_circuit_state_matches(
+        &combined,
+        &initial,
+        &[2, 4],
+        &[true],
+        "1q global batched gates after Swap relabel",
+    );
+
+    // Global 1-qubit QftBlock is unsupported on multi-rank and must return
+    // BackendUnsupported instead of panicking inside Gate::matrix_2x2().
+    for inverse in [false, true] {
+        let mut qft_circuit = Circuit::new(n, 0);
+        qft_circuit.add_gate(
+            Gate::QftBlock {
+                start: g as u8,
+                num: 1,
+                inverse,
+                swaps: false,
+                big_endian: false,
+            },
+            &[g],
+        );
+        for relabel in [false, true] {
+            let errs = run_ranks(2, |ctx| {
+                let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+                backend.set_relabel(relabel);
+                backend.init(n, 0).unwrap();
+                backend
+                    .apply_instructions(&qft_circuit.instructions)
+                    .unwrap_err()
+            });
+            for err in errs {
+                assert!(
+                    matches!(err, PrismError::BackendUnsupported { .. }),
+                    "QftBlock(num=1, inverse={inverse}, relabel={relabel}): expected BackendUnsupported, got {err}"
+                );
+            }
+        }
+    }
+}

@@ -283,14 +283,75 @@ struct MixedOpsArg {
 // SAFETY: plain `repr(C)` arrays and an i32 with the layout the kernel declares.
 unsafe impl cudarc::driver::DeviceRepr for MixedOpsArg {}
 
+// State pointer + MixedOpsArg + diag_tables pointer must stay inside Pascal's 4 KB limit.
+const _: () = assert!(size_of::<MixedOpsArg>() + 2 * size_of::<u64>() <= 4096);
+
 const MIX_MAT1: u32 = 0;
 const MIX_DIAG1: u32 = 1;
 const MIX_ANTI1: u32 = 2;
 const MIX_CX: u32 = 3;
 const MIX_SWAP: u32 = 4;
 const MIX_DIAG2: u32 = 5;
+const MIX_DENSE2Q: u32 = 6;
+const MIX_DIAG_TABLE: u32 = 7;
 const MIX_FORM_REAL: u32 = 1;
 const MIX_FORM_RX: u32 = 2;
+/// Shortest consecutive diagonal run folded into a phase table for one tile.
+const MIX_DIAG_TABLE_MIN_RUN: usize = 3;
+
+/// Fold a run of `Diag1` and `Diag2` ops in one tile into a `2^MIXED_TILE_Q` phase table.
+fn fold_mixed_diag_table(
+    ops: &[&TileOp<'_>],
+    position: &[u32; 64],
+    one: Complex64,
+    out: &mut [f64],
+) {
+    const TILE_LEN: usize = 1 << MIXED_TILE_Q;
+    let mut tbl = [one; TILE_LEN];
+    for &&op in ops {
+        match op {
+            TileOp::Diag1 { q, d } => {
+                let a = position[q] as usize;
+                let bit = 1usize << a;
+                if d[0] == one {
+                    let phase = d[1];
+                    for (e, slot) in tbl.iter_mut().enumerate() {
+                        if e & bit != 0 {
+                            *slot *= phase;
+                        }
+                    }
+                } else {
+                    for (e, slot) in tbl.iter_mut().enumerate() {
+                        *slot *= d[(e >> a) & 1];
+                    }
+                }
+            }
+            TileOp::Diag2 { a, b, d } => {
+                let pa = position[a] as usize;
+                let pb = position[b] as usize;
+                if d[..3].iter().all(|&v| v == one) {
+                    let mask = (1usize << pa) | (1usize << pb);
+                    let phase = d[3];
+                    for (e, slot) in tbl.iter_mut().enumerate() {
+                        if e & mask == mask {
+                            *slot *= phase;
+                        }
+                    }
+                } else {
+                    for (e, slot) in tbl.iter_mut().enumerate() {
+                        let s = (((e >> pa) & 1) << 1) | ((e >> pb) & 1);
+                        *slot *= d[s];
+                    }
+                }
+            }
+            _ => unreachable!("fold_mixed_diag_table called on non-diagonal op"),
+        }
+    }
+    for (pair, v) in out.as_chunks_mut::<2>().0.iter_mut().zip(tbl) {
+        pair[0] = v.re;
+        pair[1] = v.im;
+    }
+}
 
 /// Apply `ops` in order as one `apply_mixed_tile` pass over the tile on `qubits`, which
 /// the lowest qubits outside it fill up to `MIXED_TILE_Q`.
@@ -331,8 +392,29 @@ pub(crate) fn launch_apply_mixed_tile<'a: 'b, 'b>(
         position[q] = slot as u32;
     }
     let one = Complex64::new(1.0, 0.0);
+    let ops_vec: Vec<&TileOp<'a>> = ops.collect();
+    let mut diag_runs: Vec<std::ops::Range<usize>> = Vec::new();
     let mut coefs = 0usize;
-    for op in ops {
+    let mut idx = 0usize;
+    while idx < ops_vec.len() {
+        if matches!(ops_vec[idx], TileOp::Diag1 { .. } | TileOp::Diag2 { .. }) {
+            let mut end = idx + 1;
+            while end < ops_vec.len()
+                && matches!(ops_vec[end], TileOp::Diag1 { .. } | TileOp::Diag2 { .. })
+            {
+                end += 1;
+            }
+            if end - idx >= MIX_DIAG_TABLE_MIN_RUN {
+                let table_idx = diag_runs.len() as u32;
+                diag_runs.push(idx..end);
+                arg.op[arg.num_ops as usize] = MIX_DIAG_TABLE | (table_idx << 12);
+                arg.num_ops += 1;
+                idx = end;
+                continue;
+            }
+        }
+        let op = ops_vec[idx];
+        idx += 1;
         let at = coefs;
         let mut put = |v: Complex64| {
             arg.c[coefs] = v.re;
@@ -368,7 +450,18 @@ pub(crate) fn launch_apply_mixed_tile<'a: 'b, 'b>(
                 let flag = d[..3].iter().all(|&v| v == one);
                 (MIX_DIAG2, position[a], position[b], flag)
             }
-            TileOp::Dense2q { .. } | TileOp::Gate { .. } => {
+            TileOp::Dense2q { hi, lo, m } => {
+                for row in m {
+                    for v in row {
+                        arg.c[coefs] = v.re;
+                        arg.c[coefs + 1] = v.im - v.re;
+                        arg.c[coefs + 2] = v.re + v.im;
+                        coefs += 3;
+                    }
+                }
+                (MIX_DENSE2Q, position[hi], position[lo], false)
+            }
+            TileOp::Gate { .. } => {
                 unreachable!("the planner keeps {op:?} out of tiles")
             }
         };
@@ -376,16 +469,47 @@ pub(crate) fn launch_apply_mixed_tile<'a: 'b, 'b>(
             kind | a << 3 | b << 7 | u32::from(flag) << 11 | (at as u32) << 12;
         arg.num_ops += 1;
     }
+    let mut scratch_guard = if diag_runs.is_empty() {
+        None
+    } else {
+        Some(ctx.launcher_scratch())
+    };
+    let diag_tables_ptr: u64 = if let Some(scratch) = scratch_guard.as_deref_mut() {
+        let f64_per_table = 2 << MIXED_TILE_Q;
+        let staged = stage_blob(
+            &mut scratch.blob,
+            ctx.device(),
+            std::iter::empty(),
+            diag_runs.len() * f64_per_table,
+            |dst| {
+                for (i, range) in diag_runs.iter().enumerate() {
+                    let start = i * f64_per_table;
+                    fold_mixed_diag_table(
+                        &ops_vec[range.clone()],
+                        &position,
+                        one,
+                        &mut dst[start..start + f64_per_table],
+                    );
+                }
+            },
+        )?;
+        staged.f64s
+    } else {
+        0
+    };
     let num_tiles = 1u32 << (n - MIXED_TILE_Q);
     let (stream, func) = stream_and_fn(ctx, "apply_mixed_tile")?;
     let cfg = linear_cfg(1 << MIXED_BLOCK_LOG, num_tiles);
     let mut builder = stream.launch_builder(&func);
     let buffer = state.buffer_mut().raw_mut();
-    builder.arg(buffer).arg(&arg);
+    builder.arg(buffer).arg(&arg).arg(&diag_tables_ptr);
     // SAFETY: signature matches; num_tiles blocks of the 2^MIXED_TILE_Q amplitudes over
     // MIXED_TILE_Q distinct qubits below n cover the state once, every op position names
-    // a tile qubit, and the op list rides in parameter space with num_ops entries filled.
+    // a tile qubit, the op list rides in parameter space with num_ops entries filled, and
+    // diag_tables_ptr holds every folded run's 2^MIXED_TILE_Q phases while scratch_guard
+    // is live.
     unsafe { launch_counted(builder, cfg, "apply_mixed_tile", ctx.device(), 1) }?;
+    drop(scratch_guard);
     ctx.device().count_tile();
     Ok(())
 }

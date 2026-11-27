@@ -202,6 +202,20 @@ impl GpuDevice {
             let func = module
                 .load_function(name)
                 .map_err(|e| driver_err(&format!("load_function `{name}`"), e))?;
+            if capability.0 >= 7
+                && matches!(
+                    name,
+                    "apply_mixed_tile"
+                        | "qft_dif_pass"
+                        | "qft_bit_reverse_tiled"
+                        | "apply_multi_fused_tiled"
+                )
+            {
+                let _ = func.set_attribute(
+                    cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+                    100,
+                );
+            }
             functions.insert(name, func);
         }
         Ok(Self {

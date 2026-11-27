@@ -54,7 +54,7 @@ pub(crate) enum TileOp<'a> {
         b: usize,
         d: [Complex64; 4],
     },
-    /// A 4x4 in the `apply_fused_2q` basis (`hi` the high bit), on its own kernel.
+    /// A 4x4 in the `apply_fused_2q` basis (`hi` the high bit).
     Dense2q {
         hi: usize,
         lo: usize,
@@ -111,7 +111,8 @@ impl TileOp<'_> {
             TileOp::Mat1 { .. } | TileOp::Diag2 { .. } => Some(8),
             TileOp::Diag1 { .. } | TileOp::Anti1 { .. } => Some(4),
             TileOp::Cx { .. } | TileOp::Swap { .. } => Some(0),
-            TileOp::Dense2q { .. } | TileOp::Gate { .. } => None,
+            TileOp::Dense2q { .. } => Some(48),
+            TileOp::Gate { .. } => None,
         }
     }
 }
@@ -325,6 +326,7 @@ pub(crate) fn plan(ops: &[TileOp<'_>], n: usize, geometry: &Geometry, out: &mut 
         if taken.len() >= MIN_TILE_OPS {
             let start = out.order.len();
             out.order.extend_from_slice(&taken);
+            coalesce_tile_diagonals(&mut out.order[start..], &shapes);
             out.steps.push(Step::Tile {
                 qubits: geometry.anchor | high,
                 ops: start..out.order.len(),
@@ -346,6 +348,46 @@ pub(crate) fn plan(ops: &[TileOp<'_>], n: usize, geometry: &Geometry, out: &mut 
         });
         planner.taken = taken;
     }
+}
+
+/// Group commuting diagonal ops within one tile into contiguous runs by alternating
+/// ready diagonal and non-diagonal waves.
+///
+/// An op is ready when no earlier unscheduled op conflicts with it (`moved` vs `touched`),
+/// so jumping over skipped ops preserves semantics. Alternating whole waves keeps a layer
+/// of diagonal gates together even when an earlier pass interleaved them with mixers.
+fn coalesce_tile_diagonals(ops: &mut [u32], shapes: &[Shape]) {
+    let diag_count = ops
+        .iter()
+        .filter(|&&k| shapes[k as usize].moved == 0)
+        .count();
+    if diag_count < 2 || diag_count == ops.len() {
+        return;
+    }
+    let len = ops.len();
+    let mut done = vec![false; len];
+    let mut out = Vec::with_capacity(len);
+    let mut diag_wave = true;
+    while out.len() < len {
+        let (mut blocked_touched, mut blocked_moved) = (0u64, 0u64);
+        for i in 0..len {
+            if done[i] {
+                continue;
+            }
+            let s = shapes[ops[i] as usize];
+            let is_diag = s.moved == 0;
+            let blocked = (s.touched & blocked_moved) | (s.moved & blocked_touched) != 0;
+            if is_diag == diag_wave && !blocked {
+                done[i] = true;
+                out.push(ops[i]);
+                continue;
+            }
+            blocked_touched |= s.touched;
+            blocked_moved |= s.moved;
+        }
+        diag_wave = !diag_wave;
+    }
+    ops.copy_from_slice(&out);
 }
 
 struct Planner<'s> {

@@ -435,3 +435,69 @@ fn lowering_matches_the_host_statevector() {
     }
     assert_close(&got, &host.export_statevector().unwrap());
 }
+
+#[test]
+fn plan_packs_dense_qv_pairs_into_tiles() {
+    let n = 20;
+    let circuit = crate::circuits::quantum_volume_circuit(n, n, 0xDEAD_BEEF);
+    let fused = crate::circuit::fusion::fuse_circuit_for_profile(
+        &circuit,
+        true,
+        n,
+        crate::circuit::fusion::FusionProfile::Device,
+    );
+    let mut ops = Vec::new();
+    for inst in &fused.instructions {
+        if let Instruction::Gate { gate, targets } = inst {
+            lower(&mut ops, gate, targets);
+        }
+    }
+    let mut schedule = Plan::default();
+    plan(&ops, n, &k::MIXED_TILE_GEOMETRY, &mut schedule);
+    check_plan(&ops, n, &k::MIXED_TILE_GEOMETRY, &schedule);
+    assert!(
+        schedule.steps.len() * 6 <= ops.len(),
+        "{} steps for {} dense ops",
+        schedule.steps.len(),
+        ops.len()
+    );
+}
+
+#[test]
+fn plan_coalesces_interleaved_qaoa_diagonal_runs() {
+    let n = 20;
+    let circuit = crate::circuits::qaoa_circuit(n, 3, 0xDEAD_BEEF);
+    let fused = crate::circuit::fusion::fuse_circuit_for_profile(
+        &circuit,
+        true,
+        n,
+        crate::circuit::fusion::FusionProfile::Device,
+    );
+    let mut ops = Vec::new();
+    for inst in &fused.instructions {
+        if let Instruction::Gate { gate, targets } = inst {
+            lower(&mut ops, gate, targets);
+        }
+    }
+    let mut schedule = Plan::default();
+    plan(&ops, n, &k::MIXED_TILE_GEOMETRY, &mut schedule);
+    check_plan(&ops, n, &k::MIXED_TILE_GEOMETRY, &schedule);
+    let (mut runs, mut longest) = (0usize, 0usize);
+    for step in &schedule.steps {
+        if let Step::Tile { ops: range, .. } = step {
+            let mut len = 0;
+            for i in schedule.order[range.clone()].iter().map(Some).chain([None]) {
+                if i.is_some_and(|&i| {
+                    matches!(ops[i as usize], TileOp::Diag1 { .. } | TileOp::Diag2 { .. })
+                }) {
+                    len += 1;
+                } else if len > 0 {
+                    runs += 1;
+                    longest = longest.max(len);
+                    len = 0;
+                }
+            }
+        }
+    }
+    assert!(runs <= 12 && longest >= 8, "runs={runs} longest={longest}");
+}

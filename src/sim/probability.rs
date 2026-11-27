@@ -342,6 +342,7 @@ mod proofs {
     use super::Probabilities;
 
     #[kani::proof]
+    #[kani::unwind(2)]
     fn factored_len_does_not_overflow() {
         let total_qubits: usize = kani::any();
         let probs = Probabilities::Factored {
@@ -359,6 +360,7 @@ mod proofs {
     }
 
     #[kani::proof]
+    #[kani::unwind(2)]
     fn factored_iter_len_does_not_overflow() {
         let total_qubits: u32 = kani::any();
         kani::assume(total_qubits < usize::BITS);

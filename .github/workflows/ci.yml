@@ -393,7 +393,7 @@ jobs:
           - { name: words-tail, harnesses: 'rowmul_words_avx2_nw0 rowmul_words_avx2_nw3', jobs: 1 }
           - { name: words-chunk, harnesses: 'rowmul_words_avx2_nw5', jobs: 1 }
           - { name: words-nt, harnesses: 'rowmul_words_avx2_nt_nw4', jobs: 1 }
-          - { name: index, harnesses: 'insert_zero_bit_clears_the_bit_and_removes_back insert_zero_bit_is_strictly_monotone pair_mut_returns_disjoint_rows_in_bounds pair_rows_mut_returns_disjoint_rows_in_bounds', jobs: 1 }
+          - { name: index, harnesses: 'insert_zero_bit_clears_the_bit_and_removes_back insert_zero_bit_is_strictly_monotone pair_mut_returns_disjoint_rows_in_bounds pair_rows_mut_returns_disjoint_rows_in_bounds factored_len_does_not_overflow factored_iter_len_does_not_overflow qft_textbook_finest_phase_has_no_shift_overflow', jobs: 1 }
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust

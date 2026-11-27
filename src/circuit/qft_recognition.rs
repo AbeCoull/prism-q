@@ -328,6 +328,16 @@ pub enum QftTextbookStep {
     Swap(usize, usize),
 }
 
+fn neg_pow2(exp: usize) -> f64 {
+    if exp <= 1022 {
+        f64::from_bits((1023 - exp as u64) << 52)
+    } else if exp <= 1074 {
+        f64::from_bits(1u64 << (1074 - exp))
+    } else {
+        0.0
+    }
+}
+
 /// Yield the textbook decomposition of the [`Gate::QftBlock`] with these fields.
 ///
 /// Forward order: for each qubit `q` from `num - 1` down to `0`, `H q[start+q]`
@@ -354,8 +364,7 @@ pub fn qft_textbook_steps(
         let phases = (0..q).map(move |k| QftTextbookStep::CPhase {
             control: label(k),
             target: label(q),
-            theta: i32::try_from(q - k + 1)
-                .map_or(0.0, |exp| std::f64::consts::TAU * 0.5f64.powi(exp)),
+            theta: std::f64::consts::TAU * neg_pow2(q - k + 1),
         });
         head.chain(phases)
     });
@@ -469,4 +478,27 @@ fn expanded_qft_blocks(instructions: &[Instruction]) -> Vec<Instruction> {
         }
     }
     out
+}
+
+// `Gate::QftBlock` holds `start` and `num` as `u8`. The second step of a forward block
+// is its finest controlled phase, `tau / 2^num` from qubit 0 onto qubit `num - 1`, so it
+// takes the largest shift of any step. Kani's overflow check covers that shift, and the
+// angle must equal `tau` scaled by `2^-num` built from its exponent bits, which no shift
+// can wrap.
+#[cfg(kani)]
+mod proofs {
+    use super::{QftTextbookStep, qft_textbook_steps};
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn qft_textbook_finest_phase_has_no_shift_overflow() {
+        let (start, num): (u8, u8) = (kani::any(), kani::any());
+        let mut steps =
+            qft_textbook_steps(start.into(), num.into(), false, kani::any(), kani::any());
+        steps.next();
+        if let Some(QftTextbookStep::CPhase { theta, .. }) = steps.next() {
+            let scale = f64::from_bits((1023 - u64::from(num)) << 52);
+            assert_eq!(theta.to_bits(), (std::f64::consts::TAU * scale).to_bits());
+        }
+    }
 }

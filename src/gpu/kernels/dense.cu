@@ -1608,11 +1608,11 @@ extern "C" __global__ void apply_multi_fused_diagonal(
 // One block gathers the 2^MIX_TILE_Q amplitudes spanned by the tile qubits ops.q
 // (ascending, every other bit fixed per block) and applies the op list to them. Op word:
 // kind in bits 0..3, tile positions a and b in bits 3..7 and 7..11, a flag in bit 11,
-// and the offset of its doubles in ops.c from bit 12. A 1q matrix carries its form in
-// place of b: real, or real diagonal with imaginary off-diagonal as Rx has, each a half
-// of the general multiply. Thread t owns tile entries
-// t + m * MIX_BLOCK for the gather, the scatter and the diagonal ops, so consecutive
-// diagonal ops need no barrier between them.
+// and the offset of its doubles in ops.c (or table index in diag_tables for
+// MIX_DIAG_TABLE) from bit 12. A 1q matrix carries its form in place of b: real, or real
+// diagonal with imaginary off-diagonal as Rx has, each a half of the general multiply.
+// Thread t owns tile entries t + m * MIX_BLOCK for the gather, the scatter, elementwise
+// diagonal ops, and folded phase tables, so consecutive elementwise ops skip barriers.
 
 #define MIX_TILE        (1 << MIX_TILE_Q)
 #define MIX_BLOCK       (1 << MIX_BLOCK_LOG)
@@ -1622,7 +1622,9 @@ extern "C" __global__ void apply_multi_fused_diagonal(
 #define MIX_ANTI1 2
 #define MIX_CX    3
 #define MIX_SWAP  4
-#define MIX_DIAG2 5
+#define MIX_DIAG2      5
+#define MIX_DENSE2Q    6
+#define MIX_DIAG_TABLE 7
 #define MIX_FORM_REAL 1
 #define MIX_FORM_RX   2
 
@@ -1638,7 +1640,8 @@ __device__ __forceinline__ void swap_entries(double2 *tile, int i, int j)
     tile[j] = t;
 }
 
-extern "C" __global__ void apply_mixed_tile(double2 *state, MixedOps ops)
+extern "C" __launch_bounds__(MIX_BLOCK, 3) __global__ void apply_mixed_tile(
+    double2 *state, MixedOps ops, const double2 * __restrict__ diag_tables)
 {
     __shared__ double2 tile[MIX_TILE];
     const int tid = (int)threadIdx.x;
@@ -1653,7 +1656,6 @@ extern "C" __global__ void apply_mixed_tile(double2 *state, MixedOps ops)
     for (int k = 0; k < MIX_BLOCK_LOG; ++k) {
         own |= (unsigned long long)((tid >> k) & 1) << ops.q[k];
     }
-    unsigned long long high[MIX_PER_THREAD];
     #pragma unroll
     for (int m = 0; m < MIX_PER_THREAD; ++m) {
         unsigned long long h = own;
@@ -1661,7 +1663,6 @@ extern "C" __global__ void apply_mixed_tile(double2 *state, MixedOps ops)
         for (int k = MIX_BLOCK_LOG; k < MIX_TILE_Q; ++k) {
             h |= (unsigned long long)((m >> (k - MIX_BLOCK_LOG)) & 1) << ops.q[k];
         }
-        high[m] = h;
         tile[tid + m * MIX_BLOCK] = state[h];
     }
 
@@ -1674,12 +1675,14 @@ extern "C" __global__ void apply_mixed_tile(double2 *state, MixedOps ops)
         const int b = (w >> 7) & 15;
         const bool flag = (w >> 11) & 1;
         const double *c = ops.c + (w >> 12);
-        const bool diagonal = kind == MIX_DIAG1 || kind == MIX_DIAG2;
-        if (!(diagonal && elementwise)) __syncthreads();
-        elementwise = diagonal;
+        const bool is_diag = kind == MIX_DIAG1 || kind == MIX_DIAG2;
+        const bool diag_run = is_diag && i + 1 < num_ops
+            && ((ops.op[i + 1] & 7) == MIX_DIAG1 || (ops.op[i + 1] & 7) == MIX_DIAG2);
+        const bool elem_op = diag_run || kind == MIX_DIAG_TABLE || (is_diag && !flag);
+        if (!(elem_op && elementwise)) __syncthreads();
+        elementwise = elem_op;
 
-        if (diagonal && i + 1 < num_ops
-            && ((ops.op[i + 1] & 7) == MIX_DIAG1 || (ops.op[i + 1] & 7) == MIX_DIAG2)) {
+        if (diag_run) {
             int end = i + 2;
             while (end < num_ops && ((ops.op[end] & 7) == MIX_DIAG1 || (ops.op[end] & 7) == MIX_DIAG2)) ++end;
             for (int m = 0; m < MIX_PER_THREAD; ++m) {
@@ -1693,11 +1696,25 @@ extern "C" __global__ void apply_mixed_tile(double2 *state, MixedOps ops)
                     const bool df = (dw >> 11) & 1;
                     const double *dc = ops.c + (dw >> 12);
                     if (dk == MIX_DIAG1) {
-                        const int s = (e >> da) & 1;
-                        if (s || !df) value = cmul(value, make_double2(dc[2 * s], dc[2 * s + 1]));
+                        const double2 d1 = make_double2(dc[2], dc[3]);
+                        if (df) {
+                            if ((e >> da) & 1) value = cmul(value, d1);
+                        } else {
+                            const double2 d0 = make_double2(dc[0], dc[1]);
+                            value = cmul(value, ((e >> da) & 1) ? d1 : d0);
+                        }
                     } else {
-                        const int s = (((e >> da) & 1) << 1) | ((e >> db) & 1);
-                        if (s == 3 || !df) value = cmul(value, make_double2(dc[2 * s], dc[2 * s + 1]));
+                        const double2 d3 = make_double2(dc[6], dc[7]);
+                        if (df) {
+                            if ((e >> da) & (e >> db) & 1) value = cmul(value, d3);
+                        } else {
+                            const double2 d0 = make_double2(dc[0], dc[1]);
+                            const double2 d1 = make_double2(dc[2], dc[3]);
+                            const double2 d2 = make_double2(dc[4], dc[5]);
+                            int s = (((e >> da) & 1) << 1) | ((e >> db) & 1);
+                            double2 d = s == 0 ? d0 : s == 1 ? d1 : s == 2 ? d2 : d3;
+                            value = cmul(value, d);
+                        }
                     }
                 }
                 tile[e] = value;
@@ -1707,34 +1724,60 @@ extern "C" __global__ void apply_mixed_tile(double2 *state, MixedOps ops)
         }
 
         if (kind == MIX_MAT1) {
-            const double m00r = c[0], m00i = c[1], m01r = c[2], m01i = c[3];
-            const double m10r = c[4], m10i = c[5], m11r = c[6], m11i = c[7];
-            #pragma unroll
-            for (int m = 0; m < MIX_PER_THREAD / 2; ++m) {
-                int i0 = insert_zero_bit(tid + m * MIX_BLOCK, a);
-                int i1 = i0 | (1 << a);
-                double2 x = tile[i0];
-                double2 y = tile[i1];
-                if (b == MIX_FORM_REAL) {
+            if (b == MIX_FORM_REAL) {
+                const double m00r = c[0], m01r = c[2], m10r = c[4], m11r = c[6];
+                #pragma unroll
+                for (int m = 0; m < MIX_PER_THREAD / 2; ++m) {
+                    int i0 = insert_zero_bit(tid + m * MIX_BLOCK, a);
+                    int i1 = i0 | (1 << a);
+                    double2 x = tile[i0];
+                    double2 y = tile[i1];
                     tile[i0] = make_double2(m00r * x.x + m01r * y.x, m00r * x.y + m01r * y.y);
                     tile[i1] = make_double2(m10r * x.x + m11r * y.x, m10r * x.y + m11r * y.y);
-                } else if (b == MIX_FORM_RX) {
+                }
+            } else if (b == MIX_FORM_RX) {
+                const double m00r = c[0], m01i = c[3], m10i = c[5], m11r = c[6];
+                #pragma unroll
+                for (int m = 0; m < MIX_PER_THREAD / 2; ++m) {
+                    int i0 = insert_zero_bit(tid + m * MIX_BLOCK, a);
+                    int i1 = i0 | (1 << a);
+                    double2 x = tile[i0];
+                    double2 y = tile[i1];
                     tile[i0] = make_double2(m00r * x.x - m01i * y.y, m00r * x.y + m01i * y.x);
                     tile[i1] = make_double2(m11r * y.x - m10i * x.y, m11r * y.y + m10i * x.x);
-                } else {
-                    apply2x2(tile, i0, i1, m00r, m00i, m01r, m01i, m10r, m10i, m11r, m11i);
+                }
+            } else {
+                const double m00r = c[0], m00i = c[1], m01r = c[2], m01i = c[3];
+                const double m10r = c[4], m10i = c[5], m11r = c[6], m11i = c[7];
+                #pragma unroll
+                for (int m = 0; m < MIX_PER_THREAD / 2; ++m) {
+                    int i0 = insert_zero_bit(tid + m * MIX_BLOCK, a);
+                    int i1 = i0 | (1 << a);
+                    double2 x = tile[i0];
+                    double2 y = tile[i1];
+                    tile[i0] = make_double2(
+                        m00r * x.x - m00i * x.y + m01r * y.x - m01i * y.y,
+                        m00r * x.y + m00i * x.x + m01r * y.y + m01i * y.x);
+                    tile[i1] = make_double2(
+                        m10r * x.x - m10i * x.y + m11r * y.x - m11i * y.y,
+                        m10r * x.y + m10i * x.x + m11r * y.y + m11i * y.x);
                 }
             }
         } else if (kind == MIX_DIAG1) {
-            const double2 d0 = make_double2(c[0], c[1]);
             const double2 d1 = make_double2(c[2], c[3]);
-            #pragma unroll
-            for (int m = 0; m < MIX_PER_THREAD; ++m) {
-                int e = tid + m * MIX_BLOCK;
-                if ((e >> a) & 1) {
+            if (flag) {
+                #pragma unroll
+                for (int m = 0; m < MIX_PER_THREAD / 2; ++m) {
+                    int e = insert_zero_bit(tid + m * MIX_BLOCK, a) | (1 << a);
                     tile[e] = cmul(tile[e], d1);
-                } else if (!flag) {
-                    tile[e] = cmul(tile[e], d0);
+                }
+            } else {
+                const double2 d0 = make_double2(c[0], c[1]);
+                #pragma unroll
+                for (int m = 0; m < MIX_PER_THREAD; ++m) {
+                    int e = tid + m * MIX_BLOCK;
+                    double2 d = ((e >> a) & 1) ? d1 : d0;
+                    tile[e] = cmul(tile[e], d);
                 }
             }
         } else if (kind == MIX_ANTI1) {
@@ -1764,13 +1807,16 @@ extern "C" __global__ void apply_mixed_tile(double2 *state, MixedOps ops)
                     swap_entries(tile, x | (1 << a), x | (1 << b));
                 }
             }
-        } else {
+        } else if (kind == MIX_DIAG2) {
             const double2 d3 = make_double2(c[6], c[7]);
             if (flag) {
+                const int lo = a < b ? a : b;
+                const int hi = a < b ? b : a;
                 #pragma unroll
-                for (int m = 0; m < MIX_PER_THREAD; ++m) {
-                    int e = tid + m * MIX_BLOCK;
-                    if ((e >> a) & (e >> b) & 1) tile[e] = cmul(tile[e], d3);
+                for (int m = 0; m < MIX_PER_THREAD / 4; ++m) {
+                    int e = insert_zero_bit(insert_zero_bit(tid + m * MIX_BLOCK, lo), hi)
+                        | (1 << a) | (1 << b);
+                    tile[e] = cmul(tile[e], d3);
                 }
             } else {
                 const double2 d0 = make_double2(c[0], c[1]);
@@ -1784,12 +1830,51 @@ extern "C" __global__ void apply_mixed_tile(double2 *state, MixedOps ops)
                     tile[e] = cmul(tile[e], d);
                 }
             }
+        } else if (kind == MIX_DIAG_TABLE) {
+            const double2 *tbl = diag_tables + ((size_t)(w >> 12) << MIX_TILE_Q);
+            #pragma unroll
+            for (int m = 0; m < MIX_PER_THREAD; ++m) {
+                int e = tid + m * MIX_BLOCK;
+                tile[e] = cmul(tile[e], __ldg(&tbl[e]));
+            }
+        } else {
+            const int lo = a < b ? a : b;
+            const int hi = a < b ? b : a;
+            #pragma unroll 1
+            for (int m = 0; m < MIX_PER_THREAD / 4; ++m) {
+                int x = insert_zero_bit(insert_zero_bit(tid + m * MIX_BLOCK, lo), hi);
+                int idx[4] = { x, x | (1 << b), x | (1 << a), x | (1 << a) | (1 << b) };
+                double2 in[4];
+                double sum[4];
+                #pragma unroll
+                for (int col = 0; col < 4; ++col) {
+                    in[col] = tile[idx[col]];
+                    sum[col] = in[col].x + in[col].y;
+                }
+                #pragma unroll 1
+                for (int row = 0; row < 4; ++row) {
+                    double k1 = 0.0, k2 = 0.0, k3 = 0.0;
+                    #pragma unroll
+                    for (int col = 0; col < 4; ++col) {
+                        const double *e = c + 3 * (row * 4 + col);
+                        k1 = fma(e[0], sum[col], k1);
+                        k2 = fma(e[1], in[col].x, k2);
+                        k3 = fma(e[2], in[col].y, k3);
+                    }
+                    tile[idx[row]] = make_double2(k1 - k3, k1 + k2);
+                }
+            }
         }
     }
     if (!elementwise) __syncthreads();
 
     #pragma unroll
     for (int m = 0; m < MIX_PER_THREAD; ++m) {
-        state[high[m]] = tile[tid + m * MIX_BLOCK];
+        unsigned long long h = own;
+        #pragma unroll
+        for (int k = MIX_BLOCK_LOG; k < MIX_TILE_Q; ++k) {
+            h |= (unsigned long long)((m >> (k - MIX_BLOCK_LOG)) & 1) << ops.q[k];
+        }
+        state[h] = tile[tid + m * MIX_BLOCK];
     }
 }

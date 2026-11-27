@@ -4518,7 +4518,7 @@ fn mixed_tiles_preserve_separated_diagonal_runs() {
 }
 
 #[test]
-fn mixed_tiles_leave_dense_qv_pairs_on_their_own_kernel() {
+fn mixed_tiles_pack_dense_qv_pairs_and_match_cpu() {
     let Some(f) = Fixture::try_new() else { return };
     let n = 18;
     let depth = 6;
@@ -4546,8 +4546,13 @@ fn mixed_tiles_leave_dense_qv_pairs_on_their_own_kernel() {
         "{dense} dense pairs"
     );
     if let Some(census) = compare_lowered(&f, &circuit) {
-        assert_eq!(census.dense_2q, dense);
         assert!(census.tiles > 0);
+        assert!(
+            census.dense_2q < dense && census.passes * 3 <= dense,
+            "expected tiled dense 2q packing: passes={} dense_2q={} total_dense={dense}",
+            census.passes,
+            census.dense_2q,
+        );
     }
 }
 

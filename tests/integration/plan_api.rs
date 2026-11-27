@@ -1,5 +1,7 @@
 use prism_q::{
-    BackendKind, Circuit, Gate, Limits, PauliTerm, PlannedExactness, Query, RouteRule, simulate,
+    BackendKind, Circuit, Exactness, Gate, Limits, Parameters, PauliObservable, PauliTerm,
+    Placement, Plan, PlannedExactness, PrismError, Query, ResolvedBackend, RouteRule, RunMetadata,
+    SaveSpec, SpdTruncation, simulate,
 };
 
 fn circuits() -> Vec<Circuit> {
@@ -709,4 +711,1278 @@ fn a_guarded_wide_gate_lowers_on_every_backend() {
             assert_eq!(result.counts.get(&key), Some(&8), "{name} {kind:?}");
         }
     }
+}
+
+enum MatrixOutcome {
+    WithMetadata(RunMetadata),
+    WithoutMetadata,
+}
+
+fn all_cpu_kinds() -> Vec<BackendKind> {
+    vec![
+        BackendKind::Auto,
+        BackendKind::Statevector,
+        BackendKind::Stabilizer,
+        BackendKind::Sparse,
+        BackendKind::Mps { max_bond_dim: 8 },
+        BackendKind::ProductState,
+        BackendKind::TensorNetwork,
+        BackendKind::TensorNetworkBounded { tolerance: 1e-3 },
+        BackendKind::Factored,
+        BackendKind::StabilizerRank,
+        BackendKind::FactoredStabilizer,
+        BackendKind::DensityMatrix,
+        BackendKind::StochasticPauli { num_samples: 64 },
+        BackendKind::DeterministicPauli {
+            truncation: SpdTruncation::Threshold {
+                epsilon: 1e-3,
+                max_terms: 1024,
+            },
+        },
+        BackendKind::DeterministicPauli {
+            truncation: SpdTruncation::Budget { max_terms: 16 },
+        },
+        BackendKind::PauliPath {
+            epsilon: 1e-3,
+            max_terms: 1024,
+        },
+        BackendKind::PauliPath {
+            epsilon: 0.0,
+            max_terms: 0,
+        },
+    ]
+}
+
+fn matrix_circuits() -> Vec<(&'static str, Circuit)> {
+    let mut base = circuits();
+    let magic = base.pop().unwrap();
+    let bell = base.pop().unwrap();
+    let product = base.pop().unwrap();
+
+    let mut clifford_t = Circuit::new(3, 3);
+    clifford_t.add_gate(Gate::H, &[0]);
+    clifford_t.add_gate(Gate::Cx, &[0, 1]);
+    clifford_t.add_gate(Gate::T, &[0]);
+    clifford_t.add_gate(Gate::Cx, &[1, 2]);
+
+    let mut measured_bell = bell.clone();
+    measured_bell.measure_all();
+
+    let mut measured_clifford_t = clifford_t.clone();
+    measured_clifford_t.measure_all();
+
+    vec![
+        ("product", product),
+        ("bell", bell),
+        ("magic", magic),
+        ("clifford_t", clifford_t),
+        ("measured_bell", measured_bell),
+        ("measured_clifford_t", measured_clifford_t),
+    ]
+}
+
+fn assert_exactness_matches(
+    planned: PlannedExactness,
+    actual: Exactness,
+    shots: Option<usize>,
+    label: &str,
+) {
+    match planned {
+        PlannedExactness::Exact => assert_eq!(actual, Exactness::Exact, "{label}"),
+        PlannedExactness::Approximate {
+            bound_reported: true,
+        } => {
+            assert!(
+                matches!(
+                    actual,
+                    Exactness::Exact
+                        | Exactness::Approximate {
+                            fidelity_lower_bound: Some(_)
+                        }
+                ),
+                "{label}: planned {planned:?}, got {actual:?}"
+            );
+        }
+        PlannedExactness::Approximate {
+            bound_reported: false,
+        } => {
+            assert!(
+                matches!(
+                    actual,
+                    Exactness::Exact
+                        | Exactness::Approximate {
+                            fidelity_lower_bound: None
+                        }
+                ),
+                "{label}: planned {planned:?}, got {actual:?}"
+            );
+        }
+        PlannedExactness::Estimated { samples } => {
+            assert!(
+                matches!(
+                    actual,
+                    Exactness::Approximate {
+                        fidelity_lower_bound: None
+                    }
+                ),
+                "{label}: planned {planned:?}, got {actual:?}"
+            );
+            assert_eq!(shots, Some(samples), "{label}: estimated sample count");
+        }
+        _ => unreachable!("unexpected PlannedExactness variant: {planned:?}"),
+    }
+}
+
+fn assert_plan_matches_metadata(plan: &Plan, meta: &RunMetadata, query: Query<'_>, label: &str) {
+    if let Query::Shots(n) | Query::Counts(n) = query {
+        assert_eq!(meta.shots, Some(n), "{label}: shot count");
+    }
+
+    if plan.rule == meta.reason {
+        assert_eq!(plan.backend, meta.backend, "{label}");
+        assert_eq!(plan.placement, meta.placement, "{label}");
+        assert_eq!(plan.engine, meta.engine, "{label}");
+        assert_exactness_matches(plan.exactness, meta.exactness, meta.shots, label);
+    } else if plan.placement == Placement::Device
+        && meta.placement == Placement::Host
+        && meta.reason == RouteRule::DeviceInitializationFallback
+        && plan
+            .fallbacks
+            .iter()
+            .any(|f| f.rule == RouteRule::DeviceInitializationFallback)
+    {
+        assert_eq!(plan.backend, meta.backend, "{label}");
+        assert_eq!(plan.engine, meta.engine, "{label}");
+        assert_exactness_matches(plan.exactness, meta.exactness, meta.shots, label);
+    } else {
+        let fallback = plan
+            .fallbacks
+            .iter()
+            .find(|fb| fb.rule == meta.reason && fb.placement == meta.placement);
+        assert!(
+            fallback.is_some(),
+            "{label}: plan rule {:?} != meta reason {:?} (fallbacks: {:?})",
+            plan.rule,
+            meta.reason,
+            plan.fallbacks
+        );
+        let fallback = fallback.unwrap();
+        assert_eq!(fallback.backend, meta.backend, "{label}: fallback backend");
+        assert_exactness_matches(fallback.exactness, meta.exactness, meta.shots, label);
+    }
+}
+
+fn execute_query_for_matrix(
+    circuit: &Circuit,
+    kind: &BackendKind,
+    limits: Option<Limits>,
+    query: Query<'_>,
+) -> prism_q::Result<MatrixOutcome> {
+    let build = || {
+        let mut req = simulate(circuit).backend(kind.clone()).seed(42);
+        if let Some(lim) = limits {
+            req = req.limits(lim);
+        }
+        req
+    };
+    match query {
+        Query::Run => build()
+            .run()
+            .map(|r| MatrixOutcome::WithMetadata(r.metadata)),
+        Query::Shots(n) => build()
+            .shots(n)
+            .map(|r| MatrixOutcome::WithMetadata(r.metadata)),
+        Query::Counts(n) => build()
+            .sample_counts(n)
+            .map(|r| MatrixOutcome::WithMetadata(r.metadata)),
+        Query::Marginals => build()
+            .marginals()
+            .map(|r| MatrixOutcome::WithMetadata(r.metadata)),
+        Query::Expectation(obs) => build()
+            .expectation_values_reported(obs)
+            .map(|r| MatrixOutcome::WithMetadata(r.metadata)),
+        Query::Observable(obs) => build()
+            .observable_expectation(obs)
+            .map(|r| MatrixOutcome::WithMetadata(r.metadata)),
+        Query::StateVector => build()
+            .state_vector()
+            .map(|_| MatrixOutcome::WithoutMetadata),
+        Query::ReducedDensityMatrix(q) => build()
+            .reduced_density_matrix(q)
+            .map(|r| MatrixOutcome::WithMetadata(r.metadata)),
+        Query::Entropy(q) => build()
+            .entanglement_entropy(q)
+            .map(|r| MatrixOutcome::WithMetadata(r.metadata)),
+        Query::Gradient {
+            hamiltonian,
+            parameters,
+        } => build()
+            .expectation_gradient(hamiltonian, parameters)
+            .map(|_| MatrixOutcome::WithoutMetadata),
+        Query::GradientShift {
+            hamiltonian,
+            parameters,
+        } => build()
+            .expectation_gradient_shift(hamiltonian, parameters)
+            .map(|_| MatrixOutcome::WithoutMetadata),
+        _ => unreachable!("unexpected Query variant"),
+    }
+}
+
+fn assert_contract_for_query(
+    circuit: &Circuit,
+    kind: &BackendKind,
+    limits: Option<Limits>,
+    query: Query<'_>,
+    label: &str,
+) {
+    let mut req = simulate(circuit).backend(kind.clone()).seed(42);
+    if let Some(lim) = limits {
+        req = req.limits(lim);
+    }
+    let plan_res = req.plan(query);
+    let exec_res = execute_query_for_matrix(circuit, kind, limits, query);
+
+    match plan_res {
+        Err(plan_err) => {
+            let exec_err = exec_res.err().unwrap_or_else(|| {
+                panic!("{label}: plan returned Err({plan_err:?}) but execution succeeded")
+            });
+            assert_eq!(
+                std::mem::discriminant(&plan_err),
+                std::mem::discriminant(&exec_err),
+                "{label}: plan_err={plan_err:?}, exec_err={exec_err:?}"
+            );
+        }
+        Ok(plan) => match (plan.would_fail.as_ref(), exec_res) {
+            (Some(pe), Err(ae)) => {
+                assert_eq!(
+                    std::mem::discriminant(pe),
+                    std::mem::discriminant(&ae),
+                    "{label}: would_fail={pe:?}, exec_err={ae:?}"
+                );
+            }
+            (None, Ok(MatrixOutcome::WithMetadata(meta))) => {
+                assert_plan_matches_metadata(&plan, &meta, query, label);
+            }
+            (None, Ok(MatrixOutcome::WithoutMetadata)) => {}
+            (Some(pe), Ok(_)) => {
+                panic!("{label}: plan predicted failure ({pe:?}) but execution succeeded");
+            }
+            (None, Err(ae)) => {
+                panic!(
+                    "{label}: plan predicted success (backend={:?}, rule={:?}) but execution failed ({ae:?})",
+                    plan.backend, plan.rule
+                );
+            }
+        },
+    }
+}
+
+fn run_query_matrix_for_kind(
+    circuit_name: &str,
+    circuit: &Circuit,
+    kind: &BackendKind,
+    limits: Option<Limits>,
+    skip_or_pin: impl Fn(&str, &BackendKind, &Query<'_>) -> bool,
+) {
+    let obs = vec![vec![PauliTerm::z(0)], vec![PauliTerm::x(1)]];
+    let observable = PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)])]).unwrap();
+    let parameters = Parameters::all_rotations(circuit);
+    let rdm_qubits: &[usize] = if circuit.num_qubits >= 2 {
+        &[1, 0]
+    } else {
+        &[0]
+    };
+    let queries = [
+        ("Run", Query::Run),
+        ("Shots(8)", Query::Shots(8)),
+        ("Counts(8)", Query::Counts(8)),
+        ("Marginals", Query::Marginals),
+        ("Expectation", Query::Expectation(&obs)),
+        ("Observable", Query::Observable(&observable)),
+        ("StateVector", Query::StateVector),
+        (
+            "ReducedDensityMatrix",
+            Query::ReducedDensityMatrix(rdm_qubits),
+        ),
+        ("Entropy", Query::Entropy(&[0])),
+        (
+            "Gradient",
+            Query::Gradient {
+                hamiltonian: &observable,
+                parameters: &parameters,
+            },
+        ),
+        (
+            "GradientShift",
+            Query::GradientShift {
+                hamiltonian: &observable,
+                parameters: &parameters,
+            },
+        ),
+    ];
+
+    for (qname, query) in queries {
+        if skip_or_pin(circuit_name, kind, &query) {
+            continue;
+        }
+        let label = format!("{circuit_name} / {kind:?} / {qname}");
+        assert_contract_for_query(circuit, kind, limits, query, &label);
+    }
+}
+
+#[test]
+fn plan_matrix_covers_every_cpu_backend_and_query() {
+    let circuits = matrix_circuits();
+    let kinds = all_cpu_kinds();
+
+    for (cname, circuit) in &circuits {
+        for kind in &kinds {
+            run_query_matrix_for_kind(cname, circuit, kind, None, |name, k, query| {
+                // StabilizerRank rejects measured circuits only at execution time on Run and Marginals.
+                if matches!(k, BackendKind::StabilizerRank)
+                    && name == "measured_clifford_t"
+                    && matches!(query, Query::Run | Query::Marginals)
+                {
+                    let plan = simulate(circuit).backend(k.clone()).plan(*query).unwrap();
+                    assert!(plan.would_fail.is_none());
+                    let exec = execute_query_for_matrix(circuit, k, None, *query);
+                    assert!(matches!(exec, Err(PrismError::IncompatibleBackend { .. })));
+                    return true;
+                }
+                false
+            });
+        }
+    }
+}
+
+#[cfg(feature = "distributed")]
+#[derive(Debug)]
+struct MockRankComm {
+    size: usize,
+}
+
+#[cfg(feature = "distributed")]
+impl prism_q::RankComm for MockRankComm {
+    fn rank(&self) -> usize {
+        0
+    }
+
+    fn size(&self) -> usize {
+        self.size
+    }
+
+    fn allgather_c64(&self, local: &[num_complex::Complex64]) -> Vec<num_complex::Complex64> {
+        std::iter::repeat_n(local, self.size)
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    fn allgather_f64(&self, local: &[f64]) -> Vec<f64> {
+        std::iter::repeat_n(local, self.size)
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    fn allgatherv_u64(&self, local: &[u64], counts: &[usize]) -> Vec<u64> {
+        counts.iter().flat_map(|_| local.iter().copied()).collect()
+    }
+
+    fn allreduce_sum_f64(&self, value: f64) -> f64 {
+        value * self.size as f64
+    }
+
+    fn sendrecv_c64(
+        &self,
+        _partner: usize,
+        _send: &[num_complex::Complex64],
+        _recv: &mut [num_complex::Complex64],
+    ) {
+        unreachable!("mock rank comm is used only for early rejection checks")
+    }
+
+    fn barrier(&self) {}
+}
+
+#[cfg(feature = "distributed")]
+#[test]
+fn plan_matrix_distributed_serial_and_rank_pins() {
+    let serial_kind = BackendKind::StatevectorDistributed {
+        context: prism_q::DistributedContext::serial(),
+    };
+    for (cname, circuit) in &matrix_circuits() {
+        run_query_matrix_for_kind(cname, circuit, &serial_kind, None, |_name, k, query| {
+            // Plan omits Distributed from the ReducedDensityMatrix diagnostic arm while execution succeeds.
+            let is_unitary = circuit.instructions.iter().all(|inst| {
+                matches!(
+                    inst,
+                    prism_q::Instruction::Gate { .. } | prism_q::Instruction::Barrier { .. }
+                )
+            });
+            if matches!(query, Query::ReducedDensityMatrix(_)) && is_unitary {
+                let plan = simulate(circuit).backend(k.clone()).plan(*query).unwrap();
+                assert!(matches!(
+                    plan.would_fail,
+                    Some(PrismError::BackendUnsupported { .. })
+                ));
+                let exec = execute_query_for_matrix(circuit, k, None, *query);
+                assert!(exec.is_ok(), "{cname}: distributed RDM should succeed");
+                return true;
+            }
+            false
+        });
+    }
+
+    let bell = matrix_circuits()
+        .into_iter()
+        .find(|(name, _)| *name == "bell")
+        .unwrap()
+        .1;
+
+    // Non power of two rank count: plan leaves would_fail empty while prepare_shard rejects it.
+    let odd_ranks = BackendKind::StatevectorDistributed {
+        context: prism_q::DistributedContext::from_comm(std::sync::Arc::new(MockRankComm {
+            size: 3,
+        })),
+    };
+    let obs = vec![vec![PauliTerm::z(0)]];
+    let observable = PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)])]).unwrap();
+    let params = Parameters::all_rotations(&bell);
+    for query in [
+        Query::Run,
+        Query::Shots(4),
+        Query::Counts(4),
+        Query::Marginals,
+        Query::Expectation(&obs),
+        Query::Observable(&observable),
+        Query::StateVector,
+        Query::GradientShift {
+            hamiltonian: &observable,
+            parameters: &params,
+        },
+    ] {
+        let plan = simulate(&bell)
+            .backend(odd_ranks.clone())
+            .plan(query)
+            .unwrap();
+        assert!(plan.would_fail.is_none(), "3-rank {query:?}");
+        let exec = execute_query_for_matrix(&bell, &odd_ranks, None, query);
+        assert!(
+            matches!(exec, Err(PrismError::BackendUnsupported { .. })),
+            "3-rank {query:?} expected BackendUnsupported"
+        );
+    }
+
+    // Eight ranks below rank_bits + min_local_qubits: plan leaves would_fail empty while prepare_shard rejects.
+    let below_min_n = 3 + prism_q::distributed::min_local_qubits().saturating_sub(1);
+    let mut small_dist = Circuit::new(below_min_n, below_min_n);
+    small_dist.add_gate(Gate::H, &[0]);
+    small_dist.add_gate(Gate::Cx, &[0, 1]);
+    let eight_ranks = BackendKind::StatevectorDistributed {
+        context: prism_q::DistributedContext::from_comm(std::sync::Arc::new(MockRankComm {
+            size: 8,
+        })),
+    };
+    for query in [Query::Run, Query::Shots(4), Query::Counts(4)] {
+        let plan = simulate(&small_dist)
+            .backend(eight_ranks.clone())
+            .plan(query)
+            .unwrap();
+        assert!(plan.would_fail.is_none(), "8-rank {query:?}");
+        let exec = execute_query_for_matrix(&small_dist, &eight_ranks, None, query);
+        assert!(
+            matches!(exec, Err(PrismError::BackendUnsupported { .. })),
+            "8-rank {query:?} expected BackendUnsupported"
+        );
+    }
+
+    // Statevector limit per rank: plan ignores max_statevector_qubits on Distributed.
+    let capped = Limits::new().max_statevector_qubits(2);
+    let plan = simulate(&bell)
+        .backend(serial_kind.clone())
+        .limits(capped)
+        .plan(Query::Run)
+        .unwrap();
+    assert!(plan.would_fail.is_none());
+    let exec = execute_query_for_matrix(&bell, &serial_kind, Some(capped), Query::Run);
+    assert!(matches!(exec, Err(PrismError::ResourceLimit(_))));
+
+    let n_14 = 14;
+    let mut c14 = Circuit::new(n_14, 0);
+    c14.add_gate(Gate::H, &[0]);
+    c14.add_gate(Gate::Cx, &[0, 1]);
+    let two_ranks = BackendKind::StatevectorDistributed {
+        context: prism_q::DistributedContext::from_comm(std::sync::Arc::new(MockRankComm {
+            size: 2,
+        })),
+    };
+    let cap_10 = Limits::new().max_statevector_qubits(10);
+    let plan = simulate(&c14)
+        .backend(two_ranks.clone())
+        .limits(cap_10)
+        .plan(Query::Run)
+        .unwrap();
+    assert!(plan.would_fail.is_none());
+    let exec = execute_query_for_matrix(&c14, &two_ranks, Some(cap_10), Query::Run);
+    assert!(matches!(exec, Err(PrismError::ResourceLimit(_))));
+}
+
+#[cfg(feature = "gpu")]
+fn acquire_gpu_context_or_skip() -> Option<std::sync::Arc<prism_q::gpu::GpuContext>> {
+    match prism_q::gpu::GpuContext::new(0) {
+        Ok(context) => Some(context),
+        Err(error) => {
+            assert!(
+                std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
+                "GPU required: {error}"
+            );
+            eprintln!("SKIP: no usable GPU ({error})");
+            None
+        }
+    }
+}
+
+#[cfg(feature = "gpu")]
+#[test]
+fn device_plan_matrix_matches_execution() {
+    let Some(context) = acquire_gpu_context_or_skip() else {
+        return;
+    };
+    let gpu_kinds = [
+        BackendKind::AutoGpu {
+            context: context.clone(),
+        },
+        BackendKind::StatevectorGpu {
+            context: context.clone(),
+        },
+        BackendKind::DensityMatrixGpu {
+            context: context.clone(),
+        },
+        BackendKind::StabilizerGpu {
+            context: context.clone(),
+        },
+    ];
+
+    for (cname, circuit) in &matrix_circuits() {
+        for kind in &gpu_kinds {
+            run_query_matrix_for_kind(cname, circuit, kind, None, |_name, _k, _query| false);
+        }
+    }
+
+    let n = prism_q::gpu::min_qubits().max(3);
+    let mut device_magic = Circuit::new(n, n);
+    device_magic.add_gate(Gate::H, &[0]);
+    device_magic.add_gate(Gate::Cx, &[0, 1]);
+    device_magic.add_gate(Gate::Ry(0.4), &[1]);
+    for q in 2..n {
+        device_magic.add_gate(Gate::Cx, &[q - 1, q]);
+    }
+    let mut device_measured = device_magic.clone();
+    device_measured.measure_all();
+
+    for (cname, circuit) in [
+        ("device_magic", &device_magic),
+        ("device_measured", &device_measured),
+    ] {
+        for kind in [
+            BackendKind::AutoGpu {
+                context: context.clone(),
+            },
+            BackendKind::StatevectorGpu {
+                context: context.clone(),
+            },
+            BackendKind::StabilizerGpu {
+                context: context.clone(),
+            },
+        ] {
+            run_query_matrix_for_kind(cname, circuit, &kind, None, |_name, _k, _query| false);
+        }
+    }
+
+    // Device probability cap check is skipped when plan.placement is Device.
+    let prob_cap = Limits::new().max_probability_qubits(2);
+    for kind in [
+        BackendKind::StatevectorGpu {
+            context: context.clone(),
+        },
+        BackendKind::AutoGpu {
+            context: context.clone(),
+        },
+    ] {
+        let plan = simulate(&device_magic)
+            .backend(kind.clone())
+            .limits(prob_cap)
+            .plan(Query::Run)
+            .unwrap();
+        assert_eq!(plan.placement, Placement::Device);
+        assert!(plan.would_fail.is_none());
+        let exec = simulate(&device_magic)
+            .backend(kind)
+            .limits(prob_cap)
+            .seed(42)
+            .run();
+        assert!(matches!(exec, Err(PrismError::ResourceLimit(_))));
+    }
+
+    // Device RDM and Entropy readback export caps are omitted in plan().
+    let rdm_cap = Limits::new().max_export_qubits(2);
+    let sv_gpu = BackendKind::StatevectorGpu {
+        context: context.clone(),
+    };
+    let plan = simulate(&device_magic)
+        .backend(sv_gpu.clone())
+        .limits(rdm_cap)
+        .plan(Query::ReducedDensityMatrix(&[0]))
+        .unwrap();
+    assert!(plan.would_fail.is_none());
+    let exec = simulate(&device_magic)
+        .backend(sv_gpu.clone())
+        .limits(rdm_cap)
+        .seed(42)
+        .reduced_density_matrix(&[0]);
+    assert!(matches!(exec, Err(PrismError::ResourceLimit(_))));
+
+    let entropy_cap = Limits::new().max_export_qubits(n);
+    let plan = simulate(&device_magic)
+        .backend(sv_gpu.clone())
+        .limits(entropy_cap)
+        .plan(Query::Entropy(&[0]))
+        .unwrap();
+    assert!(plan.would_fail.is_none());
+    let exec = simulate(&device_magic)
+        .backend(sv_gpu)
+        .limits(entropy_cap)
+        .seed(42)
+        .entanglement_entropy(&[0]);
+    assert!(matches!(exec, Err(PrismError::ResourceLimit(_))));
+
+    let small_3q = matrix_circuits().into_iter().next().unwrap().1;
+    let dm_gpu = BackendKind::DensityMatrixGpu { context };
+    let dm_cap = Limits::new().max_export_qubits(4);
+    let plan = simulate(&small_3q)
+        .backend(dm_gpu.clone())
+        .limits(dm_cap)
+        .plan(Query::ReducedDensityMatrix(&[0]))
+        .unwrap();
+    assert_eq!(plan.placement, Placement::Device);
+    assert!(plan.would_fail.is_none());
+    let exec = simulate(&small_3q)
+        .backend(dm_gpu.clone())
+        .limits(dm_cap)
+        .seed(42)
+        .reduced_density_matrix(&[0]);
+    assert!(matches!(exec, Err(PrismError::ResourceLimit(_))));
+
+    // DensityMatrixGpu shares the qubit measured twice mixture settle mismatch with CPU DensityMatrix.
+    let mut twice_meas = Circuit::new(1, 2);
+    twice_meas.add_gate(Gate::H, &[0]);
+    twice_meas.add_measure(0, 0);
+    twice_meas.add_measure(0, 1);
+    let twice_noise = prism_q::NoiseBuilder::new()
+        .before_measurements(prism_q::NoiseChannel::Depolarizing { p: 0.01 })
+        .build(&twice_meas)
+        .unwrap();
+    let dm_plan = simulate(&twice_meas)
+        .backend(dm_gpu.clone())
+        .noise(&twice_noise)
+        .plan(Query::Run)
+        .unwrap();
+    assert!(dm_plan.would_fail.is_none());
+    let dm_exec = simulate(&twice_meas)
+        .backend(dm_gpu)
+        .noise(&twice_noise)
+        .seed(42)
+        .run();
+    assert!(matches!(
+        dm_exec,
+        Err(PrismError::IncompatibleBackend { .. })
+    ));
+}
+
+#[cfg(feature = "gpu")]
+#[test]
+fn device_plan_stabilizer_gpu_1000q_ghz_matches_execution() {
+    let Some(context) = acquire_gpu_context_or_skip() else {
+        return;
+    };
+    let n = prism_q::gpu::stabilizer_min_qubits();
+    let mut ghz_unitary = Circuit::new(n, n);
+    ghz_unitary.add_gate(Gate::H, &[0]);
+    for q in 0..n - 1 {
+        ghz_unitary.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    let mut ghz_measured = ghz_unitary.clone();
+    ghz_measured.measure_all();
+
+    let kind = BackendKind::StabilizerGpu { context };
+    for (cname, circuit) in [
+        ("ghz_unitary", &ghz_unitary),
+        ("ghz_measured", &ghz_measured),
+    ] {
+        let run_plan = simulate(circuit)
+            .backend(kind.clone())
+            .plan(Query::Run)
+            .unwrap();
+        assert_eq!(run_plan.placement, Placement::Device, "{cname}");
+        assert_eq!(run_plan.rule, RouteRule::ExplicitBackend, "{cname}");
+        let run_outcome = simulate(circuit)
+            .backend(kind.clone())
+            .seed(42)
+            .run()
+            .unwrap();
+        assert_eq!(run_outcome.metadata.placement, Placement::Device, "{cname}");
+        assert_eq!(
+            run_outcome.metadata.reason,
+            RouteRule::ExplicitBackend,
+            "{cname}"
+        );
+        run_query_matrix_for_kind(cname, circuit, &kind, None, |_name, _k, _query| false);
+    }
+
+    let below_min = prism_q::gpu::stabilizer_min_qubits() - 1;
+    let mut ghz_below = Circuit::new(below_min, below_min);
+    ghz_below.add_gate(Gate::H, &[0]);
+    for q in 0..below_min - 1 {
+        ghz_below.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    ghz_below.measure_all();
+    let below_plan = simulate(&ghz_below)
+        .backend(kind.clone())
+        .plan(Query::Run)
+        .unwrap();
+    assert_eq!(below_plan.placement, Placement::Host);
+    assert_eq!(below_plan.rule, RouteRule::ExplicitBackend);
+    let below_outcome = simulate(&ghz_below)
+        .backend(kind.clone())
+        .seed(42)
+        .run()
+        .unwrap();
+    assert_eq!(below_outcome.metadata.placement, Placement::Host);
+    assert_eq!(below_outcome.metadata.reason, RouteRule::ExplicitBackend);
+
+    let shots_plan = simulate(&ghz_measured)
+        .backend(kind.clone())
+        .plan(Query::Shots(8))
+        .unwrap();
+    assert_eq!(shots_plan.placement, Placement::Host);
+    let shots_actual = simulate(&ghz_measured)
+        .backend(kind)
+        .seed(42)
+        .shots(8)
+        .unwrap();
+    assert_eq!(shots_actual.metadata.placement, Placement::Host);
+    assert_eq!(shots_actual.metadata.backend, shots_plan.backend);
+}
+
+#[test]
+fn plan_pins_stabilizer_rank_run_and_cap_mismatches() {
+    let mut c26 = Circuit::new(26, 0);
+    c26.add_gate(Gate::H, &[0]);
+    c26.add_gate(Gate::T, &[0]);
+    for q in 1..26 {
+        c26.add_gate(Gate::Cx, &[q - 1, q]);
+    }
+
+    let mut c_rot = Circuit::new(4, 0);
+    c_rot.add_gate(Gate::H, &[0]);
+    c_rot.add_gate(Gate::T, &[0]);
+    c_rot.add_gate(Gate::Ry(0.4), &[1]);
+
+    let mut c_meas = Circuit::new(4, 1);
+    c_meas.add_gate(Gate::H, &[0]);
+    c_meas.add_gate(Gate::T, &[0]);
+    c_meas.add_measure(0, 0);
+
+    for (name, circuit) in [
+        ("26q", &c26),
+        ("t_plus_ry", &c_rot),
+        ("t_plus_meas", &c_meas),
+    ] {
+        for query in [Query::Run, Query::Marginals] {
+            let plan = simulate(circuit)
+                .backend(BackendKind::StabilizerRank)
+                .plan(query)
+                .unwrap();
+            assert!(plan.would_fail.is_none(), "{name} {query:?}");
+            let exec = execute_query_for_matrix(circuit, &BackendKind::StabilizerRank, None, query);
+            assert!(exec.is_err(), "{name} {query:?} expected error");
+        }
+    }
+
+    let shots_plan = simulate(&c_rot)
+        .backend(BackendKind::StabilizerRank)
+        .plan(Query::Shots(4))
+        .unwrap();
+    assert!(shots_plan.would_fail.is_none());
+    assert!(
+        simulate(&c_rot)
+            .backend(BackendKind::StabilizerRank)
+            .seed(42)
+            .shots(4)
+            .is_err()
+    );
+
+    let meas_shots_plan = simulate(&c_meas)
+        .backend(BackendKind::StabilizerRank)
+        .plan(Query::Shots(4))
+        .unwrap();
+    assert_eq!(meas_shots_plan.rule, RouteRule::CliffordRegister);
+    let meas_shots = simulate(&c_meas)
+        .backend(BackendKind::StabilizerRank)
+        .seed(42)
+        .shots(4)
+        .unwrap();
+    assert_eq!(meas_shots.metadata.reason, RouteRule::CliffordRegister);
+
+    // StabilizerRank skips probability width checks and emits 2^n probabilities past max_probability_qubits.
+    let mut c14 = Circuit::new(14, 0);
+    c14.add_gate(Gate::H, &[0]);
+    c14.add_gate(Gate::T, &[0]);
+    for q in 1..14 {
+        c14.add_gate(Gate::Cx, &[q - 1, q]);
+    }
+    let prob_cap = Limits::new().max_probability_qubits(2);
+    let plan = simulate(&c14)
+        .backend(BackendKind::StabilizerRank)
+        .limits(prob_cap)
+        .plan(Query::Run)
+        .unwrap();
+    assert!(plan.would_fail.is_none());
+    let run = simulate(&c14)
+        .backend(BackendKind::StabilizerRank)
+        .limits(prob_cap)
+        .seed(42)
+        .run()
+        .unwrap();
+    assert_eq!(run.probabilities.unwrap().len(), 1 << 14);
+}
+
+#[test]
+fn plan_pins_noisy_mixture_settle_mismatch() {
+    let mut circuit = Circuit::new(1, 2);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    circuit.add_measure(0, 1);
+    let noise = prism_q::NoiseBuilder::new()
+        .before_measurements(prism_q::NoiseChannel::Depolarizing { p: 0.01 })
+        .build(&circuit)
+        .unwrap();
+
+    for query in [
+        Query::Run,
+        Query::Marginals,
+        Query::Shots(10),
+        Query::Counts(10),
+    ] {
+        let req = || {
+            simulate(&circuit)
+                .backend(BackendKind::DensityMatrix)
+                .noise(&noise)
+                .seed(42)
+        };
+        let plan = req().plan(query).unwrap();
+        assert!(plan.would_fail.is_none(), "{query:?}");
+        let exec = match query {
+            Query::Run => req().run().map(|_| ()),
+            Query::Marginals => req().marginals().map(|_| ()),
+            Query::Shots(n) => req().shots(n).map(|_| ()),
+            Query::Counts(n) => req().sample_counts(n).map(|_| ()),
+            _ => unreachable!(),
+        };
+        assert!(
+            matches!(exec, Err(PrismError::IncompatibleBackend { .. })),
+            "{query:?} expected IncompatibleBackend from settle_measured_qubits"
+        );
+    }
+}
+
+#[test]
+fn plan_pins_noisy_shift_gradient_readout_mismatch() {
+    let mut circuit = Circuit::new(1, 1);
+    circuit.add_gate(Gate::Rx(0.3), &[0]);
+    let mut noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    noise.with_readout_error(0.1, 0.1);
+    let parameters = Parameters::all_rotations(&circuit);
+    let hamiltonian = PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)])]).unwrap();
+
+    for (kind, expect_unguarded_ok) in [
+        (BackendKind::DensityMatrix, true),
+        (
+            BackendKind::PauliPath {
+                epsilon: 0.0,
+                max_terms: 0,
+            },
+            false,
+        ),
+    ] {
+        let req = || {
+            simulate(&circuit)
+                .backend(kind.clone())
+                .noise(&noise)
+                .seed(42)
+        };
+        assert!(matches!(
+            req().plan(Query::GradientShift {
+                hamiltonian: &hamiltonian,
+                parameters: &parameters,
+            }),
+            Err(PrismError::InvalidParameter { .. })
+        ));
+        assert!(matches!(
+            req()
+                .require_exact()
+                .expectation_gradient_shift(&hamiltonian, &parameters),
+            Err(PrismError::InvalidParameter { .. })
+        ));
+        let unguarded = req().expectation_gradient_shift(&hamiltonian, &parameters);
+        if expect_unguarded_ok {
+            assert!(
+                unguarded.is_ok(),
+                "{kind:?}: unguarded noisy parameter shift bypasses readout rejection"
+            );
+        } else {
+            assert!(
+                matches!(unguarded, Err(PrismError::IncompatibleBackend { .. })),
+                "{kind:?}: unguarded noisy parameter shift diverges from InvalidParameter ({unguarded:?})"
+            );
+        }
+    }
+}
+
+#[test]
+fn plan_pins_run_batch_shared_rule_mismatch() {
+    let items = matrix_circuits();
+    let product = &items[0].1;
+    let bell = &items[1].1;
+    let magic = &items[2].1;
+
+    for (name, circuit, kind, expected_rule) in [
+        (
+            "product",
+            product,
+            BackendKind::Auto,
+            RouteRule::NoEntanglingGates,
+        ),
+        ("bell", bell, BackendKind::Auto, RouteRule::CliffordOnly),
+        (
+            "magic",
+            magic,
+            BackendKind::Statevector,
+            RouteRule::ExplicitBackend,
+        ),
+    ] {
+        let plan = simulate(circuit)
+            .backend(kind.clone())
+            .plan(Query::Run)
+            .unwrap();
+        let solo = simulate(circuit)
+            .backend(kind.clone())
+            .seed(42)
+            .run()
+            .unwrap();
+        assert_eq!(plan.rule, expected_rule, "{name}");
+        assert_eq!(solo.metadata.reason, expected_rule, "{name}");
+
+        let batch = prism_q::sim::run_batch(&[circuit.clone(), circuit.clone()], kind, 42).unwrap();
+        assert_eq!(batch[0].metadata.reason, RouteRule::Default, "{name}");
+        assert_ne!(batch[0].metadata.reason, solo.metadata.reason, "{name}");
+    }
+}
+
+#[test]
+fn plan_pins_additional_matrix_mismatches() {
+    // Host Statevector omits export cap check in plan(Query::Entropy).
+    let bell = &matrix_circuits()[1].1;
+    let ent_cap = Limits::new().max_export_qubits(bell.num_qubits);
+    let plan = simulate(bell)
+        .backend(BackendKind::Statevector)
+        .limits(ent_cap)
+        .plan(Query::Entropy(&[0]))
+        .unwrap();
+    assert!(plan.would_fail.is_none());
+    let exec = simulate(bell)
+        .backend(BackendKind::Statevector)
+        .limits(ent_cap)
+        .seed(42)
+        .entanglement_entropy(&[0]);
+    assert!(matches!(exec, Err(PrismError::ResourceLimit(_))));
+
+    // Noisy Reset circuit on DensityMatrix GradientShift: plan allows reset channels while shift_gradient requires unitarity.
+    let mut reset_circuit = Circuit::new(2, 0);
+    reset_circuit.add_gate(Gate::H, &[0]);
+    reset_circuit.add_gate(Gate::Cx, &[0, 1]);
+    reset_circuit.add_gate(Gate::Ry(0.3), &[0]);
+    reset_circuit.add_reset(1);
+    let reset_noise = prism_q::NoiseModel::uniform_depolarizing(&reset_circuit, 0.01);
+    let reset_params = Parameters::all_rotations(&reset_circuit);
+    let hamiltonian = PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)])]).unwrap();
+    let plan = simulate(&reset_circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&reset_noise)
+        .plan(Query::GradientShift {
+            hamiltonian: &hamiltonian,
+            parameters: &reset_params,
+        })
+        .unwrap();
+    assert!(plan.would_fail.is_none());
+    let exec = simulate(&reset_circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&reset_noise)
+        .seed(42)
+        .expectation_gradient_shift(&hamiltonian, &reset_params);
+    assert!(matches!(exec, Err(PrismError::IncompatibleBackend { .. })));
+
+    // Pauli marginal and PauliPath expectation plans skip gate support and unmapped channel validation.
+    let mut qft_circuit = Circuit::new(2, 0);
+    qft_circuit.add_gate(
+        Gate::QftBlock {
+            start: 0,
+            num: 2,
+            inverse: false,
+            swaps: true,
+            big_endian: false,
+        },
+        &[0, 1],
+    );
+
+    for kind in [
+        BackendKind::StochasticPauli { num_samples: 16 },
+        BackendKind::DeterministicPauli {
+            truncation: SpdTruncation::Threshold {
+                epsilon: 0.0,
+                max_terms: 0,
+            },
+        },
+    ] {
+        let plan = simulate(&qft_circuit)
+            .backend(kind.clone())
+            .plan(Query::Marginals)
+            .unwrap();
+        assert!(plan.would_fail.is_none(), "{kind:?}");
+        let exec = simulate(&qft_circuit).backend(kind).seed(42).marginals();
+        assert!(matches!(exec, Err(PrismError::BackendUnsupported { .. })));
+    }
+
+    let pauli_path = BackendKind::PauliPath {
+        epsilon: 0.0,
+        max_terms: 0,
+    };
+    let obs = vec![vec![PauliTerm::z(0)]];
+    let qft_plan = simulate(&qft_circuit)
+        .backend(pauli_path.clone())
+        .plan(Query::Expectation(&obs))
+        .unwrap();
+    assert!(qft_plan.would_fail.is_none());
+    assert!(matches!(
+        simulate(&qft_circuit)
+            .backend(pauli_path.clone())
+            .seed(42)
+            .expectation_values_reported(&obs),
+        Err(PrismError::BackendUnsupported { .. })
+    ));
+
+    let mut leak_circuit = Circuit::new(1, 0);
+    leak_circuit.add_gate(Gate::H, &[0]);
+    let leak_noise = prism_q::NoiseBuilder::new()
+        .after_gates(
+            prism_q::GateFilter::all(),
+            prism_q::NoiseChannel::Leakage { p: 0.05 },
+        )
+        .build(&leak_circuit)
+        .unwrap();
+    let leak_plan = simulate(&leak_circuit)
+        .backend(pauli_path.clone())
+        .noise(&leak_noise)
+        .plan(Query::Observable(&hamiltonian))
+        .unwrap();
+    assert!(leak_plan.would_fail.is_none());
+    assert!(matches!(
+        simulate(&leak_circuit)
+            .backend(pauli_path.clone())
+            .noise(&leak_noise)
+            .seed(42)
+            .observable_expectation(&hamiltonian),
+        Err(PrismError::BackendUnsupported { .. })
+    ));
+
+    // PauliPath Shots/Counts with mid-circuit measurements predicts IncompatibleBackend while execution panics.
+    let mut mid_meas = Circuit::new(1, 2);
+    mid_meas.add_gate(Gate::H, &[0]);
+    mid_meas.add_measure(0, 0);
+    mid_meas.add_gate(Gate::H, &[0]);
+    mid_meas.add_measure(0, 1);
+    for query in [Query::Shots(4), Query::Counts(4)] {
+        let plan = simulate(&mid_meas)
+            .backend(pauli_path.clone())
+            .plan(query)
+            .unwrap();
+        assert!(matches!(
+            plan.would_fail,
+            Some(PrismError::IncompatibleBackend { .. })
+        ));
+    }
+    let shots_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = simulate(&mid_meas)
+            .backend(pauli_path.clone())
+            .seed(42)
+            .shots(4);
+    }));
+    assert!(shots_panic.is_err());
+    let counts_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = simulate(&mid_meas)
+            .backend(pauli_path)
+            .seed(42)
+            .sample_counts(4);
+    }));
+    assert!(counts_panic.is_err());
+}
+
+#[test]
+fn plan_auto_marginals_spd_budget_fallback_matches_execution() {
+    let n = 16;
+    let mut circuit = Circuit::new(n, 0);
+    for layer in 0..8 {
+        for q in 0..n {
+            circuit.add_gate(Gate::H, &[q]);
+            circuit.add_gate(Gate::T, &[q]);
+        }
+        let start = layer % 2;
+        for q in (start..n - 1).step_by(2) {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    let limits = Limits::new().max_statevector_qubits(20);
+    assert_contract_for_query(
+        &circuit,
+        &BackendKind::Auto,
+        Some(limits),
+        Query::Marginals,
+        "auto_marginals_spd_budget_fallback",
+    );
+
+    let plan = simulate(&circuit)
+        .backend(BackendKind::Auto)
+        .limits(limits)
+        .plan(Query::Marginals)
+        .unwrap();
+    assert_eq!(plan.backend, ResolvedBackend::DeterministicPauli);
+    assert_eq!(plan.rule, RouteRule::SpdExact);
+    assert!(plan.fallbacks.iter().any(|fb| {
+        fb.rule == RouteRule::SpdBudgetFallback && fb.backend == ResolvedBackend::Statevector
+    }));
+
+    let exec = simulate(&circuit)
+        .backend(BackendKind::Auto)
+        .limits(limits)
+        .seed(42)
+        .marginals()
+        .unwrap();
+    assert_eq!(exec.metadata.backend, ResolvedBackend::Statevector);
+    assert_eq!(exec.metadata.reason, RouteRule::SpdBudgetFallback);
+}
+
+#[test]
+fn plan_pins_boundary_mismatches() {
+    let obs = vec![vec![PauliTerm::z(0)]];
+    let hamiltonian = PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)])]).unwrap();
+
+    let zero_budget = BackendKind::DeterministicPauli {
+        truncation: SpdTruncation::Budget { max_terms: 0 },
+    };
+    for (cname, circuit) in matrix_circuits()
+        .into_iter()
+        .filter(|(name, _)| matches!(*name, "bell" | "magic" | "clifford_t"))
+    {
+        let params = Parameters::all_rotations(&circuit);
+        for query in [
+            Query::Marginals,
+            Query::Expectation(&obs),
+            Query::Observable(&hamiltonian),
+            Query::GradientShift {
+                hamiltonian: &hamiltonian,
+                parameters: &params,
+            },
+        ] {
+            let plan = simulate(&circuit)
+                .backend(zero_budget.clone())
+                .plan(query)
+                .unwrap();
+            assert!(plan.would_fail.is_none(), "{cname} {query:?}");
+            let exec = execute_query_for_matrix(&circuit, &zero_budget, None, query);
+            assert!(
+                matches!(exec, Err(PrismError::InvalidParameter { .. })),
+                "{cname} {query:?}: expected InvalidParameter"
+            );
+        }
+    }
+
+    let mps_zero = BackendKind::Mps { max_bond_dim: 0 };
+    for (cname, circuit) in matrix_circuits()
+        .into_iter()
+        .filter(|(name, _)| matches!(*name, "bell" | "magic" | "clifford_t"))
+    {
+        for query in [Query::Shots(0), Query::Counts(0)] {
+            let plan = simulate(&circuit)
+                .backend(mps_zero.clone())
+                .plan(query)
+                .unwrap();
+            assert!(plan.would_fail.is_none(), "{cname} {query:?}");
+            let exec = execute_query_for_matrix(&circuit, &mps_zero, None, query);
+            assert!(
+                matches!(exec, Err(PrismError::InvalidParameter { .. })),
+                "{cname} {query:?}: expected InvalidParameter"
+            );
+        }
+    }
+
+    let mut mps_save_dm = Circuit::new(2, 0);
+    mps_save_dm.add_gate(Gate::H, &[0]);
+    mps_save_dm.add_gate(Gate::Cx, &[0, 1]);
+    mps_save_dm.add_save(SaveSpec::DensityMatrix, "rho");
+    let mps_save_plan = simulate(&mps_save_dm)
+        .backend(mps_zero.clone())
+        .plan(Query::Run)
+        .unwrap();
+    assert!(mps_save_plan.would_fail.is_none());
+    let mps_save_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = simulate(&mps_save_dm).backend(mps_zero).seed(42).run();
+    }));
+    assert!(mps_save_panic.is_err());
+
+    let empty_0q = Circuit::new(0, 0);
+    for kind in [
+        BackendKind::TensorNetwork,
+        BackendKind::TensorNetworkBounded { tolerance: 1e-3 },
+    ] {
+        for query in [Query::Run, Query::StateVector] {
+            let plan = simulate(&empty_0q)
+                .backend(kind.clone())
+                .plan(query)
+                .unwrap();
+            assert!(plan.would_fail.is_none(), "{kind:?} {query:?}");
+            let panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = execute_query_for_matrix(&empty_0q, &kind, None, query);
+            }));
+            assert!(panic_res.is_err(), "{kind:?} {query:?} should panic");
+        }
+    }
+
+    let mut tn_save_probs = Circuit::new(2, 0);
+    tn_save_probs.add_gate(Gate::H, &[0]);
+    tn_save_probs.add_save(SaveSpec::Probabilities, "probs");
+    let tn_zero_tol = BackendKind::TensorNetworkBounded { tolerance: 0.0 };
+    let plan_err = simulate(&tn_save_probs)
+        .backend(tn_zero_tol.clone())
+        .plan(Query::Marginals)
+        .unwrap_err();
+    assert!(matches!(plan_err, PrismError::InvalidParameter { .. }));
+    let exec_err = simulate(&tn_save_probs)
+        .backend(tn_zero_tol)
+        .seed(42)
+        .marginals()
+        .unwrap_err();
+    assert!(matches!(exec_err, PrismError::IncompatibleBackend { .. }));
 }

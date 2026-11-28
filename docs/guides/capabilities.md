@@ -74,10 +74,10 @@ becomes `Gate::Unitary`, and the table covers that form alone.
 | Backend | Dense `Gate::Unitary` |
 | --- | --- |
 | Statevector (CPU) | Native, one gather-scatter pass over the state |
-| Statevector (CUDA) | Declines, no device kernel |
+| Statevector (CUDA) | Native, `apply_unitary_nq` kernel over the device buffer |
 | Factored | Native, on the merged block holding the targets |
 | Density Matrix (CPU) | Native, `U rho U^dagger` on the doubled register |
-| Density Matrix (CUDA) | Declines, no device kernel |
+| Density Matrix (CUDA) | Native, `U rho U^dagger` via `apply_unitary_nq` on the doubled device register |
 | MPS | Native, through the same swap network a multi-controlled gate uses |
 | Tensor Network | Native, as one `k`-leg tensor |
 | Sparse | Declines, the gate is dense by construction |

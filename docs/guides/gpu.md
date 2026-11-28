@@ -209,5 +209,7 @@ The golden equality tests do not cover three limits on what a seed guarantees.
   whose diagonal test depends on the branch weight, picks its branch on the host from a
   reduced density matrix read back from the device (`rdm_qubit`). Damping, thermal
   relaxation and the other `Custom` channels pick the branch on the device.
-- The device statevector declines two-qubit Kraus channels, so `Auto` with a device
-  keeps such a model on the host statevector.
+- Two-qubit Kraus channels compute the pair reduced density matrix on the device
+  (`rdm_2q`, 128-byte readback) and apply the chosen branch on the device.
+- `PRISM_PTX_CACHE_DIR` overrides the disk PTX and cubin cache location; setting it
+  to an empty string disables disk caching.

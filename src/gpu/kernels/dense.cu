@@ -28,6 +28,7 @@ struct QubitList { int q[PARAM_QUBITS]; };
 struct DiagList { double d[4 * PARAM_QUBITS]; int t[PARAM_QUBITS]; };
 struct TileGates { double v[8 * TILE_Q]; unsigned long long qubits; unsigned long long targets; };
 struct MixedOps { double c[MIX_MAX_COEFS]; unsigned int op[MIX_MAX_OPS]; unsigned char q[16]; int num_ops; };
+struct UnitaryMeta { unsigned long long offsets[16]; int sorted[4]; int k; int _pad; };
 
 // ============================================================================
 // Shared device helpers
@@ -260,6 +261,38 @@ extern "C" __global__ void apply_mcu_phase(
     unsigned long long idx = insert_zero_bits(k, sorted.q, num_sorted);
     unsigned long long i = idx | all_mask;
     apply_phase(state, i, pr, pi);
+}
+
+// Dense k-qubit unitary (1 <= k <= 4, dim <= 16). Each thread handles one
+// base index across the remaining n - k qubits; offsets[0..dim] carry the
+// target bit pattern with targets[0] as the high bit of the matrix index.
+extern "C" __global__ void apply_unitary_nq(
+    double2 *state, unsigned long long iter_count,
+    UnitaryMeta meta, const double2 *mat)
+{
+    unsigned long long tid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= iter_count) return;
+    int k = meta.k;
+    int dim = 1 << k;
+    unsigned long long base = insert_zero_bits(tid, meta.sorted, k);
+    double2 in[16];
+    for (int c = 0; c < dim; ++c) {
+        in[c] = state[base | meta.offsets[c]];
+    }
+    for (int r = 0; r < dim; ++r) {
+        double ar = 0.0;
+        double ai = 0.0;
+        const double2 *row = mat + r * dim;
+        for (int c = 0; c < dim; ++c) {
+            double2 m = row[c];
+            double2 a = in[c];
+            ar = fma(m.x, a.x, ar);
+            ar = fma(-m.y, a.y, ar);
+            ai = fma(m.x, a.y, ai);
+            ai = fma(m.y, a.x, ai);
+        }
+        state[base | meta.offsets[r]] = make_double2(ar, ai);
+    }
 }
 
 // ============================================================================
@@ -645,6 +678,116 @@ extern "C" __global__ void rdm_qubit_finalize(
         result[1] = sdata[blockDim.x];
         result[2] = sdata[2 * blockDim.x];
         result[3] = sdata[3 * blockDim.x];
+    }
+}
+
+// Two-qubit reduced density matrix over (q0, q1), basis t = 2*bit(q0) + bit(q1).
+// Packs 16 real accumulators per block: the 4 diagonal norms followed by the 6
+// lower-triangle entries (1,0), (2,0), (2,1), (3,0), (3,1), (3,2) as re/im pairs.
+extern "C" __global__ void rdm_2q(
+    const double2 *state, unsigned long long groups, int q0, int q1, double *out_partials)
+{
+    __shared__ double warp_sums[16][32];
+    double acc[16];
+#pragma unroll
+    for (int m = 0; m < 16; ++m) {
+        acc[m] = 0.0;
+    }
+    unsigned long long m0 = 1ULL << q0;
+    unsigned long long m1 = 1ULL << q1;
+    unsigned long long m01 = m0 | m1;
+    unsigned long long tid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long stride = (unsigned long long)gridDim.x * blockDim.x;
+    for (unsigned long long g = tid; g < groups; g += stride) {
+        unsigned long long base = expand_2q(g, q0, q1);
+        double2 a0 = state[base];
+        double2 a1 = state[base | m1];
+        double2 a2 = state[base | m0];
+        double2 a3 = state[base | m01];
+        acc[0]  += a0.x * a0.x + a0.y * a0.y;
+        acc[1]  += a1.x * a1.x + a1.y * a1.y;
+        acc[2]  += a2.x * a2.x + a2.y * a2.y;
+        acc[3]  += a3.x * a3.x + a3.y * a3.y;
+        acc[4]  += a1.x * a0.x + a1.y * a0.y;
+        acc[5]  += a1.y * a0.x - a1.x * a0.y;
+        acc[6]  += a2.x * a0.x + a2.y * a0.y;
+        acc[7]  += a2.y * a0.x - a2.x * a0.y;
+        acc[8]  += a2.x * a1.x + a2.y * a1.y;
+        acc[9]  += a2.y * a1.x - a2.x * a1.y;
+        acc[10] += a3.x * a0.x + a3.y * a0.y;
+        acc[11] += a3.y * a0.x - a3.x * a0.y;
+        acc[12] += a3.x * a1.x + a3.y * a1.y;
+        acc[13] += a3.y * a1.x - a3.x * a1.y;
+        acc[14] += a3.x * a2.x + a3.y * a2.y;
+        acc[15] += a3.y * a2.x - a3.x * a2.y;
+    }
+    unsigned int lane = threadIdx.x & 31;
+    unsigned int warp = threadIdx.x >> 5;
+#pragma unroll
+    for (int m = 0; m < 16; ++m) {
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            acc[m] += __shfl_down_sync(0xffffffffu, acc[m], offset);
+        }
+        if (lane == 0) {
+            warp_sums[m][warp] = acc[m];
+        }
+    }
+    __syncthreads();
+    if (warp == 0) {
+        unsigned int num_warps = blockDim.x >> 5;
+#pragma unroll
+        for (int m = 0; m < 16; ++m) {
+            double v = lane < num_warps ? warp_sums[m][lane] : 0.0;
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                v += __shfl_down_sync(0xffffffffu, v, offset);
+            }
+            if (lane == 0) {
+                out_partials[16ULL * blockIdx.x + m] = v;
+            }
+        }
+    }
+}
+
+extern "C" __global__ void rdm_2q_finalize(
+    const double *partials, unsigned int count, double *result)
+{
+    __shared__ double warp_sums[16][32];
+    double acc[16];
+#pragma unroll
+    for (int m = 0; m < 16; ++m) {
+        acc[m] = 0.0;
+    }
+    for (unsigned int i = threadIdx.x; i < count; i += blockDim.x) {
+        const double *row = partials + 16ULL * i;
+#pragma unroll
+        for (int m = 0; m < 16; ++m) {
+            acc[m] += __ldcg(row + m);
+        }
+    }
+    unsigned int lane = threadIdx.x & 31;
+    unsigned int warp = threadIdx.x >> 5;
+#pragma unroll
+    for (int m = 0; m < 16; ++m) {
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            acc[m] += __shfl_down_sync(0xffffffffu, acc[m], offset);
+        }
+        if (lane == 0) {
+            warp_sums[m][warp] = acc[m];
+        }
+    }
+    __syncthreads();
+    if (warp == 0) {
+        unsigned int num_warps = blockDim.x >> 5;
+#pragma unroll
+        for (int m = 0; m < 16; ++m) {
+            double v = lane < num_warps ? warp_sums[m][lane] : 0.0;
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                v += __shfl_down_sync(0xffffffffu, v, offset);
+            }
+            if (lane == 0) {
+                result[m] = v;
+            }
+        }
     }
 }
 

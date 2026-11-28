@@ -14,8 +14,8 @@
 //!
 //! The full gate set, including MCU, every fused or batched variant, a native
 //! `Gate::QftBlock` kernel (on the CPU path for blocks starting at qubit 0, on the
-//! device for any range), and native `Gate::PauliRot` and `Gate::Unitary` kernels on
-//! the CPU path. The device path declines `Gate::Unitary` by name.
+//! device for any range), a native `Gate::Unitary` kernel on both host and device,
+//! and native `Gate::PauliRot` on the CPU path.
 //!
 //! # When to prefer this backend
 //!
@@ -460,10 +460,7 @@ impl StatevectorBackend {
                 });
                 result
             }
-            Gate::Unitary(_) => Err(crate::error::PrismError::BackendUnsupported {
-                backend: "statevector (device-resident)".to_string(),
-                operation: format!("dense multi-qubit gate `{}`", gate.name()),
-            }),
+            Gate::Unitary(data) => k::launch_apply_unitary_nq(&ctx, gpu, targets, data.matrix()),
             Gate::MultiFused(data) => {
                 if data.all_diagonal {
                     k::launch_apply_multi_fused_diagonal(&ctx, gpu, &data.gates)
@@ -1313,28 +1310,22 @@ impl Backend for StatevectorBackend {
         Ok(self.reduced_density_matrix_one(qubit))
     }
 
-    /// Read off the device context rather than the device state, so the answer
-    /// holds before [`Backend::init`]; a soft init that falls back to the host
-    /// clears the context.
     fn supports_two_qubit_kraus(&self) -> bool {
-        #[cfg(feature = "gpu")]
-        {
-            self.gpu_context.is_none()
-        }
-        #[cfg(not(feature = "gpu"))]
-        {
-            true
-        }
+        true
     }
 
     fn reduced_density_matrix_2q(&mut self, q0: usize, q1: usize) -> Result<[[Complex64; 4]; 4]> {
         assert_ne!(q0, q1, "reduced_density_matrix_2q needs distinct qubits");
         #[cfg(feature = "gpu")]
         if self.gpu_state.is_some() {
-            return Err(crate::error::PrismError::BackendUnsupported {
-                backend: "statevector (device-resident)".to_string(),
-                operation: "reduced_density_matrix_2q".to_string(),
-            });
+            self.sync_measure_log()?;
+            let gpu = self.gpu_state.as_ref().expect("gpu_state checked above");
+            return crate::gpu::kernels::dense::reduced_density_matrix_2q(
+                gpu.context(),
+                gpu,
+                q0,
+                q1,
+            );
         }
         Ok(self.reduced_density_matrix_two(q0, q1))
     }

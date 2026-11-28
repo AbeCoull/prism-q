@@ -6,8 +6,10 @@ use num_complex::Complex64;
 use crate::error::{PrismError, Result};
 use crate::gpu::{GpuContext, GpuState};
 
-use super::super::{check_pair, check_qubit, grid_for, launch_counted, linear_cfg, stream_and_fn};
-use super::{BLOCK_SIZE, FusedMatArg, qubit_list};
+use super::super::{
+    check_pair, check_qubit, grid_for, launch_counted, linear_cfg, stage_complex, stream_and_fn,
+};
+use super::{BLOCK_SIZE, FusedMatArg, UnitaryMetaArg, qubit_list};
 
 /// Write amplitude 0 = 1; assumes the buffer is already zeroed.
 pub(crate) fn launch_set_initial_state(ctx: &GpuContext, state: &mut GpuState) -> Result<()> {
@@ -363,6 +365,82 @@ pub(crate) fn launch_apply_mcu_phase(
     // SAFETY: signature matches; the qubit list rides in parameter space and the grid
     // covers iter_count.
     unsafe { launch_counted(builder, cfg, "apply_mcu_phase", ctx.device(), 1) }
+}
+
+/// Apply a dense `2^k x 2^k` unitary (`1 <= k <= 4`) over `targets`, with
+/// `targets[0]` as the high bit of the matrix index.
+pub(crate) fn launch_apply_unitary_nq(
+    ctx: &GpuContext,
+    state: &mut GpuState,
+    targets: &[usize],
+    matrix: &[Complex64],
+) -> Result<()> {
+    let k = targets.len();
+    if k == 0 || k > 4 {
+        return Err(PrismError::BackendUnsupported {
+            backend: "gpu".to_string(),
+            operation: format!("dense {k}-qubit unitary outside the 1..=4 qubit kernel range"),
+        });
+    }
+    let n = state.num_qubits();
+    for (i, &q) in targets.iter().enumerate() {
+        check_qubit(n, q)?;
+        if targets[..i].contains(&q) {
+            return Err(PrismError::InvalidParameter {
+                message: format!("duplicate target qubit {q} in dense unitary"),
+            });
+        }
+    }
+    let dim = 1usize << k;
+    if matrix.len() != dim * dim {
+        return Err(PrismError::InvalidParameter {
+            message: format!(
+                "dense {k}-qubit unitary expects {} entries, got {}",
+                dim * dim,
+                matrix.len()
+            ),
+        });
+    }
+
+    let mut meta = UnitaryMetaArg {
+        offsets: [0; 16],
+        sorted: [0; 4],
+        k: k as i32,
+        _pad: 0,
+    };
+    let mut sorted = [0usize; 4];
+    sorted[..k].copy_from_slice(targets);
+    sorted[..k].sort_unstable();
+    for (dst, &q) in meta.sorted.iter_mut().zip(&sorted[..k]) {
+        *dst = q as i32;
+    }
+    for (m, offset) in meta.offsets.iter_mut().enumerate().take(dim) {
+        let mut mask = 0u64;
+        for (i, &target) in targets.iter().enumerate() {
+            mask |= (((m >> (k - 1 - i)) & 1) as u64) << target;
+        }
+        *offset = mask;
+    }
+
+    let iter_count: u64 = 1u64 << (n - k);
+    let device = ctx.device();
+    let (stream, func) = stream_and_fn(ctx, "apply_unitary_nq")?;
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(iter_count, BLOCK_SIZE));
+
+    let mut scratch = ctx.launcher_scratch();
+    let staged = stage_complex(&mut scratch.blob, device, matrix)?;
+
+    let mut builder = stream.launch_builder(&func);
+    let buffer = state.buffer_mut().raw_mut();
+    builder
+        .arg(buffer)
+        .arg(&iter_count)
+        .arg(&meta)
+        .arg(&staged.f64s);
+    // SAFETY: signature matches `apply_unitary_nq`; targets are distinct and in bounds,
+    // `staged.f64s` holds `dim * dim` complex entries in stream order while the scratch
+    // guard is live, and the grid covers `iter_count`.
+    unsafe { launch_counted(builder, cfg, "apply_unitary_nq", device, 1) }
 }
 
 /// Kernel route for a 4x4 matrix in the `apply_fused_2q` basis, where `q0` is the high

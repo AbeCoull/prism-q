@@ -7,8 +7,8 @@ use crate::error::Result;
 use crate::gpu::{GpuBuffer, GpuContext, GpuState};
 
 use super::super::{
-    check_qubit, driver_err, ensure_capacity, grid_for, launch_counted, linear_cfg, require_i32,
-    stream_and_fn,
+    check_pair, check_qubit, driver_err, ensure_capacity, grid_for, launch_counted, linear_cfg,
+    require_i32, stream_and_fn,
 };
 use super::BLOCK_SIZE;
 
@@ -246,6 +246,95 @@ pub(crate) fn reduced_density_matrix_1q(
         [Complex64::new(p0, 0.0), r.conj()],
         [r, Complex64::new(p1, 0.0)],
     ])
+}
+
+/// Two-qubit reduced density matrix over `(q0, q1)` in basis `t = 2*bit(q0) + bit(q1)`
+/// with `pending_norm²` applied. Two reduction launches and a 128-byte readback replace
+/// a full-state export.
+pub(crate) fn reduced_density_matrix_2q(
+    ctx: &GpuContext,
+    state: &GpuState,
+    q0: usize,
+    q1: usize,
+) -> Result<[[Complex64; 4]; 4]> {
+    const MAX_RDM2Q_BLOCKS: u64 = 4096;
+    let n = state.num_qubits();
+    check_pair(n, q0, q1)?;
+    let groups: u64 = 1u64 << (n - 2);
+    let num_blocks = groups
+        .div_ceil(2 * BLOCK_SIZE as u64)
+        .clamp(1, MAX_RDM2Q_BLOCKS) as u32;
+
+    let device = ctx.device();
+    let stream = device.stream()?;
+    let stage1 = device.function("rdm_2q")?;
+    let stage2 = device.function("rdm_2q_finalize")?;
+    let stage1_cfg = linear_cfg(BLOCK_SIZE, num_blocks);
+    let stage2_cfg = linear_cfg(BLOCK_SIZE, 1);
+
+    let mut scratch = ctx.launcher_scratch();
+    let scratch = &mut *scratch;
+    let partials = ensure_capacity(
+        &mut scratch.measure_partials,
+        device,
+        16 * num_blocks as usize,
+    )?;
+
+    let q0_i = q0 as i32;
+    let q1_i = q1 as i32;
+    {
+        let mut builder = stream.launch_builder(&stage1);
+        let state_buf = state.buffer().raw();
+        builder
+            .arg(state_buf)
+            .arg(&groups)
+            .arg(&q0_i)
+            .arg(&q1_i)
+            .arg(partials.raw_mut());
+        // SAFETY: signature matches `rdm_2q`; `q0` and `q1` are distinct and below `n`,
+        // threads grid-stride across `groups`, and `out_partials` holds `16 * num_blocks` f64s.
+        unsafe { launch_counted(builder, stage1_cfg, "rdm_2q", device, 1) }?;
+    }
+
+    let result = ensure_capacity(&mut scratch.rdm2q_result, device, 16)?;
+    let count_u32 = num_blocks;
+    {
+        let mut builder = stream.launch_builder(&stage2);
+        builder
+            .arg(scratch.measure_partials.as_ref().unwrap().raw())
+            .arg(&count_u32)
+            .arg(result.raw_mut());
+        // SAFETY: signature matches `rdm_2q_finalize`; one block strides across `count_u32`
+        // sixteen-column partial blocks into a 16-element output. Both buffers are held by
+        // the scratch guard.
+        unsafe { launch_counted(builder, stage2_cfg, "rdm_2q_finalize", device, 0) }?;
+    }
+
+    let mut host = [0.0_f64; 16];
+    scratch
+        .rdm2q_result
+        .as_ref()
+        .unwrap()
+        .copy_to_host(device, &mut host[..])?;
+    let norm_sq = state.pending_norm() * state.pending_norm();
+    let mut rho = [[Complex64::new(0.0, 0.0); 4]; 4];
+    for t in 0..4 {
+        rho[t][t] = Complex64::new(host[t] * norm_sq, 0.0);
+    }
+    const PAIRS: [(usize, usize, usize); 6] = [
+        (1, 0, 4),
+        (2, 0, 6),
+        (2, 1, 8),
+        (3, 0, 10),
+        (3, 1, 12),
+        (3, 2, 14),
+    ];
+    for (r, c, off) in PAIRS {
+        let entry = Complex64::new(host[off], host[off + 1]) * norm_sq;
+        rho[r][c] = entry;
+        rho[c][r] = entry.conj();
+    }
+    Ok(rho)
 }
 
 /// Zeroes the losing branch only; renormalization is deferred to the caller

@@ -96,7 +96,7 @@ fn cached_cubin_from_another_nvrtc_version_loads_without_a_recompile() {
     let path = dir.join(cache_file_name(&stem, (12, 0), "cubin"));
     std::fs::write(&path, image.bytes()).unwrap();
 
-    let (loaded, _module) = load_or_compile(&context, capability, &dir).unwrap();
+    let (loaded, _module) = load_or_compile(&context, capability, Some(&dir)).unwrap();
     assert_eq!(loaded.bytes(), image.bytes());
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     let _ = std::fs::remove_dir_all(&dir);
@@ -114,7 +114,7 @@ fn corrupt_disk_cache_falls_back_to_a_recompile() {
     let context = CudaContext::new(0).unwrap();
     let capability = detect_capability(&context).unwrap();
     let dir = std::env::temp_dir().join(format!("prism-q-ptx-test-{}", std::process::id()));
-    let (image, _module) = load_or_compile(&context, capability, &dir).unwrap();
+    let (image, _module) = load_or_compile(&context, capability, Some(&dir)).unwrap();
     let path = dir.join(cache_file_name(
         &cache_stem(capability, &kernel_source()),
         nvrtc_version().unwrap(),
@@ -122,16 +122,43 @@ fn corrupt_disk_cache_falls_back_to_a_recompile() {
     ));
     std::fs::write(&path, "not a kernel image").unwrap();
 
-    let (image, _module) = load_or_compile(&context, capability, &dir).unwrap();
+    let (image, _module) = load_or_compile(&context, capability, Some(&dir)).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), image.bytes());
     let written = std::fs::metadata(&path).unwrap().modified().unwrap();
 
-    let (_image, _module) = load_or_compile(&context, capability, &dir).unwrap();
+    let (_image, _module) = load_or_compile(&context, capability, Some(&dir)).unwrap();
     assert_eq!(
         std::fs::metadata(&path).unwrap().modified().unwrap(),
         written
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ptx_cache_dir_override_and_disable() {
+    use std::ffi::OsString;
+    assert_eq!(
+        ptx_cache_dir_from(
+            Some(OsString::from("")),
+            Some(OsString::from("/xdg")),
+            None,
+            None
+        ),
+        None
+    );
+    assert_eq!(
+        ptx_cache_dir_from(
+            Some(OsString::from("/custom/ptx")),
+            Some(OsString::from("/xdg")),
+            None,
+            None,
+        ),
+        Some(PathBuf::from("/custom/ptx"))
+    );
+    assert_eq!(
+        ptx_cache_dir_from(None, Some(OsString::from("/xdg")), None, None),
+        Some(PathBuf::from("/xdg").join("prism-q-ptx"))
+    );
 }
 
 #[cfg(feature = "parallel")]

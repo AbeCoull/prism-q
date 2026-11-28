@@ -180,7 +180,8 @@ impl GpuDevice {
     /// CUDA 12 driver loads whatever the NVRTC minor version. When the NVRTC predates the
     /// device, it emits PTX for the newest known arch below it instead, which the driver
     /// JITs. A capability below 6.0 is rejected rather than targeted. The image is shared
-    /// by every device opened in the process and cached on disk in `prism-q-ptx` under the
+    /// by every device opened in the process and cached on disk in `PRISM_PTX_CACHE_DIR`
+    /// when set (an empty value disables disk caching), or in `prism-q-ptx` under the
     /// user cache dir (`XDG_CACHE_HOME`, `LOCALAPPDATA`, or `HOME/.cache`), so NVRTC runs
     /// once per source change, NVRTC version, user, and host.
     pub fn new(device_id: usize) -> Result<Self> {
@@ -501,29 +502,33 @@ fn load_kernel_module(
             .load(context)
             .map_err(|e| driver_err("load_module", e));
     }
-    let (image, module) = load_or_compile(context, capability, &ptx_cache_dir())?;
+    let cache_dir = ptx_cache_dir();
+    let (image, module) = load_or_compile(context, capability, cache_dir.as_deref())?;
     cache.insert(capability, image);
     Ok(module)
 }
 
 /// Load the module from an image cached in `cache_dir`, or compile through NVRTC when
-/// none loads. File names bind crate version, device architecture, a hash of the source
-/// text, and the NVRTC version that compiled them. A cached cubin matches whichever
-/// CUDA 12 NVRTC made it, so it is tried first without opening NVRTC. Cached PTX is
-/// tried next, from this NVRTC only when one loads, since a driver older than the NVRTC
-/// refuses it. A fresh compile is written back atomically; a write failure is ignored,
-/// the module is already loaded.
+/// none loads. Passing `None` skips disk reads and writes. File names bind crate version,
+/// device architecture, a hash of the source text, and the NVRTC version that compiled
+/// them. A cached cubin matches whichever CUDA 12 NVRTC made it, so it is tried first
+/// without opening NVRTC. Cached PTX is tried next, from this NVRTC only when one loads,
+/// since a driver older than the NVRTC refuses it. A fresh compile is written back
+/// atomically; a write failure is ignored, the module is already loaded.
 fn load_or_compile(
     context: &Arc<CudaContext>,
     capability: (i32, i32),
-    cache_dir: &Path,
+    cache_dir: Option<&Path>,
 ) -> Result<(Arc<KernelImage>, Arc<CudaModule>)> {
     let source = kernel_source();
     let stem = cache_stem(capability, &source);
     let cached = |extension: &str| -> Vec<PathBuf> {
+        let Some(dir) = cache_dir else {
+            return Vec::new();
+        };
         let prefix = format!("{stem}-nvrtc");
         let suffix = format!(".{extension}");
-        std::fs::read_dir(cache_dir)
+        std::fs::read_dir(dir)
             .into_iter()
             .flatten()
             .flatten()
@@ -556,15 +561,19 @@ fn load_or_compile(
     }
     let version =
         nvrtc_version().ok_or_else(|| gpu_unusable("NVRTC did not report its version".into()))?;
-    if let Some(hit) = try_load(&[cache_dir.join(cache_file_name(&stem, version, "ptx"))]) {
+    if let Some(dir) = cache_dir
+        && let Some(hit) = try_load(&[dir.join(cache_file_name(&stem, version, "ptx"))])
+    {
         return Ok(hit);
     }
     let image = compile_kernels(&source, capability)?;
     let module = image.load(context).map_err(fresh_module_err)?;
-    write_image_cache(
-        &cache_dir.join(cache_file_name(&stem, version, image.extension())),
-        image.bytes(),
-    );
+    if let Some(dir) = cache_dir {
+        write_image_cache(
+            &dir.join(cache_file_name(&stem, version, image.extension())),
+            image.bytes(),
+        );
+    }
     Ok((Arc::new(image), module))
 }
 
@@ -592,16 +601,37 @@ fn nvrtc_sass_archs() -> Result<Vec<i32>> {
     super::nvrtc::supported_archs().map_err(|e| driver_err("NVRTC supported archs", e))
 }
 
-/// Per-user cache location: `XDG_CACHE_HOME`, `LOCALAPPDATA`, or `HOME/.cache`, falling
-/// back to the OS temp dir. A shared temp dir is avoided where a user dir exists so
-/// that no other local user can seed the file another process will load.
-fn ptx_cache_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_CACHE_HOME")
+/// Per-user cache location: `PRISM_PTX_CACHE_DIR` when set (empty disables disk
+/// caching), otherwise `XDG_CACHE_HOME`, `LOCALAPPDATA`, or `HOME/.cache`, falling back
+/// to the OS temp dir. A shared temp dir is avoided where a user dir exists so that no
+/// other local user can seed the file another process will load.
+fn ptx_cache_dir() -> Option<PathBuf> {
+    ptx_cache_dir_from(
+        std::env::var_os("PRISM_PTX_CACHE_DIR"),
+        std::env::var_os("XDG_CACHE_HOME"),
+        std::env::var_os("LOCALAPPDATA"),
+        std::env::var_os("HOME"),
+    )
+}
+
+fn ptx_cache_dir_from(
+    override_dir: Option<std::ffi::OsString>,
+    xdg: Option<std::ffi::OsString>,
+    local_app_data: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    if let Some(val) = override_dir {
+        if val.is_empty() {
+            return None;
+        }
+        return Some(PathBuf::from(val));
+    }
+    let base = xdg
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .or_else(|| local_app_data.map(PathBuf::from))
+        .or_else(|| home.map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_else(std::env::temp_dir);
-    base.join("prism-q-ptx")
+    Some(base.join("prism-q-ptx"))
 }
 
 fn cache_stem(capability: (i32, i32), source: &str) -> String {

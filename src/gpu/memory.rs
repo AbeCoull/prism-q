@@ -7,7 +7,7 @@ use cudarc::driver::{CudaSlice, DeviceRepr, ValidAsZeroBits, sys};
 use crate::error::Result;
 
 use super::device::GpuDevice;
-use super::driver_err;
+use super::{alloc_driver_err, driver_err};
 
 /// RAII wrapper over a typed device allocation.
 pub struct GpuBuffer<T: DeviceRepr> {
@@ -18,9 +18,10 @@ impl<T: DeviceRepr + ValidAsZeroBits> GpuBuffer<T> {
     /// Allocate `len` elements of `T` on the given device, zero-initialised.
     pub fn alloc_zeros(device: &GpuDevice, len: usize) -> Result<Self> {
         let stream = device.stream()?;
+        let bytes = len.saturating_mul(std::mem::size_of::<T>());
         let slice = stream
             .alloc_zeros::<T>(len)
-            .map_err(|e| driver_err("alloc_zeros", e))?;
+            .map_err(|e| alloc_driver_err(Some(device), "alloc_zeros", bytes, e))?;
         Ok(Self { slice })
     }
 }
@@ -30,9 +31,10 @@ impl<T: DeviceRepr> GpuBuffer<T> {
     /// skipping the zero fill of [`alloc_zeros`](Self::alloc_zeros).
     pub fn from_host(device: &GpuDevice, host: &[T]) -> Result<Self> {
         let stream = device.stream()?;
+        let bytes = host.len().saturating_mul(std::mem::size_of::<T>());
         let slice = stream
             .clone_htod(host)
-            .map_err(|e| driver_err("from_host", e))?;
+            .map_err(|e| alloc_driver_err(Some(device), "from_host", bytes, e))?;
         device.count_upload();
         Ok(Self { slice })
     }

@@ -621,6 +621,21 @@ pub(crate) mod sealed {
             None
         }
 
+        /// Delimit a lookahead window starting at `start` in `instructions`,
+        /// preparing layout relabeling upfront, and return its exclusive end
+        /// index. Default returns `instructions.len()`.
+        fn prepare_window(
+            &mut self,
+            instructions: &[crate::circuit::Instruction],
+            _start: usize,
+        ) -> usize {
+            instructions.len()
+        }
+
+        /// Move `qubit` into a local position before a one-qubit Kraus read so
+        /// the reduced density matrix read and branch apply share one exchange.
+        fn prepare_kraus_1q(&mut self, _qubit: usize) {}
+
         /// Apply amplitude damping (`jump_moves_population`) or phase damping from the
         /// draw `r` with the branch chosen on the device, bit for bit as the trajectory
         /// chooses it on the host from the same reduction, so nothing is read back.

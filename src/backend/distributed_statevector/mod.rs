@@ -1377,6 +1377,20 @@ impl crate::backend::sealed::Sealed for DistributedStatevectorBackend {
     fn limits(&self) -> crate::limits::ResolvedLimits {
         self.inner.limits
     }
+
+    fn prepare_window(&mut self, instructions: &[Instruction], start: usize) -> usize {
+        if self.relabel && self.global_qubits > 0 {
+            self.plan_window(instructions, start)
+        } else {
+            instructions.len()
+        }
+    }
+
+    fn prepare_kraus_1q(&mut self, qubit: usize) {
+        if self.relabel && self.global_qubits > 0 {
+            self.make_local(&[qubit]);
+        }
+    }
 }
 
 impl Backend for DistributedStatevectorBackend {

@@ -75,7 +75,7 @@ impl DistributedStatevectorBackend {
     /// holds the position at window start. Victims are the local qubits outside
     /// the window whose next required use is furthest away; ties go to the
     /// lowest position.
-    fn plan_window(&mut self, instructions: &[Instruction], start: usize) -> usize {
+    pub(super) fn plan_window(&mut self, instructions: &[Instruction], start: usize) -> usize {
         let local = self.local_qubits();
         let mut alias: Vec<usize> = (0..self.num_qubits).collect();
         let mut required: SmallVec<[usize; 16]> = SmallVec::new();

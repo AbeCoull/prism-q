@@ -7,6 +7,9 @@ edition = "2024"
 [package.metadata]
 cargo-fuzz = true
 
+[features]
+distributed = ["prism-q/distributed"]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 num-complex = "0.4"

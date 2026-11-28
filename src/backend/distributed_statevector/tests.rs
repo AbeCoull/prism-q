@@ -1358,6 +1358,80 @@ fn cyclic_wall_pins_the_exchange_counters_per_mode() {
     assert_eq!(planned, (12, 98304), "planned relabel");
 }
 
+#[test]
+fn noisy_cyclic_wall_uses_lookahead_relabeling() {
+    relax_min_local_qubits();
+    let circuit = cyclic_wall(16, 3, 0xDEAD_BEEF);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    let stats = run_ranks(4, |ctx| {
+        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+        crate::sim::trajectory::run_trajectories_held(
+            &mut backend,
+            DistributedStatevectorBackend::set_seed,
+            &circuit,
+            &noise,
+            1,
+            SEED,
+            ResolvedBackend::Distributed,
+        )
+        .expect("distributed noisy shot");
+        (backend.exchange_messages(), backend.exchange_amplitudes())
+    });
+    assert!(
+        stats.iter().all(|&s| s == stats[0]),
+        "relabel exchanges differ across ranks: {stats:?}"
+    );
+    // Matches WallMode::Planned (12 messages, 98,304 amplitudes) rather than
+    // WallMode::PerGate (80 messages, 655,360 amplitudes).
+    assert_eq!(stats[0], (12, 98304), "noisy lookahead relabel");
+}
+
+#[test]
+fn rank_bit_kraus_1q_relabels_once_before_reading_rdm() {
+    relax_min_local_qubits();
+    let mut b = CircuitBuilder::new(6);
+    b.rz(0.3, 5);
+    let circuit = b.build();
+    let gamma = 0.2_f64;
+    let keep = (1.0 - gamma).sqrt();
+    let r = |re: f64| Complex64::new(re, 0.0);
+    let (diag, off, s) = (0.5 * (1.0 + keep), 0.5 * (1.0 - keep), 0.5 * gamma.sqrt());
+    let channel = NoiseChannel::Custom {
+        kraus: vec![
+            [[r(diag), r(off)], [r(off), r(diag)]],
+            [[r(s), r(-s)], [r(s), r(-s)]],
+        ],
+    };
+    let noise = NoiseModel {
+        after_gate: vec![vec![NoiseEvent {
+            channel,
+            qubits: smallvec::smallvec![5],
+        }]],
+        readout: Vec::new(),
+    };
+    let stats = run_ranks(2, |ctx| {
+        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+        crate::sim::trajectory::run_trajectories_held(
+            &mut backend,
+            DistributedStatevectorBackend::set_seed,
+            &circuit,
+            &noise,
+            1,
+            SEED,
+            ResolvedBackend::Distributed,
+        )
+        .expect("rank-bit custom Kraus");
+        (backend.exchange_messages(), backend.exchange_amplitudes())
+    });
+    // One half-slice relabel exchange (16 amplitudes on a 6q/2-rank shard of 32),
+    // shared by both the 1q RDM read and the 1q Kraus branch apply.
+    assert_eq!(
+        stats[0],
+        (1, 16),
+        "single relabel exchange for rank-bit 1q Kraus"
+    );
+}
+
 /// The `distributed/steady_state_batched` bench circuit: fused QAOA behind a
 /// SWAP that parks circuit qubit 0 on the rank bit, so every fused Rx layer
 /// spans one more qubit than there are local positions.

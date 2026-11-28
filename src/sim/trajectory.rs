@@ -540,6 +540,11 @@ pub(crate) trait SlotWalk {
     fn apply(&mut self, instruction: &Instruction) -> Result<()>;
     /// Fire the events of [`NoiseModel::after_gate`] slot `slot`.
     fn fire(&mut self, slot: usize) -> Result<()>;
+    /// Delimit a lookahead window starting at `start` in `list` and return its
+    /// exclusive end index. Default processes the whole slice at once.
+    fn prepare_window(&mut self, list: &[Instruction], _start: usize) -> usize {
+        list.len()
+    }
 }
 
 /// Run `circuit.instructions[from..]` in execution order under a model laying
@@ -560,25 +565,31 @@ fn walk_slot_list(
     mut nested: usize,
     walk: &mut impl SlotWalk,
 ) -> Result<()> {
-    for (offset, instruction) in list.iter().enumerate() {
-        match instruction {
-            Instruction::Region(region) => {
-                if region.condition().evaluate(walk.classical()?) {
-                    walk_region_body(region, nested, walk)?;
+    let mut start = 0;
+    while start < list.len() {
+        let end = walk.prepare_window(list, start);
+        for (offset, instruction) in list[start..end].iter().enumerate() {
+            let index = start + offset;
+            match instruction {
+                Instruction::Region(region) => {
+                    if region.condition().evaluate(walk.classical()?) {
+                        walk_region_body(region, nested, walk)?;
+                    }
+                    nested += region.noise_slots();
                 }
-                nested += region.noise_slots();
-            }
-            Instruction::Conditional { condition, .. } => {
-                let taken = condition.evaluate(walk.classical()?);
-                walk.apply(instruction)?;
-                if taken {
-                    walk.fire(nested)?;
+                Instruction::Conditional { condition, .. } => {
+                    let taken = condition.evaluate(walk.classical()?);
+                    walk.apply(instruction)?;
+                    if taken {
+                        walk.fire(nested)?;
+                    }
+                    nested += 1;
                 }
-                nested += 1;
+                _ => walk.apply(instruction)?,
             }
-            _ => walk.apply(instruction)?,
+            walk.fire(base + index)?;
         }
-        walk.fire(base + offset)?;
+        start = end;
     }
     Ok(())
 }
@@ -618,6 +629,10 @@ impl<A: EventApplier> SlotWalk for TrajectoryWalk<'_, A> {
         }
         Ok(())
     }
+
+    fn prepare_window(&mut self, list: &[Instruction], start: usize) -> usize {
+        self.backend.prepare_window(list, start)
+    }
 }
 
 /// [`TrajectoryWalk`] on the per-shot memory path.
@@ -644,6 +659,10 @@ impl SlotWalk for MemoryWalk<'_> {
             apply_memory_event(self.backend, event, self.memory, self.rng)?;
         }
         Ok(())
+    }
+
+    fn prepare_window(&mut self, list: &[Instruction], start: usize) -> usize {
+        self.backend.prepare_window(list, start)
     }
 }
 
@@ -904,6 +923,7 @@ fn kraus_host_decided(
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
     backend.sync_deferred_measurements()?;
+    backend.prepare_kraus_1q(qubit);
     let rho = backend.reduced_density_matrix_1q(qubit)?;
 
     let probs = kraus.iter().map(|k| effect_probability(&k.effect, &rho));
@@ -1379,11 +1399,19 @@ pub(crate) fn evolve_with_memory(
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
     if readout.is_empty() && noise.num_slots() == circuit.instructions.len() {
-        for (instr, events) in circuit.instructions.iter().zip(noise.slots_from(0)) {
-            apply_memory_instruction(backend, instr, memory, rng)?;
-            for event in events {
-                apply_memory_event(backend, event, memory, rng)?;
+        let mut start = 0;
+        while start < circuit.instructions.len() {
+            let end = backend.prepare_window(&circuit.instructions, start);
+            for (instr, events) in circuit.instructions[start..end]
+                .iter()
+                .zip(noise.slots_from(start))
+            {
+                apply_memory_instruction(backend, instr, memory, rng)?;
+                for event in events {
+                    apply_memory_event(backend, event, memory, rng)?;
+                }
             }
+            start = end;
         }
         return Ok(());
     }
@@ -1593,14 +1621,19 @@ fn evolve_noisy_eager<A: EventApplier>(
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
     if readout.is_empty() && noise.num_slots() == circuit.instructions.len() {
-        for (instr, events) in circuit.instructions[from..]
-            .iter()
-            .zip(noise.slots_from(from))
-        {
-            backend.apply(instr)?;
-            for event in events {
-                A::apply(backend, event, rng)?;
+        let mut start = from;
+        while start < circuit.instructions.len() {
+            let end = backend.prepare_window(&circuit.instructions, start);
+            for (instr, events) in circuit.instructions[start..end]
+                .iter()
+                .zip(noise.slots_from(start))
+            {
+                backend.apply(instr)?;
+                for event in events {
+                    A::apply(backend, event, rng)?;
+                }
             }
+            start = end;
         }
         return Ok(());
     }

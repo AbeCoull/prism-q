@@ -630,7 +630,9 @@ pub(super) fn run_shots_per_shot(
     }
     if matches!(
         kind,
-        BackendKind::StochasticPauli { .. } | BackendKind::DeterministicPauli { .. }
+        BackendKind::StochasticPauli { .. }
+            | BackendKind::DeterministicPauli { .. }
+            | BackendKind::PauliPath { .. }
     ) {
         return Err(crate::error::PrismError::IncompatibleBackend {
             backend: format!("{kind:?}"),

@@ -362,13 +362,17 @@ impl TensorNetworkBackend {
     ) -> Result<BasisSamples> {
         let n = self.num_qubits;
         let mut samples = BasisSamples::new(num_shots, n);
+        if n == 0 {
+            return Ok(samples);
+        }
 
         let network = self.double_for_partial_trace(&[0]);
         let slots: Vec<TensorMeta> = network.iter().map(TensorMeta::of).collect();
         let plan =
             plan_pairs(slots, None, usize::MAX, usize::MAX).expect("unbounded pass completes");
+        let probe_len = plan.peak.min(self.contraction_limits().peak_cap);
         let mut probe: Vec<Complex64> = Vec::new();
-        reserve_dense_output(&mut probe, plan.peak, self.name(), "native sampling")?;
+        reserve_dense_output(&mut probe, probe_len, self.name(), "native sampling")?;
         drop(probe);
 
         let tensors = self.tensors.clone();
@@ -601,6 +605,9 @@ impl TensorNetworkBackend {
     /// computational basis order.
     fn contract_to_statevector(&self) -> Result<Vec<Complex64>> {
         dense_statevector_len(self.name(), "contraction", self.num_qubits, &self.limits)?;
+        if self.num_qubits == 0 {
+            return Ok(vec![Complex64::new(1.0, 0.0)]);
+        }
 
         let mut tensors = self.tensors.clone();
         let result = greedy_contract(

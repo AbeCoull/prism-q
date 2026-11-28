@@ -214,6 +214,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// different distributions; `shots` and `sample_counts` apply it.
     #[inline]
     pub fn run(self) -> Result<RunOutcome> {
+        validate_kind_parameters(&self.kind)?;
         let seed = self.seed_value();
         let limits = &self.resolved_limits()?;
         if self.require_exact {
@@ -260,6 +261,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// Refuse a circuit carrying save points on a terminal that cannot return
     /// them. Only [`Simulate::run`] has a place to put the records.
     fn reject_saves(&self, terminal: &str) -> Result<()> {
+        validate_kind_parameters(&self.kind)?;
         decline_saves(self.circuit, format_args!("{:?}", self.kind), terminal)
     }
 
@@ -759,6 +761,7 @@ impl<'c> Simulate<'c, Seeded> {
             self.reject_planned_approximation(Query::ReducedDensityMatrix(qubits))?;
         }
         if let Some(noise_model) = self.noise_model {
+            noise_model.validate_for(self.circuit)?;
             reject_readout_at(self.circuit, noise_model, terminal)?;
             require_exact_mixture(&self.kind, terminal)?;
             let mut mixture = noise::evolve_density_matrix(
@@ -826,21 +829,12 @@ impl<'c> Simulate<'c, Seeded> {
             self.reject_planned_approximation(Query::Entropy(subsystem))?;
         }
         if let Some(noise_model) = self.noise_model {
+            noise_model.validate_for(self.circuit)?;
             reject_readout_at(self.circuit, noise_model, terminal)?;
             require_exact_mixture(&self.kind, terminal)?;
-            let mut mixture = noise::evolve_density_matrix(
-                &self.kind,
-                self.circuit,
-                Some(noise_model),
-                self.initial_state,
-                seed,
-                limits,
-            )?;
-            return Ok(EntropyResult {
-                subsystem: subsystem.to_vec(),
-                entropy: mixture.entanglement_entropy(subsystem)?,
-                schmidt_values: None,
-                metadata: exact_mixture_metadata(&self.kind),
+            return Err(PrismError::BackendUnsupported {
+                backend: "density_matrix".into(),
+                operation: "Schmidt values of a mixed state".into(),
             });
         }
         let (mut backend, reason) = diagnostic_backend(
@@ -1029,6 +1023,9 @@ impl<'c> Simulate<'c, Seeded> {
     ) -> Result<gradient::ExpectationGradient> {
         self.reject_saves("expectation_gradient_shift")?;
         let seed = self.seed_value();
+        if let Some(noise_model) = self.noise_model {
+            reject_readout_at(self.circuit, noise_model, "expectation_gradient_shift")?;
+        }
         if self.noise_model.is_some()
             && !self.kind.is_density_matrix()
             && !matches!(self.kind, BackendKind::PauliPath { .. })

@@ -53,7 +53,7 @@ use dispatch::{
     auto_selects_cpu_statevector, auto_spd_work_budget, build_statevector,
     has_temporal_clifford_opportunity, initial_state_plan, mps_apply_cost, plan_for_family,
     plan_temporal_clifford, resolve, resolve_backend, run_temporal_clifford, statevector_work,
-    validate_explicit_backend,
+    validate_explicit_backend, validate_kind_parameters,
 };
 pub use dynamic::{SimulateProgram, simulate_program};
 #[cfg(all(test, feature = "gpu"))]
@@ -263,13 +263,20 @@ fn require_exact_mixture(kind: &BackendKind, terminal: &str) -> Result<()> {
     if kind.is_density_matrix() {
         return Ok(());
     }
-    Err(PrismError::IncompatibleBackend {
-        backend: format!("{kind:?}"),
-        reason: format!(
+    let reason = if terminal == "entanglement entropy" {
+        "entanglement entropy requires a pure state without noise; a noisy circuit evolves a \
+         mixed state, which has no Schmidt decomposition"
+            .into()
+    } else {
+        format!(
             "{terminal} under a noise model reads the exact mixed state, which only the \
              density-matrix backend holds; select it, or average trajectories through `shots` \
              or `sample_counts`"
-        ),
+        )
+    };
+    Err(PrismError::IncompatibleBackend {
+        backend: format!("{kind:?}"),
+        reason,
     })
 }
 
@@ -542,10 +549,14 @@ fn sample_exact_noisy_shots(
 }
 
 #[inline]
-fn probs_only_result(probs: Vec<f64>, metadata: RunMetadata) -> RunOutcome {
+fn probs_only_result(
+    probs: Vec<f64>,
+    num_classical_bits: usize,
+    metadata: RunMetadata,
+) -> RunOutcome {
     RunOutcome {
         probabilities: Some(Probabilities::Dense(probs)),
-        classical_bits: vec![],
+        classical_bits: vec![false; num_classical_bits],
         metadata,
         saves: Vec::new(),
     }
@@ -799,10 +810,19 @@ fn run_direct(
                 })
             }
             ExecutionPlan::StabilizerRank => {
+                if opts.probabilities {
+                    crate::backend::statevector_probability_len(
+                        "stabilizer_rank",
+                        circuit.num_qubits,
+                        limits,
+                    )?;
+                }
                 let sr = stabilizer_rank::run_stabilizer_rank(circuit, seed)?;
                 Ok(probs_only_result(
                     sr.probabilities,
-                    RunMetadata::exact(ResolvedBackend::StabilizerRank).with_reason(RouteRule::ExplicitBackend),
+                    circuit.num_classical_bits,
+                    RunMetadata::exact(ResolvedBackend::StabilizerRank)
+                        .with_reason(RouteRule::ExplicitBackend),
                 ))
             }
             ExecutionPlan::StochasticPauli { num_samples } => {

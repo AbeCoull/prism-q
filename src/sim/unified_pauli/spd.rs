@@ -583,7 +583,7 @@ impl SpdTruncation {
     /// Reject a budget that would drop every term or outrun the internal
     /// ceiling. Called by every entry point, so a policy built by hand cannot
     /// reach the propagation loop unchecked.
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if let SpdTruncation::Budget { max_terms } = *self
             && (max_terms == 0 || max_terms > SPD_MAX_TERMS_CEILING)
         {

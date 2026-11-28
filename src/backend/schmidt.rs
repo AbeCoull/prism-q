@@ -247,7 +247,7 @@ pub(crate) fn check_schmidt_side(
 /// the gathered copy of the state plus the thin SVD's wide factor, two vectors
 /// of the state's length, so it is priced as one statevector of
 /// `num_qubits + 1` qubits against the dense export cap.
-fn check_dense_schmidt_width(
+pub(crate) fn check_dense_schmidt_width(
     backend: &str,
     num_qubits: usize,
     limits: &ResolvedLimits,

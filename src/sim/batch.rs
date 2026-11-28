@@ -402,7 +402,14 @@ pub(super) fn run_batch_entry(
         *held = Some((plan.clone(), circuit.num_qubits, plan.build(seed, limits)));
     }
     let (_, _, backend) = held.as_mut().expect("just built");
-    execute(&mut **backend, circuit, &SimOptions::default())
+    execute(&mut **backend, circuit, &SimOptions::default()).map(|mut r| {
+        r.metadata.reason = if plan.is_gpu() && r.metadata.placement == Placement::Host {
+            RouteRule::DeviceInitializationFallback
+        } else {
+            backend_rule(kind, circuit, &plan)
+        };
+        r
+    })
 }
 
 /// Whether separate runs of `num_qubits`-wide circuits on `kind` should split across

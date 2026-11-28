@@ -157,6 +157,7 @@ impl<SeedState> Simulate<'_, SeedState> {
     /// ```
     pub fn plan(&self, query: Query<'_>) -> Result<Plan> {
         let limits = self.resolved_limits()?;
+        validate_kind_parameters(&self.kind)?;
         match query {
             Query::Gradient {
                 hamiltonian,
@@ -292,15 +293,16 @@ fn check_probability_width(
         dense_probability_len, statevector_probability_len, tensor_probability_len,
     };
     match plan.backend {
-        ResolvedBackend::Statevector if plan.placement == Placement::Host => {
-            statevector_probability_len("statevector", n, limits)
+        ResolvedBackend::Statevector => statevector_probability_len("statevector", n, limits),
+        ResolvedBackend::DensityMatrix => statevector_probability_len("density_matrix", n, limits),
+        ResolvedBackend::StabilizerRank => {
+            statevector_probability_len("stabilizer_rank", n, limits)
         }
         ResolvedBackend::TensorNetwork => {
             tensor_probability_len("tensor_network", n, limits)?;
             crate::backend::dense_statevector_len("tensor_network", "contraction", n, limits)
         }
         ResolvedBackend::Distributed => dense_probability_len("distributed_statevector", n, limits),
-        ResolvedBackend::Statevector | ResolvedBackend::DensityMatrix => return Ok(()),
         _ if saving => dense_probability_len(&format!("{:?}", plan.backend), n, limits),
         _ => return Ok(()),
     }
@@ -501,6 +503,13 @@ pub(super) fn inspect<S>(
                 bound_reported: true,
             };
         }
+        if let Err(err) = unified_pauli::validate_pauli_circuit(circuit, "PauliPath", true) {
+            plan.would_fail = Some(err);
+        } else if let Some(model) = request.noise_model
+            && let Err(err) = unified_pauli::validate_pauli_path_noise(model, "PauliPath")
+        {
+            plan.would_fail = Some(err);
+        }
         return Ok(plan);
     }
     if let Some(model) = request.noise_model {
@@ -513,13 +522,24 @@ pub(super) fn inspect<S>(
                 ));
             }
             return Ok(match decide_noisy(kind, circuit, model, limits)? {
-                NoisyRoute::Mixture => backend_plan(
-                    &plan_for_family(kind, Family::DensityMatrix, n, limits),
-                    kind,
-                    circuit,
-                    limits,
-                    RouteRule::ExactMixture,
-                ),
+                NoisyRoute::Mixture => {
+                    let mut p = backend_plan(
+                        &plan_for_family(kind, Family::DensityMatrix, n, limits),
+                        kind,
+                        circuit,
+                        limits,
+                        RouteRule::ExactMixture,
+                    );
+                    if p.would_fail.is_none() {
+                        p.would_fail = crate::backend::statevector_probability_len(
+                            "density_matrix",
+                            n,
+                            limits,
+                        )
+                        .err();
+                    }
+                    p
+                }
                 NoisyRoute::Compiled(deferred) => {
                     let mut p = Plan::new(
                         ResolvedBackend::CompiledStabilizer,
@@ -550,8 +570,13 @@ pub(super) fn inspect<S>(
                 reason: "this terminal requires a pure state without noise".into(),
             });
         }
-        reject_readout_at(circuit, model, "the planned terminal")?;
-        require_exact_mixture(kind, "the planned terminal")?;
+        let terminal = if matches!(query, Query::Entropy(_)) {
+            "entanglement entropy"
+        } else {
+            "the planned terminal"
+        };
+        reject_readout_at(circuit, model, terminal)?;
+        require_exact_mixture(kind, terminal)?;
         noise::validate_mixture_inputs(circuit, Some(model), request.initial_state)?;
         let backend = plan_for_family(kind, Family::DensityMatrix, n, limits);
         match query {
@@ -569,13 +594,13 @@ pub(super) fn inspect<S>(
             }
             _ => {}
         }
-        return Ok(backend_plan(
-            &backend,
-            kind,
-            circuit,
-            limits,
-            RouteRule::ExactMixture,
-        ));
+        let mut plan = backend_plan(&backend, kind, circuit, limits, RouteRule::ExactMixture);
+        check_diagnostic_plan_caps(&mut plan, &backend, query, n, limits);
+        if matches!(query, Query::Marginals) && plan.would_fail.is_none() {
+            plan.would_fail =
+                crate::backend::statevector_probability_len("density_matrix", n, limits).err();
+        }
+        return Ok(plan);
     }
     if let Some(state) = request.initial_state {
         check_initial_state_len(state, n)?;
@@ -610,13 +635,14 @@ pub(super) fn inspect<S>(
                         operation: diagnostic.terminal().into(),
                     });
                 }
+                check_diagnostic_plan_caps(&mut plan, &backend, query, n, limits);
             }
             _ => {}
         }
         return Ok(plan);
     }
     match query {
-        Query::Run => inspect_probability(kind, circuit, limits),
+        Query::Run => inspect_probability(kind, circuit, limits, true),
         Query::Shots(count) | Query::Counts(count) => {
             #[cfg(feature = "distributed")]
             if matches!(kind, BackendKind::StatevectorDistributed { .. }) {
@@ -650,7 +676,11 @@ pub(super) fn inspect<S>(
                 ShotRoute::StabilizerRank => {
                     let mut p =
                         Plan::new(ResolvedBackend::StabilizerRank, RouteRule::CliffordRegister);
-                    p.units_per_shot = stabilizer_rank::register_units_per_shot(circuit);
+                    if let Err(err) = stabilizer_rank::validate_shots_circuit(circuit) {
+                        p.would_fail = Some(err);
+                    } else {
+                        p.units_per_shot = stabilizer_rank::register_units_per_shot(circuit);
+                    }
                     Ok(p)
                 }
                 ShotRoute::TerminalStatevector(_) => Ok(backend_plan(
@@ -668,7 +698,12 @@ pub(super) fn inspect<S>(
                     RouteRule::NativeSampling,
                 )),
                 ShotRoute::TerminalProbabilities(terminal) => {
-                    let mut p = inspect_probability(kind, &terminal.circuit, limits)?;
+                    let mut p = inspect_probability(kind, &terminal.circuit, limits, true)?;
+                    if p.would_fail.is_none() {
+                        p.would_fail =
+                            check_probability_width(&p, terminal.circuit.num_qubits, limits, false)
+                                .err();
+                    }
                     p.fallbacks.push(PlanFallback {
                         backend: p.backend,
                         rule: RouteRule::PerShot,
@@ -684,8 +719,12 @@ pub(super) fn inspect<S>(
                     } else {
                         parity_rewrite(kind, circuit)
                     };
-                    let mut p =
-                        inspect_probability(kind, rewritten.as_ref().unwrap_or(circuit), limits)?;
+                    let mut p = inspect_probability(
+                        kind,
+                        rewritten.as_ref().unwrap_or(circuit),
+                        limits,
+                        false,
+                    )?;
                     p.rule = RouteRule::PerShot;
                     Ok(p)
                 }
@@ -741,26 +780,7 @@ pub(super) fn inspect<S>(
                     operation: diagnostic.terminal().into(),
                 });
             }
-            match query {
-                Query::StateVector if n > limits.export_cap() => {
-                    p.would_fail = Some(crate::backend::schmidt::export_cap_exceeded(
-                        "plan",
-                        "a dense statevector".into(),
-                        n,
-                        limits,
-                    ))
-                }
-                Query::ReducedDensityMatrix(q) => {
-                    if let Err(error) = crate::backend::reduced_density::reduced_density_side(
-                        "plan",
-                        q.len(),
-                        limits,
-                    ) {
-                        p.would_fail = Some(error);
-                    }
-                }
-                _ => {}
-            }
+            check_diagnostic_plan_caps(&mut p, &backend, query, n, limits);
             Ok(p)
         }
         Query::Gradient { .. } => {
@@ -795,10 +815,63 @@ pub(super) fn inspect<S>(
     }
 }
 
+fn check_diagnostic_plan_caps(
+    p: &mut Plan,
+    backend: &BackendPlan,
+    query: Query<'_>,
+    n: usize,
+    limits: &ResolvedLimits,
+) {
+    match query {
+        Query::StateVector if n > limits.export_cap() => {
+            p.would_fail = Some(crate::backend::schmidt::export_cap_exceeded(
+                "plan",
+                "a dense statevector".into(),
+                n,
+                limits,
+            ));
+        }
+        Query::ReducedDensityMatrix(q) => {
+            if let Err(error) =
+                crate::backend::reduced_density::reduced_density_side("plan", q.len(), limits)
+            {
+                p.would_fail = Some(error);
+            } else if p.would_fail.is_none() && p.placement == Placement::Device {
+                let readback_width = match p.backend {
+                    ResolvedBackend::Statevector => Some(("statevector", n)),
+                    ResolvedBackend::DensityMatrix => Some(("density_matrix", 2 * n)),
+                    _ => None,
+                };
+                if let Some((name, width)) = readback_width
+                    && let Err(error) = crate::backend::dense_statevector_len(
+                        name,
+                        "reduced density matrix GPU readback",
+                        width,
+                        limits,
+                    )
+                {
+                    p.would_fail = Some(error);
+                }
+            }
+        }
+        Query::Entropy(_) if p.would_fail.is_none() => {
+            let _ = backend;
+            if p.backend == ResolvedBackend::Statevector
+                && let Err(error) =
+                    crate::backend::schmidt::check_dense_schmidt_width("statevector", n, limits)
+            {
+                p.would_fail = Some(error);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn inspect_probability(
     kind: &BackendKind,
     circuit: &Circuit,
     limits: &ResolvedLimits,
+    want_probabilities: bool,
 ) -> Result<Plan> {
     validate_explicit_backend(kind, circuit, limits)?;
     #[cfg(feature = "distributed")]
@@ -819,7 +892,14 @@ fn inspect_probability(
             let mut plan = Plan::new(ResolvedBackend::Decomposed, RouteRule::IndependentBlocks);
             let mut all_device = true;
             for (block, _, _) in circuit.partition_subcircuits(&components) {
-                let child = inspect_probability(kind, &block, limits)?;
+                let mut child = inspect_probability(kind, &block, limits, want_probabilities)?;
+                if want_probabilities
+                    && circuit.num_qubits < usize::BITS as usize
+                    && child.would_fail.is_none()
+                {
+                    child.would_fail =
+                        check_probability_width(&child, block.num_qubits, limits, false).err();
+                }
                 all_device &= child.placement == Placement::Device;
                 if child.exactness != PlannedExactness::Exact {
                     plan.exactness = child.exactness;
@@ -880,7 +960,9 @@ fn execution_plan(
             backend_rule(kind, circuit, backend),
         ),
         ExecutionPlan::StabilizerRank => {
-            Plan::new(ResolvedBackend::StabilizerRank, RouteRule::ExplicitBackend)
+            let mut p = Plan::new(ResolvedBackend::StabilizerRank, RouteRule::ExplicitBackend);
+            p.would_fail = stabilizer_rank::validate_probability_circuit(circuit).err();
+            p
         }
         ExecutionPlan::StochasticPauli { num_samples } => {
             let mut p = Plan::new(ResolvedBackend::StochasticPauli, RouteRule::ExplicitBackend);
@@ -955,6 +1037,38 @@ fn backend_plan(
     if matches!(backend, BackendPlan::Sparse) {
         p.would_fail = crate::backend::sparse::check_index_width(circuit.num_qubits).err();
     }
+    #[cfg(feature = "distributed")]
+    if let BackendPlan::Distributed(context) = backend {
+        let size = context.size();
+        if !size.is_power_of_two() {
+            p.would_fail = Some(PrismError::BackendUnsupported {
+                backend: "distributed_statevector".into(),
+                operation: format!("rank count {size} is not a power of two"),
+            });
+        } else {
+            let rank_bits = size.trailing_zeros() as usize;
+            let min_local = crate::distributed::min_local_qubits();
+            if size > 1 && circuit.num_qubits < rank_bits + min_local {
+                p.would_fail = Some(PrismError::BackendUnsupported {
+                    backend: "distributed_statevector".into(),
+                    operation: format!(
+                        "{} qubits across {size} ranks leaves fewer than \
+                         {min_local} local qubits per rank",
+                        circuit.num_qubits
+                    ),
+                });
+            } else {
+                let local_qubits = circuit.num_qubits.saturating_sub(rank_bits);
+                p.would_fail = crate::backend::check_state_allocation(
+                    "distributed_statevector",
+                    local_qubits,
+                    limits.statevector_qubits,
+                    LimitKnob::StatevectorQubits,
+                )
+                .err();
+            }
+        }
+    }
     #[cfg(feature = "gpu")]
     if matches!(
         backend,
@@ -999,9 +1113,16 @@ fn inspect_expectation(
         ExpectationRoute::Stochastic(samples) => {
             let mut p = Plan::new(ResolvedBackend::StochasticPauli, rule);
             p.exactness = PlannedExactness::Estimated { samples };
+            p.would_fail =
+                unified_pauli::validate_pauli_circuit(circuit, "StochasticPauli", false).err();
             p
         }
-        ExpectationRoute::Deterministic(truncation) => pauli_plan(truncation, rule),
+        ExpectationRoute::Deterministic(truncation) => {
+            let mut p = pauli_plan(truncation, rule);
+            p.would_fail =
+                unified_pauli::validate_pauli_circuit(circuit, "DeterministicPauli", true).err();
+            p
+        }
         ExpectationRoute::Register(_) => Plan::new(ResolvedBackend::StabilizerRank, rule),
         ExpectationRoute::Tensor(planned, _) => {
             let mut plan = Plan::new(ResolvedBackend::TensorNetwork, rule);
@@ -1029,10 +1150,15 @@ fn inspect_marginal(
         MarginalRoute::Stochastic(samples) => {
             let mut p = Plan::new(ResolvedBackend::StochasticPauli, RouteRule::ExplicitBackend);
             p.exactness = PlannedExactness::Estimated { samples };
+            p.would_fail =
+                unified_pauli::validate_pauli_circuit(circuit, "StochasticPauli", false).err();
             Ok(p)
         }
         MarginalRoute::Deterministic(truncation) => {
-            Ok(pauli_plan(truncation, RouteRule::ExplicitBackend))
+            let mut p = pauli_plan(truncation, RouteRule::ExplicitBackend);
+            p.would_fail =
+                unified_pauli::validate_pauli_circuit(circuit, "DeterministicPauli", true).err();
+            Ok(p)
         }
         MarginalRoute::Register(_) => Ok(Plan::new(
             ResolvedBackend::StabilizerRank,
@@ -1069,7 +1195,13 @@ fn inspect_marginal(
             limits,
             backend_rule(kind, circuit, &backend),
         )),
-        MarginalRoute::Probabilities => inspect_probability(kind, circuit, limits),
+        MarginalRoute::Probabilities => {
+            let mut p = inspect_probability(kind, circuit, limits, true)?;
+            if p.would_fail.is_none() {
+                p.would_fail = check_probability_width(&p, circuit.num_qubits, limits, false).err();
+            }
+            Ok(p)
+        }
     }
 }
 
@@ -1132,6 +1264,9 @@ fn inspect_shift<S>(
     parameters: &crate::circuit::Parameters,
     limits: &ResolvedLimits,
 ) -> Result<Plan> {
+    if request.initial_state.is_some() || request.noise_model.is_some() {
+        require_unitary_circuit(&request.kind, request.circuit, "expectation values require")?;
+    }
     let observables: Vec<_> = hamiltonian.iter().map(|(_, terms)| terms.clone()).collect();
     let prepared = if request.initial_state.is_none()
         && request.noise_model.is_none()

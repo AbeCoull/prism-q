@@ -1100,6 +1100,35 @@ fn test_plan_cache_plans_each_position_once() {
     assert_eq!(planner_calls() - before, n);
 }
 
+#[test]
+fn test_clean_frontier_cache_skips_clean_pairs_on_sample_chain_40() {
+    let n = 40;
+    let circuit = crate::circuits::cz_chain_circuit(n, 4, 0xDEAD_BEEF);
+    let mut tn = loaded_backend(&circuit);
+    let mut plans: Vec<Option<CachedPlan>> = std::iter::repeat_with(|| None).take(n).collect();
+    let cached = tn.sample_sweep(4, 42, Some(&mut plans)).unwrap();
+    let uncached = tn.sample_sweep(4, 42, None).unwrap();
+    assert_eq!(cached.words, uncached.words);
+
+    let (mut clean_total, mut dirty_total) = (0usize, 0usize);
+    for (q, slot) in plans.iter().enumerate() {
+        let (clean, dirty) = slot
+            .as_ref()
+            .and_then(CachedPlan::frontier_pair_counts)
+            .unwrap_or_else(|| panic!("position {q} missing clean frontier"));
+        if q == 0 {
+            assert_eq!(dirty, 0, "position 0 must be completely clean");
+        }
+        clean_total += clean;
+        dirty_total += dirty;
+    }
+    assert_eq!(
+        (clean_total, dirty_total),
+        (8474, 4058),
+        "sample_chain/40 clean frontier should skip 67.6% of pairs on repeat shots"
+    );
+}
+
 fn slice_searches() -> usize {
     SLICE_SEARCHES.with(|calls| calls.get())
 }

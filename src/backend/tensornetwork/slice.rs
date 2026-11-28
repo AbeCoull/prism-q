@@ -706,11 +706,30 @@ pub(super) fn replay_plan(tensors: &mut Vec<Tensor>, plan: &ContractionPlan) -> 
 }
 
 /// One sweep position's plan, with the fingerprint of the metadata it was
-/// planned from and the slices last chosen at that position.
+/// planned from, the slices last chosen at that position, and any cached
+/// shot-independent clean frontier.
 pub(super) struct CachedPlan {
     pub(super) fingerprint: u64,
     plan: ContractionPlan,
     slices: Option<CachedSlices>,
+    frontier: Option<CleanFrontier>,
+}
+
+/// Shot-independent tensors and dirty pair schedule for an unsliced cached
+/// contraction whose clean leaves stay identical across shots.
+struct CleanFrontier {
+    dirty_hash: u64,
+    kind: FrontierKind,
+}
+
+enum FrontierKind {
+    Constant(Tensor),
+    Partial {
+        total_slots: usize,
+        dirty_leaves: Vec<(usize, usize, SmallVec<[LegId; 6]>)>,
+        clean_tensors: Vec<(usize, Tensor)>,
+        dirty_pairs: Vec<(usize, usize, usize)>,
+    },
 }
 
 /// Slice choice for the network, plan and limits that [`slice_key`] folds,
@@ -724,6 +743,16 @@ struct CachedSlices {
 impl CachedPlan {
     pub(super) fn cached_slice(&self) -> Option<Option<&SlicePlan>> {
         self.slices.as_ref().map(|held| held.slice.as_ref())
+    }
+
+    pub(super) fn frontier_pair_counts(&self) -> Option<(usize, usize)> {
+        let frontier = self.frontier.as_ref()?;
+        let total = self.plan.pairs.len();
+        let dirty = match &frontier.kind {
+            FrontierKind::Constant(_) => 0,
+            FrontierKind::Partial { dirty_pairs, .. } => dirty_pairs.len(),
+        };
+        Some((total - dirty, dirty))
     }
 }
 
@@ -742,6 +771,47 @@ fn metadata_fingerprint(tensors: &[Tensor]) -> u64 {
         }
         for &leg in &tensor.legs {
             hash = fold(hash, leg);
+        }
+    }
+    hash
+}
+
+/// [`metadata_fingerprint`] computed directly from the kept subset of
+/// `backend_tensors` and their bra leg map, without cloning tensor data.
+pub(super) fn doubled_metadata_fingerprint(
+    backend_tensors: &[Tensor],
+    keep: &[bool],
+    kept_count: usize,
+    bra_legs: &[LegId],
+) -> u64 {
+    let mut hash = fold(0xcbf2_9ce4_8422_2325, kept_count * 2);
+    for (tensor, &kept) in backend_tensors.iter().zip(keep) {
+        if !kept {
+            continue;
+        }
+        hash = fold(hash, tensor.rank());
+        for &dim in &tensor.shape {
+            hash = fold(hash, dim);
+        }
+        for &leg in &tensor.legs {
+            hash = fold(hash, leg);
+        }
+        hash = fold(hash, tensor.rank());
+        for &dim in &tensor.shape {
+            hash = fold(hash, dim);
+        }
+        for &leg in &tensor.legs {
+            hash = fold(hash, bra_legs[leg]);
+        }
+    }
+    hash
+}
+
+fn dirty_mask_hash(dirty: &[bool]) -> u64 {
+    let mut hash = fold(0xcbf2_9ce4_8422_2325, dirty.len());
+    for (idx, &d) in dirty.iter().enumerate() {
+        if d {
+            hash = fold(hash, idx);
         }
     }
     hash
@@ -772,9 +842,151 @@ pub(super) fn cached_plan<'s>(
             fingerprint,
             plan: plan_with_restarts(tensors),
             slices: None,
+            frontier: None,
         });
     }
     slot.as_mut().expect("slot filled above")
+}
+
+/// Replay `slot`'s cached clean frontier over `backend_tensors` when `fingerprint`
+/// and `dirty_mask` match, avoiding clean leaf clones and clean subtree contractions.
+pub(super) fn try_contract_frontier(
+    backend_tensors: &[Tensor],
+    fingerprint: u64,
+    dirty_mask: &[bool],
+    slot: &Option<CachedPlan>,
+) -> Option<Tensor> {
+    let cached = slot.as_ref()?;
+    if cached.fingerprint != fingerprint {
+        return None;
+    }
+    let frontier = cached.frontier.as_ref()?;
+    if frontier.dirty_hash != dirty_mask_hash(dirty_mask) {
+        return None;
+    }
+    LAST_SLICE_COUNT.with(|count| count.set(1));
+    LAST_DISCARDED.with(|weight| weight.set(0.0));
+    match &frontier.kind {
+        FrontierKind::Constant(tensor) => Some(tensor.clone()),
+        FrontierKind::Partial {
+            total_slots,
+            dirty_leaves,
+            clean_tensors,
+            dirty_pairs,
+        } => {
+            let mut slots: Vec<Option<Tensor>> = vec![None; *total_slots];
+            for &(src_idx, ket_slot, ref bra_l) in dirty_leaves {
+                let t = &backend_tensors[src_idx];
+                slots[ket_slot] = Some(t.clone());
+                slots[ket_slot + 1] = Some(Tensor {
+                    data: t.data.iter().map(Complex64::conj).collect(),
+                    shape: t.shape.clone(),
+                    legs: bra_l.clone(),
+                });
+            }
+            for &(slot_id, ref t) in clean_tensors {
+                slots[slot_id] = Some(t.clone());
+            }
+            let mut pool = BufferPool::default();
+            for &(i, j, dst) in dirty_pairs {
+                let a_tensor = slots[i].take().expect("dirty pair operand live");
+                let b_tensor = slots[j].take().expect("dirty pair operand live");
+                slots[dst] = Some(contract_with(&a_tensor, &b_tensor, &mut pool));
+                pool.give(a_tensor.data);
+                pool.give(b_tensor.data);
+            }
+            Some(join_disjoint(slots, &mut pool))
+        }
+    }
+}
+
+/// Contract `tensors` using `slot`, populating a [`CleanFrontier`] on an
+/// unsliced pass so repeat shots reuse every clean subtree.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn contract_cached_with_frontier(
+    tensors: &mut Vec<Tensor>,
+    leaf_dirty: &[bool],
+    dirty_leaves: Vec<(usize, usize, SmallVec<[LegId; 6]>)>,
+    dirty_mask: &[bool],
+    slot: &mut Option<CachedPlan>,
+    limits: ContractionLimits,
+    backend: &str,
+    operation: &str,
+) -> Result<Tensor> {
+    let cached = cached_plan(tensors, slot);
+    if cached.plan.peak > limits.peak_cap || tensors.is_empty() {
+        return contract_reusing(
+            tensors,
+            &cached.plan,
+            Some(&mut cached.slices),
+            limits,
+            backend,
+            operation,
+        );
+    }
+
+    LAST_SLICE_COUNT.with(|count| count.set(1));
+    LAST_DISCARDED.with(|weight| weight.set(0.0));
+
+    let input_len = tensors.len();
+    let total_slots = input_len + cached.plan.pairs.len();
+    let mut dirty = Vec::with_capacity(total_slots);
+    dirty.extend_from_slice(leaf_dirty);
+
+    let mut slots: Vec<Option<Tensor>> = std::mem::take(tensors).into_iter().map(Some).collect();
+    slots.reserve(cached.plan.pairs.len());
+    let mut clean_tensors: Vec<(usize, Tensor)> = Vec::new();
+    let mut dirty_pairs: Vec<(usize, usize, usize)> = Vec::new();
+    let mut pool = BufferPool::default();
+
+    for &(i, j) in &cached.plan.pairs {
+        let dst = slots.len();
+        let di = dirty[i];
+        let dj = dirty[j];
+        let is_dirty = di || dj;
+        dirty.push(is_dirty);
+
+        let a_tensor = slots[i].take().expect("planned pair is live");
+        let b_tensor = slots[j].take().expect("planned pair is live");
+        if is_dirty {
+            if !di {
+                clean_tensors.push((i, a_tensor.clone()));
+            }
+            if !dj {
+                clean_tensors.push((j, b_tensor.clone()));
+            }
+            dirty_pairs.push((i, j, dst));
+        }
+        slots.push(Some(contract_with(&a_tensor, &b_tensor, &mut pool)));
+        pool.give(a_tensor.data);
+        pool.give(b_tensor.data);
+    }
+
+    let mut any_live_dirty = false;
+    for (idx, held) in slots.iter().enumerate() {
+        if let Some(t) = held {
+            if dirty[idx] {
+                any_live_dirty = true;
+            } else if !dirty_leaves.is_empty() {
+                clean_tensors.push((idx, t.clone()));
+            }
+        }
+    }
+
+    let result = join_disjoint(slots, &mut pool);
+    let dirty_hash = dirty_mask_hash(dirty_mask);
+    let kind = if dirty_leaves.is_empty() && !any_live_dirty && dirty_pairs.is_empty() {
+        FrontierKind::Constant(result.clone())
+    } else {
+        FrontierKind::Partial {
+            total_slots,
+            dirty_leaves,
+            clean_tensors,
+            dirty_pairs,
+        }
+    };
+    cached.frontier = Some(CleanFrontier { dirty_hash, kind });
+    Ok(result)
 }
 
 /// [`contract_within`] on the plan cached in `slot`, which also keeps the slice

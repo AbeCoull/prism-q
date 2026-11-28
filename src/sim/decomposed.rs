@@ -104,6 +104,7 @@ pub(super) fn run_decomposed(
         circuit.num_classical_bits,
         circuit.num_qubits,
         opts,
+        limits,
     )
 }
 
@@ -222,7 +223,43 @@ impl PreparedBlocks {
             circuit.num_classical_bits,
             circuit.num_qubits,
             opts,
+            limits,
         )
+    }
+}
+
+fn check_decomposed_min_fidelity(metadata: &RunMetadata, limits: &ResolvedLimits) -> Result<()> {
+    let Some(floor) = limits.min_fidelity_estimate else {
+        return Ok(());
+    };
+    if let Some(bound) = metadata.fidelity_lower_bound()
+        && (bound < floor || (floor == 1.0 && !metadata.is_exact()))
+    {
+        return Err(decomposed_min_fidelity_error(bound, floor));
+    }
+    Ok(())
+}
+
+#[cold]
+fn decomposed_min_fidelity_error(bound: f64, floor: f64) -> crate::error::PrismError {
+    let reason = if bound >= floor {
+        "decomposed MPS run left an approximate state below min_fidelity_estimate floor 1; \
+         raise max_bond_dim or lower the floor"
+            .to_string()
+    } else if bound >= 0.999_999_5 {
+        format!(
+            "decomposed MPS truncation fidelity estimate {bound:.12} fell below \
+             min_fidelity_estimate floor {floor}; raise max_bond_dim or lower the floor"
+        )
+    } else {
+        format!(
+            "decomposed MPS truncation fidelity estimate {bound:.6} fell below \
+             min_fidelity_estimate floor {floor}; raise max_bond_dim or lower the floor"
+        )
+    };
+    crate::error::PrismError::IncompatibleBackend {
+        backend: "Mps".to_string(),
+        reason,
     }
 }
 
@@ -233,6 +270,7 @@ fn merge_decomposed_results(
     num_classical_bits: usize,
     num_qubits: usize,
     opts: &SimOptions,
+    limits: &ResolvedLimits,
 ) -> Result<RunOutcome> {
     let mut factored_blocks: Vec<FactoredBlock> = Vec::new();
     let mut merged_classical = vec![false; num_classical_bits];
@@ -269,10 +307,13 @@ fn merge_decomposed_results(
         None
     };
 
+    let metadata = RunMetadata::decomposed(block_metadata);
+    check_decomposed_min_fidelity(&metadata, limits)?;
+
     Ok(RunOutcome {
         classical_bits: merged_classical,
         probabilities,
-        metadata: RunMetadata::decomposed(block_metadata),
+        metadata,
         saves: Vec::new(),
     })
 }
@@ -308,6 +349,7 @@ pub(super) fn run_decomposed_prefused(
         original_circuit.num_classical_bits,
         original_circuit.num_qubits,
         opts,
+        limits,
     )
 }
 
@@ -362,8 +404,9 @@ pub(super) fn sample_terminal_blocks(
             }
         }
     }
-    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits)
-        .with_metadata(RunMetadata::decomposed(metadata)))
+    let metadata = RunMetadata::decomposed(metadata);
+    check_decomposed_min_fidelity(&metadata, limits)?;
+    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata))
 }
 
 /// Combine per-block probability vectors via Kronecker product.

@@ -103,6 +103,7 @@ use rayon::prelude::*;
 /// # Ok::<(), prism_q::PrismError>(())
 /// ```
 pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
+    crate::limits::ResolvedLimits::process_default().validate()?;
     super::validate_measured_qubit_reuse(program)?;
     if program.num_expectation_values() > 0 {
         super::validate_qec_exp_val_placement(program)?;
@@ -261,6 +262,7 @@ pub struct QecProfiledCounts {
 /// Compile a native QEC program into a staged sampler for benchmarks.
 #[cfg(feature = "bench-internal")]
 pub fn compile_qec_profiled_sampler(program: &QecProgram) -> Result<QecProfiledSampler> {
+    crate::limits::ResolvedLimits::process_default().validate()?;
     let (has_noise, has_feedforward) = validate_qec_compiled_program(program)?;
     qec_runner_chunk_size(program.options())?;
 

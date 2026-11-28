@@ -58,6 +58,7 @@ pub fn run_qec_program_with_strategy(
     program: &QecProgram,
     strategy: QecTStrategy,
 ) -> Result<QecSampleResult> {
+    ResolvedLimits::process_default().validate()?;
     match strategy {
         QecTStrategy::Auto => run_qec_program_auto(program, &lower_pauli_observables(program)?),
         QecTStrategy::Reference => run_qec_program_reference(program),
@@ -73,6 +74,7 @@ pub fn run_qec_program_with_strategy(
 ///
 /// [`Limits::max_qec_reference_qubits`]: crate::Limits::max_qec_reference_qubits
 pub(super) fn run_qec_program_auto_or_reference(program: &QecProgram) -> Result<QecSampleResult> {
+    ResolvedLimits::process_default().validate()?;
     match lower_pauli_observables(program) {
         Ok(lowered) => run_qec_program_auto(program, &lowered),
         Err(refusal) if is_lowering_refusal(&refusal) => {
@@ -961,6 +963,7 @@ pub fn run_qec_program_spd_rerouted(
     program: &QecProgram,
     reroutes: &[QecObservableReroute],
 ) -> Result<QecSampleResult> {
+    ResolvedLimits::process_default().validate()?;
     if program.num_expectation_values() > 0 {
         return Err(PrismError::IncompatibleBackend {
             backend: "QEC SPD rerouted".to_string(),

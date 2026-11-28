@@ -160,6 +160,12 @@ impl<'c, SeedState> Simulate<'c, SeedState> {
     ) -> Self {
         self.backend(BackendKind::StatevectorDistributed { context })
     }
+
+    pub(super) fn resolved_limits(&self) -> Result<ResolvedLimits> {
+        let limits = ResolvedLimits::resolve(self.limits.as_ref());
+        limits.validate()?;
+        Ok(limits)
+    }
 }
 
 impl<'c> Simulate<'c, Unseeded> {
@@ -182,10 +188,6 @@ impl<'c> Simulate<'c, Seeded> {
     #[inline]
     fn seed_value(&self) -> u64 {
         self.seed.seed
-    }
-
-    pub(super) fn resolved_limits(&self) -> ResolvedLimits {
-        ResolvedLimits::resolve(self.limits.as_ref())
     }
 
     /// Trajectory replay reinitializes a pure state per shot and the compiled
@@ -213,7 +215,7 @@ impl<'c> Simulate<'c, Seeded> {
     #[inline]
     pub fn run(self) -> Result<RunOutcome> {
         let seed = self.seed_value();
-        let limits = &self.resolved_limits();
+        let limits = &self.resolved_limits()?;
         if self.require_exact {
             self.reject_planned_approximation(Query::Run)?;
         }
@@ -262,7 +264,7 @@ impl<'c> Simulate<'c, Seeded> {
     }
 
     fn reject_planned_approximation(&self, query: Query<'_>) -> Result<()> {
-        let plan = plan::inspect(self, query, &self.resolved_limits())?;
+        let plan = plan::inspect(self, query, &self.resolved_limits()?)?;
         let backend = plan::approximation_name(&self.kind, plan.backend);
         reject_predicted_route(
             (plan.exactness != PlannedExactness::Exact).then_some(backend.as_str()),
@@ -275,7 +277,7 @@ impl<'c> Simulate<'c, Seeded> {
     pub fn shots(self, num_shots: usize) -> Result<ShotsResult> {
         self.reject_saves("shots")?;
         let seed = self.seed_value();
-        let limits = &self.resolved_limits();
+        let limits = &self.resolved_limits()?;
         let require_exact = self.require_exact;
         if require_exact {
             self.reject_planned_approximation(Query::Shots(num_shots))?;
@@ -309,7 +311,7 @@ impl<'c> Simulate<'c, Seeded> {
     pub fn sample_counts(self, num_shots: usize) -> Result<CountsResult> {
         self.reject_saves("sample_counts")?;
         let seed = self.seed_value();
-        let limits = &self.resolved_limits();
+        let limits = &self.resolved_limits()?;
         if self.require_exact {
             self.reject_planned_approximation(Query::Counts(num_shots))?;
         }
@@ -348,7 +350,7 @@ impl<'c> Simulate<'c, Seeded> {
     pub fn marginals(self) -> Result<MarginalsResult> {
         self.reject_saves("marginals")?;
         let seed = self.seed_value();
-        let limits = &self.resolved_limits();
+        let limits = &self.resolved_limits()?;
         if let Some(noise_model) = self.noise_model {
             require_exact_mixture(&self.kind, "marginals")?;
             reject_readout_at(self.circuit, noise_model, "marginals")?;
@@ -416,7 +418,7 @@ impl<'c> Simulate<'c, Seeded> {
     ) -> Result<ExpectationResult> {
         self.reject_saves("expectation_values_reported")?;
         let seed = self.seed_value();
-        let limits = &self.resolved_limits();
+        let limits = &self.resolved_limits()?;
         if let Some(noise_model) = self.noise_model {
             reject_readout_at(self.circuit, noise_model, "expectation values")?;
         }
@@ -512,7 +514,7 @@ impl<'c> Simulate<'c, Seeded> {
         observable: &PauliObservable,
     ) -> Result<ObservableExpectation> {
         let seed = self.seed_value();
-        let limits = &self.resolved_limits();
+        let limits = &self.resolved_limits()?;
         if let Some(noise_model) = self.noise_model {
             reject_readout_at(self.circuit, noise_model, "observable expectation")?;
         }
@@ -621,7 +623,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// terms over `H`'s `T`; see [`PauliObservable::square`].
     pub fn observable_variance(self, observable: &PauliObservable) -> Result<ObservableVariance> {
         self.reject_saves("observable_variance")?;
-        let limits = &self.resolved_limits();
+        let limits = &self.resolved_limits()?;
         if self.noise_model.is_none()
             && self.initial_state.is_none()
             && !matches!(self.kind, BackendKind::PauliPath { .. })
@@ -666,7 +668,7 @@ impl<'c> Simulate<'c, Seeded> {
             && self.noise_model.is_none()
             && self.initial_state.is_none()
             && let Some(plan) =
-                decide_register_subset(self.circuit, qubits, &self.resolved_limits())
+                decide_register_subset(self.circuit, qubits, &self.resolved_limits()?)
         {
             return Ok(subset_probabilities(plan.values()));
         }
@@ -698,7 +700,7 @@ impl<'c> Simulate<'c, Seeded> {
     pub fn state_vector(self) -> Result<Vec<Complex64>> {
         self.reject_saves("state_vector")?;
         let seed = self.seed_value();
-        let limits = &self.resolved_limits();
+        let limits = &self.resolved_limits()?;
         let diagnostic = Diagnostic::StateVector;
         require_unitary_circuit(&self.kind, self.circuit, "a statevector requires")?;
         if self.require_exact {
@@ -744,7 +746,7 @@ impl<'c> Simulate<'c, Seeded> {
     pub fn reduced_density_matrix(self, qubits: &[usize]) -> Result<ReducedDensityMatrix> {
         self.reject_saves("reduced_density_matrix")?;
         let seed = self.seed_value();
-        let limits = &self.resolved_limits();
+        let limits = &self.resolved_limits()?;
         let diagnostic = Diagnostic::ReducedDensityMatrix;
         let terminal = diagnostic.terminal();
         crate::backend::schmidt::validate_qubit_set(qubits, self.circuit.num_qubits)?;
@@ -815,7 +817,7 @@ impl<'c> Simulate<'c, Seeded> {
     pub fn entanglement_entropy(self, subsystem: &[usize]) -> Result<EntropyResult> {
         self.reject_saves("entanglement_entropy")?;
         let seed = self.seed_value();
-        let limits = &self.resolved_limits();
+        let limits = &self.resolved_limits()?;
         let diagnostic = Diagnostic::Entropy;
         let terminal = diagnostic.terminal();
         crate::backend::schmidt::validate_subsystem(subsystem, self.circuit.num_qubits)?;
@@ -920,7 +922,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// the rule that chose it.
     fn overlap_side(self, diagnostic: Diagnostic) -> Result<(Box<dyn Backend>, RouteRule)> {
         let seed = self.seed_value();
-        let limits = &self.resolved_limits();
+        let limits = &self.resolved_limits()?;
         let terminal = diagnostic.terminal();
         require_unitary_circuit(&self.kind, self.circuit, "a state overlap requires")?;
         if self.require_exact {
@@ -967,7 +969,7 @@ impl<'c> Simulate<'c, Seeded> {
     ) -> Result<gradient::ExpectationGradient> {
         self.reject_saves("expectation_gradient")?;
         let seed = self.seed_value();
-        let limits = &self.resolved_limits();
+        let limits = &self.resolved_limits()?;
         if self.noise_model.is_some() {
             return Err(PrismError::IncompatibleBackend {
                 backend: format!("{:?}", self.kind),

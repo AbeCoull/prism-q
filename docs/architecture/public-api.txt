@@ -3713,6 +3713,7 @@ pub prism_q::Limits::max_statevector_qubits: core::option::Option<usize>
 pub prism_q::Limits::max_tn_peak_qubits: core::option::Option<usize>
 pub prism_q::Limits::max_tn_slices: core::option::Option<usize>
 pub prism_q::Limits::memory_budget_bytes: core::option::Option<u64>
+pub prism_q::Limits::min_fidelity_estimate: core::option::Option<f64>
 impl prism_q::Limits
 pub fn prism_q::Limits::auto_mps_bond_dim(self, usize) -> Self
 pub fn prism_q::Limits::max_density_matrix_qubits(self, usize) -> Self
@@ -3727,6 +3728,7 @@ pub fn prism_q::Limits::max_statevector_qubits(self, usize) -> Self
 pub fn prism_q::Limits::max_tn_peak_qubits(self, usize) -> Self
 pub fn prism_q::Limits::max_tn_slices(self, usize) -> Self
 pub fn prism_q::Limits::memory_budget_bytes(self, u64) -> Self
+pub fn prism_q::Limits::min_fidelity_estimate(self, f64) -> Self
 pub fn prism_q::Limits::new() -> Self
 pub struct prism_q::MarginalsAccumulator
 impl prism_q::MarginalsAccumulator

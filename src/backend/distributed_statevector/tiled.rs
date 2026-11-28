@@ -279,6 +279,7 @@ impl TiledStatevector {
             });
         }
         let limits = crate::limits::ResolvedLimits::process_default();
+        limits.validate()?;
         let cap = limits.statevector_qubits.value;
         if w + 1 > cap {
             return Err(PrismError::InvalidParameter {

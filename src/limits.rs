@@ -18,13 +18,13 @@ use crate::error::{PrismError, ResourceKind};
 /// to detection, and the highest layer that sets a value wins. A layer that sets
 /// `memory_budget_bytes` re-derives every memory cap from its budget and discards the
 /// per-cap values of the layers below it; its own per-cap values still apply. The slice
-/// budget, the bond dimension and the QEC reference width are not memory caps and
-/// survive a budget.
+/// budget, the bond dimension, the QEC reference width and the fidelity floor are not
+/// memory caps and survive a budget.
 ///
 /// Each field names the environment variable it overrides.
 ///
 /// [`Simulate::limits`]: crate::Simulate::limits
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Limits {
     /// Bytes every memory cap derives from: a cap is the widest allocation of its kind
@@ -64,6 +64,10 @@ pub struct Limits {
     /// The default is fixed rather than derived from memory because that runner costs
     /// time, shots times `2^n`, before it costs memory.
     pub max_qec_reference_qubits: Option<usize>,
+    /// Minimum truncation fidelity estimate (`(1.0 - discarded).max(0.0)`) an MPS run
+    /// must maintain before aborting mid-circuit. Opt-in with no default (`None`). Not a
+    /// memory cap, so `memory_budget_bytes` leaves it untouched.
+    pub min_fidelity_estimate: Option<f64>,
 }
 
 impl Limits {
@@ -81,6 +85,7 @@ impl Limits {
         max_tn_slices: None,
         auto_mps_bond_dim: None,
         max_qec_reference_qubits: None,
+        min_fidelity_estimate: None,
     };
 
     /// Limits that set nothing, so every value comes from the layers below.
@@ -150,6 +155,19 @@ impl Limits {
 
     pub fn max_qec_reference_qubits(mut self, qubits: usize) -> Self {
         self.max_qec_reference_qubits = Some(qubits);
+        self
+    }
+
+    /// Set the minimum truncation fidelity estimate an MPS run must maintain.
+    ///
+    /// # Panics
+    /// Panics unless `floor` is finite and lies in `[0.0, 1.0]`.
+    pub fn min_fidelity_estimate(mut self, floor: f64) -> Self {
+        assert!(
+            floor.is_finite() && (0.0..=1.0).contains(&floor),
+            "min_fidelity_estimate must lie in [0.0, 1.0], got {floor}"
+        );
+        self.min_fidelity_estimate = Some(floor);
         self
     }
 }
@@ -253,7 +271,7 @@ pub(crate) struct Limit {
 /// to dispatch and the backends it builds. Declared `pub` only so the sealed
 /// `Backend` supertrait can return it; this module is private, so it has no public
 /// path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResolvedLimits {
     pub(crate) statevector_qubits: Limit,
     pub(crate) density_matrix_qubits: Limit,
@@ -273,6 +291,7 @@ pub struct ResolvedLimits {
     pub(crate) tn_slices: Limit,
     pub(crate) auto_mps_bond_dim: Limit,
     pub(crate) qec_reference_qubits: Limit,
+    pub(crate) min_fidelity_estimate: Option<f64>,
 }
 
 /// Slicing trades a multiplicative time factor for a divided peak, so the slice budget
@@ -330,6 +349,19 @@ impl ResolvedLimits {
     /// The export cap as a shift-safe width.
     pub(crate) fn export_cap(&self) -> usize {
         self.export_qubits.value.min(usize::BITS as usize - 1)
+    }
+
+    pub(crate) fn validate(&self) -> crate::error::Result<()> {
+        if let Some(floor) = self.min_fidelity_estimate
+            && !(floor.is_finite() && (0.0..=1.0).contains(&floor))
+        {
+            return Err(PrismError::InvalidParameter {
+                message: format!(
+                    "min_fidelity_estimate must be finite and in [0.0, 1.0], got {floor}"
+                ),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -419,6 +451,7 @@ impl Layers {
                 tn_slices: detected(DEFAULT_TN_SLICES),
                 auto_mps_bond_dim: detected(DEFAULT_AUTO_MPS_BOND_DIM),
                 qec_reference_qubits: detected(DEFAULT_QEC_REFERENCE_QUBITS),
+                min_fidelity_estimate: None,
             },
             density_matrix_override: None,
         };
@@ -494,6 +527,9 @@ impl Layers {
         );
         if let Some(value) = limits.max_density_matrix_qubits {
             self.density_matrix_override = Some(Limit { value, source });
+        }
+        if let Some(floor) = limits.min_fidelity_estimate {
+            caps.min_fidelity_estimate = Some(floor);
         }
     }
 

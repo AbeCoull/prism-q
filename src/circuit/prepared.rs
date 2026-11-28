@@ -86,6 +86,7 @@ impl PreparedCircuit {
         limits: Option<Limits>,
     ) -> Result<Self> {
         params.validate(&template)?;
+        ResolvedLimits::resolve(limits.as_ref()).validate()?;
         let route = prepared_route(&kind, &template, limits.as_ref());
         let (skeleton, plan) = FusionPlan::capture_with_params(
             &template,

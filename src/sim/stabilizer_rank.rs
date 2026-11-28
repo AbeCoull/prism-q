@@ -491,6 +491,7 @@ const MIN_TERMS_FOR_PAR: usize = 16;
 /// 24 qubits falls back to one branch per T choice, at most `2^20` of them.
 /// `n <= 25`.
 pub fn run_stabilizer_rank(circuit: &Circuit, seed: u64) -> Result<StabRankResult> {
+    crate::limits::ResolvedLimits::process_default().validate()?;
     exact_probabilities(circuit, seed, MAX_PROBABILITY_REGISTER_QUBITS)
 }
 
@@ -697,6 +698,7 @@ pub fn run_stabilizer_rank_approx(
     max_terms: usize,
     seed: u64,
 ) -> Result<StabRankResult> {
+    crate::limits::ResolvedLimits::process_default().validate()?;
     let _ = seed;
     let n = circuit.num_qubits;
     let circuit = lower_probability_circuit(circuit)?;
@@ -1270,6 +1272,7 @@ pub fn run_stabilizer_rank_shots(
     num_shots: usize,
     seed: u64,
 ) -> Result<super::ShotsResult> {
+    crate::limits::ResolvedLimits::process_default().validate()?;
     let lowered = lower_clifford_t_circuit(circuit)?;
     let circuit = &*lowered;
     if !circuit.has_t_gates() {

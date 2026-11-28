@@ -69,6 +69,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// `IncompatibleBackend` for a circuit that is not unitary, and whatever
     /// the underlying terminal returns for a route that cannot serve a request.
     pub fn braket_results(self, specs: &[ResultSpec]) -> Result<Vec<ResultValue>> {
+        let _ = self.resolved_limits()?;
         let num_qubits = self.circuit.num_qubits;
         crate::sim::require_unitary_circuit(
             &self.kind,
@@ -265,7 +266,7 @@ impl<'c> Simulate<'c, Seeded> {
                 (ResultSpec::Probability(targets), _) => {
                     let targets = resolve(targets, num_qubits);
                     crate::backend::schmidt::validate_qubit_set(&targets, num_qubits)?;
-                    let limits = self.resolved_limits();
+                    let limits = self.resolved_limits()?;
                     if targets.len() > limits.export_cap() {
                         return Err(crate::backend::schmidt::export_cap_exceeded(
                             &format!("{:?}", self.kind),

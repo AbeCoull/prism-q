@@ -156,7 +156,7 @@ impl<SeedState> Simulate<'_, SeedState> {
     /// # Ok::<(), prism_q::PrismError>(())
     /// ```
     pub fn plan(&self, query: Query<'_>) -> Result<Plan> {
-        let limits = ResolvedLimits::resolve(self.limits.as_ref());
+        let limits = self.resolved_limits()?;
         match query {
             Query::Gradient {
                 hamiltonian,

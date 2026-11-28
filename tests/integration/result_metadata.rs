@@ -6,8 +6,8 @@ use crate::common;
 use common::SEED;
 use prism_q::circuits::{brickwork_circuit, independent_random_blocks};
 use prism_q::{
-    BackendKind, Circuit, CircuitBuilder, Engine, Exactness, Gate, NoiseModel, PauliTerm,
-    Placement, PrismError, ResolvedBackend, SpdTruncation, run_shots_compiled, simulate,
+    BackendKind, Circuit, CircuitBuilder, Engine, Exactness, Gate, Limits, NoiseModel, PauliTerm,
+    Placement, PrismError, Query, ResolvedBackend, SpdTruncation, run_shots_compiled, simulate,
 };
 
 fn bell() -> Circuit {
@@ -659,4 +659,305 @@ fn require_exact_rejects_shots_the_family_tree_takes() {
         .sample_counts(8)
         .unwrap_err();
     assert!(is_mps(&err), "{err:?}");
+}
+
+#[test]
+fn min_fidelity_estimate_is_opt_in_and_aborts_mps_mid_circuit() {
+    let circuit = brickwork_circuit(10, 24, SEED);
+
+    let unfloored = simulate(&circuit)
+        .backend(BackendKind::Mps { max_bond_dim: 2 })
+        .limits(Limits::default())
+        .seed(SEED)
+        .run()
+        .unwrap();
+    let bound = unfloored
+        .metadata
+        .fidelity_lower_bound()
+        .expect("bond-2 brickwork truncates");
+    assert!(bound < 0.5, "expected bound < 0.5, got {bound}");
+
+    let err = simulate(&circuit)
+        .backend(BackendKind::Mps { max_bond_dim: 2 })
+        .limits(Limits::new().min_fidelity_estimate(0.5))
+        .seed(SEED)
+        .run()
+        .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            PrismError::IncompatibleBackend { backend, reason }
+                if backend == "Mps" && reason.contains("min_fidelity_estimate")
+        ),
+        "{err:?}"
+    );
+
+    let auto_err = simulate(&circuit)
+        .backend(BackendKind::Auto)
+        .limits(
+            Limits::new()
+                .max_statevector_qubits(4)
+                .auto_mps_bond_dim(2)
+                .min_fidelity_estimate(0.5),
+        )
+        .seed(SEED)
+        .run()
+        .unwrap_err();
+    assert!(
+        matches!(&auto_err, PrismError::IncompatibleBackend { backend, .. } if backend == "Mps"),
+        "{auto_err:?}"
+    );
+
+    let budget_err = simulate(&circuit)
+        .backend(BackendKind::Mps { max_bond_dim: 2 })
+        .limits(
+            Limits::new()
+                .memory_budget_bytes(1 << 30)
+                .min_fidelity_estimate(0.5),
+        )
+        .seed(SEED)
+        .run()
+        .unwrap_err();
+    assert!(
+        matches!(&budget_err, PrismError::IncompatibleBackend { backend, .. } if backend == "Mps"),
+        "{budget_err:?}"
+    );
+
+    let zero_floor = simulate(&circuit)
+        .backend(BackendKind::Mps { max_bond_dim: 2 })
+        .limits(Limits::new().min_fidelity_estimate(0.0))
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert_eq!(zero_floor.metadata.backend, ResolvedBackend::Mps);
+
+    let mut ghz = Circuit::new(6, 0);
+    ghz.add_gate(Gate::H, &[0]);
+    for q in 0..5 {
+        ghz.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    let exact_ok = simulate(&ghz)
+        .backend(BackendKind::Mps { max_bond_dim: 4 })
+        .limits(Limits::new().min_fidelity_estimate(1.0))
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert!(exact_ok.metadata.is_exact());
+
+    let shallow = brickwork_circuit(6, 4, SEED);
+    let passing = simulate(&shallow)
+        .backend(BackendKind::Mps { max_bond_dim: 4 })
+        .limits(Limits::new().min_fidelity_estimate(0.5))
+        .seed(SEED)
+        .run()
+        .unwrap();
+    if let Some(passing_bound) = passing.metadata.fidelity_lower_bound() {
+        assert!(passing_bound >= 0.5, "{passing_bound}");
+    }
+}
+
+#[test]
+fn min_fidelity_estimate_propagates_across_shots_decomposed_and_plan() {
+    let bw = brickwork_circuit(10, 24, SEED);
+
+    let mut terminal_measured = bw.clone();
+    terminal_measured.num_classical_bits = 10;
+    for q in 0..10 {
+        terminal_measured.add_measure(q, q);
+    }
+    let native_err = simulate(&terminal_measured)
+        .backend(BackendKind::Mps { max_bond_dim: 2 })
+        .limits(Limits::new().min_fidelity_estimate(0.5))
+        .seed(SEED)
+        .shots(4)
+        .unwrap_err();
+    assert!(
+        matches!(&native_err, PrismError::IncompatibleBackend { backend, .. } if backend == "Mps"),
+        "{native_err:?}"
+    );
+
+    let mut mid_measured = Circuit::new(10, 10);
+    mid_measured.add_gate(Gate::H, &[0]);
+    mid_measured.add_measure(0, 0);
+    mid_measured.instructions.extend(bw.instructions.clone());
+    mid_measured.add_measure(1, 1);
+    let pershot_err = simulate(&mid_measured)
+        .backend(BackendKind::Mps { max_bond_dim: 2 })
+        .limits(Limits::new().min_fidelity_estimate(0.5))
+        .seed(SEED)
+        .shots(4)
+        .unwrap_err();
+    assert!(
+        matches!(&pershot_err, PrismError::IncompatibleBackend { backend, .. } if backend == "Mps"),
+        "{pershot_err:?}"
+    );
+
+    let decomposed = independent_random_blocks(2, 10, 24, SEED);
+    let dec_err = simulate(&decomposed)
+        .backend(BackendKind::Mps { max_bond_dim: 2 })
+        .limits(Limits::new().min_fidelity_estimate(0.5))
+        .seed(SEED)
+        .run()
+        .unwrap_err();
+    assert!(
+        matches!(&dec_err, PrismError::IncompatibleBackend { backend, .. } if backend == "Mps"),
+        "{dec_err:?}"
+    );
+
+    let plan = simulate(&bw)
+        .backend(BackendKind::Mps { max_bond_dim: 2 })
+        .limits(Limits::new().min_fidelity_estimate(0.5))
+        .plan(Query::Run)
+        .unwrap();
+    assert!(plan.would_fail.is_none(), "{:?}", plan.would_fail);
+
+    let exact_plan = simulate(&bw)
+        .backend(BackendKind::Mps { max_bond_dim: 2 })
+        .limits(Limits::new().min_fidelity_estimate(0.5))
+        .require_exact()
+        .plan(Query::Run)
+        .unwrap();
+    assert!(exact_plan.would_fail.is_some());
+
+    for bad in [-0.1, 1.5, f64::NAN, f64::INFINITY] {
+        let mut bad_limits = Limits::new();
+        bad_limits.min_fidelity_estimate = Some(bad);
+        let run_err = simulate(&bw)
+            .limits(bad_limits)
+            .seed(SEED)
+            .run()
+            .unwrap_err();
+        assert!(
+            matches!(run_err, PrismError::InvalidParameter { .. }),
+            "expected InvalidParameter on run for {bad}, got {run_err:?}"
+        );
+        let plan_err = simulate(&bw)
+            .limits(bad_limits)
+            .plan(Query::Run)
+            .unwrap_err();
+        assert!(
+            matches!(plan_err, PrismError::InvalidParameter { .. }),
+            "expected InvalidParameter on plan for {bad}, got {plan_err:?}"
+        );
+    }
+}
+
+#[test]
+fn min_fidelity_estimate_enforces_decomposed_product_floor_and_precision_bounds() {
+    use prism_q::circuit::braket::{Observable, ObservableFactor, ResultSpec, Targets};
+
+    let single_block = brickwork_circuit(5, 9, SEED);
+    let single_outcome = simulate(&single_block)
+        .backend(BackendKind::Mps { max_bond_dim: 2 })
+        .limits(Limits::new().min_fidelity_estimate(0.5))
+        .seed(SEED)
+        .run()
+        .unwrap();
+    let single_bound = single_outcome
+        .metadata
+        .fidelity_lower_bound()
+        .expect("single 5-qubit brickwork block truncates at bond 2");
+    assert!(single_bound >= 0.5, "expected >= 0.5, got {single_bound}");
+
+    let mut two_blocks = Circuit::new(10, 0);
+    two_blocks
+        .instructions
+        .extend(single_block.instructions.clone());
+    for inst in &single_block.instructions {
+        let mut shifted = inst.clone();
+        if let prism_q::Instruction::Gate { targets, .. } = &mut shifted {
+            for t in targets.iter_mut() {
+                *t += 5;
+            }
+        }
+        two_blocks.instructions.push(shifted);
+    }
+    let unfloored_two = simulate(&two_blocks)
+        .backend(BackendKind::Mps { max_bond_dim: 2 })
+        .limits(Limits::default())
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert_eq!(unfloored_two.metadata.backend, ResolvedBackend::Decomposed);
+    let merged_bound = unfloored_two
+        .metadata
+        .fidelity_lower_bound()
+        .expect("merged decomposed bound");
+    assert!(merged_bound < 0.5, "expected < 0.5, got {merged_bound}");
+
+    let dec_err = simulate(&two_blocks)
+        .backend(BackendKind::Mps { max_bond_dim: 2 })
+        .limits(Limits::new().min_fidelity_estimate(0.5))
+        .seed(SEED)
+        .run()
+        .unwrap_err();
+    assert!(
+        matches!(
+            &dec_err,
+            PrismError::IncompatibleBackend { backend, reason }
+                if backend == "Mps" && reason.contains("min_fidelity_estimate")
+        ),
+        "{dec_err:?}"
+    );
+
+    for theta in [2e-10, 2e-7] {
+        let mut tiny = Circuit::new(2, 0);
+        tiny.add_gate(Gate::H, &[0]);
+        tiny.add_gate(Gate::H, &[1]);
+        tiny.add_gate(Gate::Rzz(theta), &[0, 1]);
+
+        let unfloored = simulate(&tiny)
+            .backend(BackendKind::Mps { max_bond_dim: 1 })
+            .seed(SEED)
+            .run()
+            .unwrap();
+        assert!(!unfloored.metadata.is_exact(), "theta={theta}");
+
+        let err = simulate(&tiny)
+            .backend(BackendKind::Mps { max_bond_dim: 1 })
+            .limits(Limits::new().min_fidelity_estimate(1.0))
+            .seed(SEED)
+            .run()
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PrismError::IncompatibleBackend { backend, reason }
+                    if backend == "Mps"
+                        && reason.contains("discarded ")
+                        && reason.contains("min_fidelity_estimate floor 1")
+            ),
+            "theta={theta}: {err:?}"
+        );
+    }
+
+    let id_spec = ResultSpec::Expectation(Observable {
+        factors: vec![ObservableFactor::Identity {
+            targets: Targets::All,
+        }],
+    });
+    for bad in [-1e-12, 1.0 + 1e-12, f64::NAN, f64::NEG_INFINITY] {
+        let mut bad_limits = Limits::new();
+        bad_limits.min_fidelity_estimate = Some(bad);
+
+        let empty_err = simulate(&single_block)
+            .limits(bad_limits)
+            .seed(SEED)
+            .braket_results(&[])
+            .unwrap_err();
+        assert!(
+            matches!(empty_err, PrismError::InvalidParameter { .. }),
+            "empty braket_results for {bad}: {empty_err:?}"
+        );
+
+        let id_err = simulate(&single_block)
+            .limits(bad_limits)
+            .seed(SEED)
+            .braket_results(std::slice::from_ref(&id_spec))
+            .unwrap_err();
+        assert!(
+            matches!(id_err, PrismError::InvalidParameter { .. }),
+            "identity braket_results for {bad}: {id_err:?}"
+        );
+    }
 }

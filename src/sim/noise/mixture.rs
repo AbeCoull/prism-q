@@ -234,6 +234,7 @@ pub(crate) fn evolve_density_matrix(
 ) -> Result<DensityMatrixBackend> {
     use crate::sim::dispatch::{Accel, Family, accel_for, build_density_matrix};
 
+    limits.validate()?;
     let accel = accel_for(kind, Family::DensityMatrix, circuit.num_qubits);
     if matches!(accel, Accel::Cpu) {
         crate::backend::check_state_allocation(
@@ -480,6 +481,7 @@ pub(crate) fn dm_expectation_values(
     seed: u64,
     limits: &ResolvedLimits,
 ) -> Result<Vec<f64>> {
+    limits.validate()?;
     if circuit
         .instructions
         .iter()

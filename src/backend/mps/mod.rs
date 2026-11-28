@@ -178,6 +178,7 @@ pub struct MpsBackend {
     classical_bits: Vec<bool>,
     rng: ChaCha8Rng,
     truncation_discarded: f64,
+    min_fidelity_estimate: Option<f64>,
     /// Site the chain is canonical about, or `None` when no gauge is
     /// recorded. `Some` claims that every site left of it is a left isometry
     /// and every site right of it a right isometry, which is what makes a
@@ -234,6 +235,7 @@ impl Clone for MpsBackend {
             classical_bits: self.classical_bits.clone(),
             rng: self.rng.clone(),
             truncation_discarded: self.truncation_discarded,
+            min_fidelity_estimate: self.min_fidelity_estimate,
             center: self.center,
             bond_high_water: self.bond_high_water,
             #[cfg(test)]
@@ -268,6 +270,7 @@ impl MpsBackend {
             classical_bits: Vec::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
             truncation_discarded: 0.0,
+            min_fidelity_estimate: limits.min_fidelity_estimate,
             center: None,
             bond_high_water: 1,
             #[cfg(test)]
@@ -367,6 +370,38 @@ impl MpsBackend {
         }
         let discarded: f64 = singular_values[chi_kept..].iter().map(|s| s * s).sum();
         self.truncation_discarded += discarded / total;
+    }
+
+    #[inline(always)]
+    pub(super) fn check_min_fidelity(&self) -> Result<()> {
+        let Some(floor) = self.min_fidelity_estimate else {
+            return Ok(());
+        };
+        let estimate = (1.0 - self.truncation_discarded).max(0.0);
+        if estimate < floor || (floor == 1.0 && self.truncation_discarded > EXACT_DISCARD_BOUND) {
+            return Err(self.min_fidelity_error(estimate, floor));
+        }
+        Ok(())
+    }
+
+    #[cold]
+    fn min_fidelity_error(&self, estimate: f64, floor: f64) -> crate::error::PrismError {
+        let reason = if estimate >= 0.999_999_5 {
+            format!(
+                "MPS truncation fidelity estimate {estimate:.6} (discarded {:.3e}) fell below \
+                 min_fidelity_estimate floor {floor}; raise max_bond_dim or lower the floor",
+                self.truncation_discarded
+            )
+        } else {
+            format!(
+                "MPS truncation fidelity estimate {estimate:.6} fell below \
+                 min_fidelity_estimate floor {floor}; raise max_bond_dim or lower the floor"
+            )
+        };
+        crate::error::PrismError::IncompatibleBackend {
+            backend: "Mps".to_string(),
+            reason,
+        }
     }
 
     /// Widest bond the chain holds now, 1 for a product state. The run's peak
@@ -832,6 +867,7 @@ impl MpsBackend {
             return Ok(false);
         }
         self.record_svd_truncation(chi_new);
+        self.check_min_fidelity()?;
 
         // A[k] has shape (bl, 2, chi_new) and A[k+1] shape (chi_new, 2, br).
         // U is column-major, U[col * rows + row]; V† is row-major,
@@ -1619,6 +1655,7 @@ impl Backend for MpsBackend {
     }
 
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
+        self.limits.validate()?;
         self.num_qubits = num_qubits;
         self.truncation_discarded = 0.0;
         self.center = None;

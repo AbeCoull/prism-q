@@ -3,6 +3,8 @@
 use prism_q::Limits;
 use pyo3::prelude::*;
 
+use crate::error::{PyPrismResult, invalid};
+
 /// Memory budget and per-cap overrides.
 ///
 /// A cap left as `None` derives from `memory_budget_bytes`, which defaults to half of
@@ -21,10 +23,17 @@ macro_rules! getters {
             #[new]
             #[pyo3(signature = (*, $($name = None),*))]
             #[allow(clippy::too_many_arguments)]
-            fn new($($name: Option<$ty>),*) -> Self {
+            fn new($($name: Option<$ty>),*) -> PyPrismResult<Self> {
                 let mut limits = Limits::new();
                 $(limits.$name = $name;)*
-                Self(limits)
+                if let Some(floor) = limits.min_fidelity_estimate
+                    && !(floor.is_finite() && (0.0..=1.0).contains(&floor))
+                {
+                    return Err(invalid(format!(
+                        "min_fidelity_estimate must be finite and in [0.0, 1.0], got {floor}"
+                    )));
+                }
+                Ok(Self(limits))
             }
 
             $(
@@ -59,6 +68,7 @@ getters! {
     max_tn_slices: usize,
     auto_mps_bond_dim: usize,
     max_qec_reference_qubits: usize,
+    min_fidelity_estimate: f64,
 }
 
 /// Set the limits every later call in this process resolves against, below any a

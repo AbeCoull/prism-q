@@ -802,31 +802,41 @@ pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdR
 /// no threshold to guess.
 pub fn run_spd_with(circuit: &Circuit, truncation: &SpdTruncation) -> Result<SpdResult> {
     truncation.validate()?;
-    Ok(run_spd_bounded(circuit, truncation, None)?.expect("an unbounded run always completes"))
+    Ok(run_spd_bounded(circuit, truncation, None)?
+        .0
+        .expect("an unbounded run always completes"))
 }
 
 /// Exact [`run_spd`] that gives up with `Ok(None)` once the term count summed
-/// over every instruction of every per-qubit pass exceeds `work_budget`, or the
-/// sum outgrows the term ceiling, so the caller can take another exact route.
+/// over every instruction of every pass exceeds `work_budget`, or the sum
+/// outgrows the term ceiling, so the caller can take another exact route.
+///
+/// The exact sum never loses a term: conjugation permutes the keys, a rotation
+/// keeps each key or swaps it for its flip, and a cancelled coefficient stays
+/// in the list at zero. So the current count times the instructions left in the
+/// pass, plus one term per instruction of every pass not yet started, is a
+/// floor on the work still to come, and the run stops once that floor passes
+/// the budget. It returns `None` for exactly the circuits that would overrun
+/// the budget if run to the end.
 pub(crate) fn run_spd_exact_within(
     circuit: &Circuit,
     work_budget: usize,
 ) -> Result<Option<SpdResult>> {
-    run_spd_bounded(
-        circuit,
-        &SpdTruncation::Threshold {
-            epsilon: 0.0,
-            max_terms: 0,
-        },
-        Some(work_budget),
-    )
+    Ok(run_spd_bounded(circuit, &EXACT, Some(work_budget))?.0)
 }
 
-fn run_spd_bounded(
+pub(super) const EXACT: SpdTruncation = SpdTruncation::Threshold {
+    epsilon: 0.0,
+    max_terms: 0,
+};
+
+/// A `work_budget` requires [`EXACT`] truncation, under which the term count
+/// cannot shrink. Also returns the term steps run, counted only under a budget.
+pub(super) fn run_spd_bounded(
     circuit: &Circuit,
     truncation: &SpdTruncation,
     work_budget: Option<usize>,
-) -> Result<Option<SpdResult>> {
+) -> Result<(Option<SpdResult>, usize)> {
     let lowered = validate_and_lower(circuit, "SPD", is_spd_native)?;
     let circuit = lowered.as_ref();
     with_spd_key!(circuit.num_qubits, K => run_spd_lowered::<K>(circuit, truncation, work_budget))
@@ -985,7 +995,7 @@ fn run_spd_lowered<K: SpdKey>(
     circuit: &Circuit,
     truncation: &SpdTruncation,
     work_budget: Option<usize>,
-) -> Result<Option<SpdResult>> {
+) -> Result<(Option<SpdResult>, usize)> {
     let n = circuit.num_qubits;
     let num_words = n.div_ceil(64);
     let (rotations, t_count) = precompute_rotations(circuit);
@@ -998,6 +1008,7 @@ fn run_spd_lowered<K: SpdKey>(
     let mut work = 0usize;
 
     for q in 0..n {
+        let later_pass_floor = (n - 1 - q).saturating_mul(circuit.instructions.len());
         let mut sum = WeightedPauliSum::new();
         let mut z_q = identity.clone();
         flip_bit(z_q.words_mut().1, q);
@@ -1010,9 +1021,13 @@ fn run_spd_lowered<K: SpdKey>(
 
             truncation.enforce(&mut sum, &mut total_discarded);
             if let Some(budget) = work_budget {
-                work += sum.terms.len();
-                if work > budget || sum.terms.len() > SPD_MAX_TERMS_CEILING {
-                    return Ok(None);
+                let terms = sum.terms.len();
+                work += terms;
+                let floor = work
+                    .saturating_add(terms.saturating_mul(idx))
+                    .saturating_add(later_pass_floor);
+                if floor > budget || terms > SPD_MAX_TERMS_CEILING {
+                    return Ok((None, work));
                 }
             } else {
                 check_spd_term_ceiling(sum.terms.len(), "SPD")?;
@@ -1028,12 +1043,15 @@ fn run_spd_lowered<K: SpdKey>(
         expectations.push(sum.diagonal_expectation());
     }
 
-    Ok(Some(SpdResult {
-        expectations,
-        t_count,
-        max_terms: peak_terms,
-        total_discarded,
-    }))
+    Ok((
+        Some(SpdResult {
+            expectations,
+            t_count,
+            max_terms: peak_terms,
+            total_discarded,
+        }),
+        work,
+    ))
 }
 
 /// Inverse light cone of a Pauli observable under a circuit, computed

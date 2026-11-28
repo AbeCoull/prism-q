@@ -2806,6 +2806,46 @@ fn test_run_marginals_clifford_t_spd_path() {
     }
 }
 
+#[test]
+fn auto_marginals_route_clifford_t_by_the_spd_budget() {
+    let mut fits_spd = Circuit::new(22, 0);
+    for q in 0..22 {
+        fits_spd.add_gate(Gate::H, &[q]);
+        fits_spd.add_gate(Gate::T, &[q]);
+    }
+    for q in 0..21 {
+        fits_spd.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for i in 0..21 {
+        let q = (7 * i + 3) % 22;
+        fits_spd.add_gate(Gate::T, &[q]);
+        fits_spd.add_gate(Gate::Cx, &[q, (q + 11) % 22]);
+    }
+    for (circuit, spd) in [
+        (fits_spd, true),
+        (crate::circuits::clifford_t_circuit(12, 12, 0.3, 42), false),
+        (crate::circuits::clifford_t_circuit(12, 12, 0.5, 42), false),
+    ] {
+        let auto = simulate(&circuit).seed(42).marginals().unwrap();
+        assert_eq!(
+            auto.metadata.backend == ResolvedBackend::DeterministicPauli,
+            spd,
+            "{:?}",
+            auto.metadata.backend
+        );
+        let sv = run_marginals_with(
+            BackendKind::Statevector,
+            &circuit,
+            42,
+            &ResolvedLimits::process_default(),
+        )
+        .unwrap();
+        for (q, (a, s)) in auto.marginals.iter().zip(&sv).enumerate() {
+            assert!((a.0 - s.0).abs() < 1e-10, "qubit {q}: {} vs {}", a.0, s.0);
+        }
+    }
+}
+
 // ---- Dispatch validation ----
 
 #[test]

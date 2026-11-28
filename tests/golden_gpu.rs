@@ -4440,7 +4440,7 @@ fn top_qubit_gates(circuit: &mut prism_q::circuit::Circuit) {
 #[test]
 fn mixed_tiles_match_cpu_on_hea_qaoa_and_random_shapes() {
     let Some(f) = Fixture::try_new() else { return };
-    for n in [16, 18, 21] {
+    for n in [13, 16, 18, 21] {
         let shapes = [
             prism_q::circuits::hardware_efficient_ansatz(n, 4, common::SEED),
             prism_q::circuits::qaoa_circuit(n, 3, common::SEED),
@@ -4452,7 +4452,7 @@ fn mixed_tiles_match_cpu_on_hea_qaoa_and_random_shapes() {
             let gates = circuit.instructions.len() as u64;
             let census = compare_lowered(&f, &circuit);
             if let Some(census) = census {
-                if n >= 18 {
+                if n >= 14 {
                     assert!(census.tiles > 0, "n={n}: no tile pass ran");
                     assert!(
                         census.passes * 4 <= gates,

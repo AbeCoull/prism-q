@@ -170,6 +170,8 @@ const LEDGER: &[Entry] = &[
     here("expectation_values", "native_expectations", Sv, "expectation_routes_match_the_unfused_statevector"),
     lowered("expectation_values", "tensor_route", Sv, "auto_tensor_route_matches_the_unfused_statevector"),
     here("expectation_values_reported", "ResolvedBackend::StochasticPauli", Sv, "sampled_expectations_carry_errors_that_cover_the_statevector"),
+    elsewhere("expectation_values_sampled", "trajectory_expectations", DmOracle,
+        "tests/integration/expectation_values.rs", "sampled_noisy_expectations_match_density_matrix"),
     here("expectation_values", "ResolvedBackend::PauliPath", DmOracle, "pauli_path_matches_the_density_matrix"),
     here("expectation_values", "exact_mixture", ClosedForm, "noisy_run_reads_the_exact_mixture"),
     here("expectation_values", "initial_state", Sv, "initial_state_terminals_match_the_unfused_statevector"),
@@ -220,6 +222,7 @@ const PREDICATE_ROUTES: &[&str] = &[
     "trajectory_pauli_groups",
     "trajectory_replayed_groups",
     "trajectory_per_shot",
+    "trajectory_expectations",
     "native_marginals",
     "probability_marginals",
     "auto_spd_marginals",
@@ -348,6 +351,10 @@ const OTHER_SOURCES: &[(&str, &str)] = &[
     (
         "tests/integration/tensor_route.rs",
         include_str!("../../tests/integration/tensor_route.rs"),
+    ),
+    (
+        "tests/integration/expectation_values.rs",
+        include_str!("../../tests/integration/expectation_values.rs"),
     ),
 ];
 

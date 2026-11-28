@@ -322,6 +322,34 @@ impl PySimulation {
         }
     }
 
+    /// Estimate noisy Pauli expectation values by averaging across `trajectories`
+    /// pure-state noise trajectories. Returns sample means and standard errors.
+    #[pyo3(signature = (observables, trajectories))]
+    fn expectation_sampled(
+        &self,
+        py: Python<'_>,
+        observables: Vec<PauliString>,
+        trajectories: usize,
+    ) -> PyPrismResult<PyExpectationResult> {
+        let max_width = observables
+            .iter()
+            .map(PauliString::text_width)
+            .max()
+            .unwrap_or(0);
+        check_text_width(max_width, self.circuit.num_qubits)?;
+        let parsed = parse_observables(observables)?;
+        let owned_noise = self.owned_noise(py);
+        let result = py.detach(|| {
+            self.core(owned_noise.as_ref())
+                .expectation_values_sampled(&parsed, trajectories)
+        })?;
+        Ok(PyExpectationResult {
+            values: result.values,
+            std_errors: result.std_errors,
+            metadata: PyRunMetadata::new(result.metadata),
+        })
+    }
+
     /// Joint probability distribution over `qubits`, `2 ** len(qubits)` entries
     /// with `qubits[0]` in the lowest bit.
     ///

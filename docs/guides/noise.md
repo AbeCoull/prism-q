@@ -241,6 +241,16 @@ let logical_classes = complex.homology_dim();
 # Ok::<(), prism_q::PrismError>(())
 ```
 
+## Sampled noisy expectation values
+
+Past the density matrix memory ceiling, `Simulate::expectation_values_sampled` estimates
+`Tr(rho P)` by averaging `Backend::pauli_expectations` across noise trajectories on any
+pure state backend (`Statevector`, `StatevectorGpu`, `Mps`, `Factored`, `Sparse`,
+`TensorNetwork`, `ProductState`, and Clifford tableaux under Pauli noise). It returns
+sample means and standard errors for each observable, rejects `require_exact()` and
+readout error, and leaves exact mixture evaluation to `BackendKind::DensityMatrix` with
+`expectation_values_reported`.
+
 ## Gates compiled from pulses
 
 The `unstable-pulse` feature adds `prism_q::pulse`, which integrates a pulse schedule on

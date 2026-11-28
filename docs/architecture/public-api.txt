@@ -2726,6 +2726,7 @@ pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_gradient(self, &prism
 pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_gradient_shift(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
 pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_values(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
 pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_values_reported(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<prism_q::ExpectationResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_values_sampled(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>], usize) -> prism_q::error::Result<prism_q::ExpectationResult>
 pub fn prism_q::Simulate<'c, prism_q::Seeded>::marginals(self) -> prism_q::error::Result<prism_q::sim::MarginalsResult>
 pub fn prism_q::Simulate<'c, prism_q::Seeded>::observable_expectation(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::ObservableExpectation>
 pub fn prism_q::Simulate<'c, prism_q::Seeded>::observable_variance(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::sim::ObservableVariance>
@@ -4274,6 +4275,7 @@ pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_gradient(self, &prism
 pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_gradient_shift(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
 pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_values(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
 pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_values_reported(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<prism_q::ExpectationResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_values_sampled(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>], usize) -> prism_q::error::Result<prism_q::ExpectationResult>
 pub fn prism_q::Simulate<'c, prism_q::Seeded>::marginals(self) -> prism_q::error::Result<prism_q::sim::MarginalsResult>
 pub fn prism_q::Simulate<'c, prism_q::Seeded>::observable_expectation(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::ObservableExpectation>
 pub fn prism_q::Simulate<'c, prism_q::Seeded>::observable_variance(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::sim::ObservableVariance>

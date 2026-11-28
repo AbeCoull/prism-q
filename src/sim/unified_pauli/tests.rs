@@ -1945,3 +1945,47 @@ fn spp_parallel_matches_sequential_thread_counts() {
         four.nonzero_fraction.to_bits()
     );
 }
+
+#[test]
+fn exact_within_completes_exactly_when_the_whole_run_fits() {
+    use super::spd::{EXACT, run_spd_bounded};
+
+    let mut rzz = crate::circuits::clifford_t_circuit(10, 6, 0.2, 5);
+    rzz.add_gate(Gate::Rzz(0.4), &[2, 3]);
+    rzz.add_gate(Gate::Rz(0.9), &[3]);
+    rzz.add_gate(Gate::H, &[2]);
+    rzz.add_gate(Gate::Rzz(-1.1), &[2, 7]);
+    let circuits = [
+        crate::circuits::clifford_t_circuit(12, 10, 0.1, 42),
+        crate::circuits::clifford_t_circuit(12, 12, 0.3, 42),
+        crate::circuits::clifford_t_circuit(8, 12, 0.3, 3),
+        rzz,
+    ];
+    for circuit in &circuits {
+        let (full, work) = run_spd_bounded(circuit, &EXACT, Some(usize::MAX)).unwrap();
+        let expected = run_spd(circuit, 0.0, 0).unwrap().expectations;
+        assert_eq!(full.unwrap().expectations, expected);
+        for budget in [work, work - 1, work / 2] {
+            let within = run_spd_exact_within(circuit, budget).unwrap();
+            assert_eq!(
+                within.is_some(),
+                budget >= work,
+                "budget {budget} of {work}"
+            );
+            if let Some(result) = within {
+                assert_eq!(result.expectations, expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn exact_within_abandons_a_run_before_spending_its_budget() {
+    use super::spd::{EXACT, run_spd_bounded};
+
+    let circuit = crate::circuits::clifford_t_circuit(12, 12, 0.5, 42);
+    let budget = crate::sim::auto_spd_work_budget(&circuit);
+    let (result, spent) = run_spd_bounded(&circuit, &EXACT, Some(budget)).unwrap();
+    assert!(result.is_none());
+    assert!(spent < budget / 2, "spent {spent} of {budget}");
+}

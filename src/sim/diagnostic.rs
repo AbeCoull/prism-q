@@ -44,15 +44,23 @@ pub(super) fn plan_answers(plan: &BackendPlan, diagnostic: Diagnostic) -> bool {
                 | BackendPlan::Stabilizer { .. }
                 | BackendPlan::FactoredStabilizer
         ),
-        Diagnostic::Entropy => matches!(
-            plan,
-            BackendPlan::Statevector { .. }
-                | BackendPlan::Factored
-                | BackendPlan::Mps { .. }
-                | BackendPlan::ProductState
-                | BackendPlan::Stabilizer { .. }
-                | BackendPlan::FactoredStabilizer
-        ),
+        Diagnostic::Entropy => {
+            #[cfg(feature = "distributed")]
+            if matches!(plan, BackendPlan::Distributed(_)) {
+                return true;
+            }
+            matches!(
+                plan,
+                BackendPlan::Statevector { .. }
+                    | BackendPlan::Sparse
+                    | BackendPlan::Factored
+                    | BackendPlan::Mps { .. }
+                    | BackendPlan::TensorNetwork { .. }
+                    | BackendPlan::ProductState
+                    | BackendPlan::Stabilizer { .. }
+                    | BackendPlan::FactoredStabilizer
+            )
+        }
         Diagnostic::StateVector | Diagnostic::Overlap => {
             !matches!(plan, BackendPlan::DensityMatrix { .. })
         }

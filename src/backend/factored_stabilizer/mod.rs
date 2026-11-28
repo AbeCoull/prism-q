@@ -40,8 +40,8 @@ use smallvec::SmallVec;
 use crate::backend::stabilizer::kernels::{self, rowops};
 use crate::backend::stabilizer::{dense, diagnostics};
 use crate::backend::{
-    Backend, dense_probability_len, dense_statevector_len, reduced_density, reserve_dense_output,
-    schmidt,
+    Backend, dense_probability_len, dense_statevector_len, overlap, reduced_density,
+    reserve_dense_output, schmidt,
 };
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
@@ -370,9 +370,8 @@ impl FactoredStabilizerBackend {
 
     /// Start from a tableau in the layout
     /// [`StabilizerBackend::init_from_tableau`](crate::backend::stabilizer::StabilizerBackend::init_from_tableau)
-    /// documents, held as one cluster over every qubit until a measurement or
-    /// reset splits it. Same checks as that import, and the joint tableau is
-    /// held to the merged-cluster qubit cap.
+    /// documents and split it into its minimal entanglement components. Each
+    /// resulting component is held to the merged-cluster qubit cap.
     pub fn init_from_tableau(
         &mut self,
         num_qubits: usize,
@@ -382,15 +381,54 @@ impl FactoredStabilizerBackend {
     ) -> Result<()> {
         let n = num_qubits;
         rowops::check_imported_rows(n, &words, &phases)?;
+        let num_words = n.div_ceil(64);
+        words[2 * n * 2 * num_words..].fill(0);
+        phases[2 * n] = false;
+
+        if n > 1 {
+            let mut reduced = SubTableau {
+                n,
+                num_words,
+                xz: words.clone(),
+                phase: phases.clone(),
+                qubits: (0..n).collect(),
+                destabs: Destabs::Live,
+            };
+            reduced.reduce();
+            let comp_sizes = Self::component_sizes(&reduced);
+            let max_comp = comp_sizes.iter().copied().max().unwrap_or(n);
+            if max_comp > self.limits.stabilizer_cluster_qubits.value {
+                return Err(crate::backend::stabilizer_cluster_error(
+                    max_comp,
+                    self.limits.stabilizer_cluster_qubits,
+                ));
+            }
+            self.num_qubits = n;
+            self.qubit_to_sub = vec![0; n];
+            self.subs.clear();
+            if comp_sizes.len() > 1 {
+                self.subs.push(Some(reduced));
+                self.try_split(0);
+            } else {
+                self.subs.push(Some(SubTableau {
+                    n,
+                    num_words,
+                    xz: words,
+                    phase: phases,
+                    qubits: (0..n).collect(),
+                    destabs: Destabs::Live,
+                }));
+            }
+            crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
+            return Ok(());
+        }
+
         if n > self.limits.stabilizer_cluster_qubits.value {
             return Err(crate::backend::stabilizer_cluster_error(
                 n,
                 self.limits.stabilizer_cluster_qubits,
             ));
         }
-        let num_words = n.div_ceil(64);
-        words[2 * n * 2 * num_words..].fill(0);
-        phases[2 * n] = false;
         self.num_qubits = n;
         self.qubit_to_sub = vec![0; n];
         self.subs.clear();
@@ -404,6 +442,148 @@ impl FactoredStabilizerBackend {
         }));
         crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
         Ok(())
+    }
+
+    fn component_sizes(sub: &SubTableau) -> Vec<usize> {
+        let k = sub.n;
+        let nw = sub.num_words;
+        let stride = sub.stride();
+        let mut seen = vec![0u64; nw];
+        let mut stack: Vec<usize> = Vec::new();
+        let mut sizes = Vec::new();
+        let last_mask = if !k.is_multiple_of(64) {
+            (1u64 << (k % 64)) - 1
+        } else {
+            u64::MAX
+        };
+        for start in 0..k {
+            if seen[start / 64] >> (start % 64) & 1 != 0 {
+                continue;
+            }
+            seen[start / 64] |= 1u64 << (start % 64);
+            stack.push(start);
+            let mut size = 0;
+            while let Some(c) = stack.pop() {
+                size += 1;
+                let (row_x, row_z) = sub.xz[(k + c) * stride..(k + c + 1) * stride].split_at(nw);
+                for (w, seen_w) in seen.iter_mut().enumerate() {
+                    let valid = if w + 1 == nw { last_mask } else { u64::MAX };
+                    let mut fresh = (row_x[w] | row_z[w]) & valid & !*seen_w;
+                    *seen_w |= fresh;
+                    while fresh != 0 {
+                        stack.push(w * 64 + fresh.trailing_zeros() as usize);
+                        fresh &= fresh - 1;
+                    }
+                }
+            }
+            sizes.push(size);
+        }
+        sizes
+    }
+
+    /// Scatter the stabilizer rows of `sub_ids` into an `m`-qubit tableau's
+    /// stabilizer half (`m..2m`) using `global_to_local` for column positions.
+    fn pack_component_stabilizers(
+        &self,
+        sub_ids: &[usize],
+        m: usize,
+        global_to_local: &[usize],
+    ) -> (Vec<u64>, Vec<bool>) {
+        let nw = m.div_ceil(64);
+        let stride = 2 * nw;
+        let mut xz = vec![0u64; (2 * m + 1) * stride];
+        let mut phase = vec![false; 2 * m + 1];
+        let mut row_off = 0usize;
+        for &id in sub_ids {
+            let sub = self.subs[id].as_ref().unwrap();
+            let k = sub.n;
+            let sub_stride = sub.stride();
+            let local_cols: SmallVec<[usize; 8]> =
+                sub.qubits.iter().map(|&g| global_to_local[g]).collect();
+            for r in 0..k {
+                let src = &sub.xz[(k + r) * sub_stride..(k + r + 1) * sub_stride];
+                let dst = &mut xz[(m + row_off + r) * stride..(m + row_off + r + 1) * stride];
+                phase[m + row_off + r] = sub.phase[k + r];
+                for (lq, &cq) in local_cols.iter().enumerate() {
+                    let bit = 1u64 << (lq % 64);
+                    if src[lq / 64] & bit != 0 {
+                        dst[cq / 64] |= 1u64 << (cq % 64);
+                    }
+                    if src[sub.num_words + lq / 64] & bit != 0 {
+                        dst[nw + cq / 64] |= 1u64 << (cq % 64);
+                    }
+                }
+            }
+            row_off += k;
+        }
+        (xz, phase)
+    }
+
+    fn overlap_sq_factored(&self, rhs: &FactoredStabilizerBackend) -> f64 {
+        let n = self.num_qubits;
+        if n == 0 {
+            return 1.0;
+        }
+        let mut seen_q = vec![false; n];
+        let mut seen_a = vec![false; self.subs.len()];
+        let mut seen_b = vec![false; rhs.subs.len()];
+        let mut queue = Vec::new();
+        let mut global_to_local = vec![0usize; n];
+        let mut product = 1.0f64;
+
+        for start in 0..n {
+            if seen_q[start] {
+                continue;
+            }
+            seen_q[start] = true;
+            queue.clear();
+            queue.push(start);
+            let mut comp: Vec<usize> = Vec::new();
+            let mut a_ids: SmallVec<[usize; 8]> = SmallVec::new();
+            let mut b_ids: SmallVec<[usize; 8]> = SmallVec::new();
+
+            while let Some(q) = queue.pop() {
+                comp.push(q);
+                let sa = self.qubit_to_sub[q];
+                if !seen_a[sa] {
+                    seen_a[sa] = true;
+                    a_ids.push(sa);
+                    for &nq in &self.subs[sa].as_ref().unwrap().qubits {
+                        if !seen_q[nq] {
+                            seen_q[nq] = true;
+                            queue.push(nq);
+                        }
+                    }
+                }
+                let sb = rhs.qubit_to_sub[q];
+                if !seen_b[sb] {
+                    seen_b[sb] = true;
+                    b_ids.push(sb);
+                    for &nq in &rhs.subs[sb].as_ref().unwrap().qubits {
+                        if !seen_q[nq] {
+                            seen_q[nq] = true;
+                            queue.push(nq);
+                        }
+                    }
+                }
+            }
+
+            comp.sort_unstable();
+            let m = comp.len();
+            for (pos, &q) in comp.iter().enumerate() {
+                global_to_local[q] = pos;
+            }
+            let (xz1, phase1) = self.pack_component_stabilizers(&a_ids, m, &global_to_local);
+            let (xz2, phase2) = rhs.pack_component_stabilizers(&b_ids, m, &global_to_local);
+            let factor = crate::sim::stabilizer_rank::stabilizer_overlap_sq_rows(
+                &xz1, &phase1, &xz2, &phase2, m,
+            );
+            if factor == 0.0 {
+                return 0.0;
+            }
+            product *= factor;
+        }
+        product
     }
 
     /// The state as one joint tableau in the layout
@@ -567,6 +747,11 @@ impl FactoredStabilizerBackend {
         let mut qubit_component = vec![0usize; k];
         let mut stack: Vec<usize> = Vec::new();
         let mut num_components = 0usize;
+        let last_mask = if !k.is_multiple_of(64) {
+            (1u64 << (k % 64)) - 1
+        } else {
+            u64::MAX
+        };
         for start in 0..k {
             if seen[start / 64] >> (start % 64) & 1 != 0 {
                 continue;
@@ -579,7 +764,8 @@ impl FactoredStabilizerBackend {
                 size += 1;
                 let (row_x, row_z) = sub.xz[(k + c) * stride..(k + c + 1) * stride].split_at(nw);
                 for (w, seen_w) in seen.iter_mut().enumerate() {
-                    let mut fresh = (row_x[w] | row_z[w]) & !*seen_w;
+                    let valid = if w + 1 == nw { last_mask } else { u64::MAX };
+                    let mut fresh = (row_x[w] | row_z[w]) & valid & !*seen_w;
                     *seen_w |= fresh;
                     while fresh != 0 {
                         stack.push(w * 64 + fresh.trailing_zeros() as usize);
@@ -856,6 +1042,49 @@ impl Backend for FactoredStabilizerBackend {
 
     fn num_qubits(&self) -> usize {
         self.num_qubits
+    }
+
+    /// Stabilizer-group overlap over union connected components against another
+    /// `FactoredStabilizerBackend`, or over the joint stabilizer rows against a
+    /// `StabilizerBackend`, at any width.
+    fn overlap_sq(&self, other: &dyn Backend) -> Result<f64> {
+        if let Some(rhs) = other
+            .as_any()
+            .and_then(|any| any.downcast_ref::<FactoredStabilizerBackend>())
+            && rhs.num_qubits == self.num_qubits
+        {
+            return Ok(self.overlap_sq_factored(rhs));
+        }
+        if let Some(tableau) = other
+            .as_any()
+            .and_then(|any| any.downcast_ref::<crate::backend::stabilizer::StabilizerBackend>())
+            && tableau.num_qubits() == self.num_qubits
+        {
+            let active: Vec<usize> = self
+                .subs
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| s.as_ref().map(|_| i))
+                .collect();
+            let identity: Vec<usize> = (0..self.num_qubits).collect();
+            let (xz1, phase1) =
+                self.pack_component_stabilizers(&active, self.num_qubits, &identity);
+            let (xz2, phase2) = tableau.stabilizer_rows()?;
+            return Ok(crate::sim::stabilizer_rank::stabilizer_overlap_sq_rows(
+                &xz1,
+                &phase1,
+                &xz2,
+                &phase2,
+                self.num_qubits,
+            ));
+        }
+        overlap::export_overlap_sq(
+            self.name(),
+            self.num_qubits(),
+            || self.export_statevector(),
+            other,
+            &self.limits,
+        )
     }
 
     fn supports_fused_gates(&self) -> bool {

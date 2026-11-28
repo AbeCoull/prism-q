@@ -45,7 +45,7 @@ use rand_chacha::ChaCha8Rng;
 use smallvec::{SmallVec, smallvec};
 
 use crate::backend::memory::{dense_probability_len, dense_statevector_len};
-use crate::backend::{Backend, BasisSamples, measurement_inv_norm};
+use crate::backend::{Backend, BasisSamples, measurement_inv_norm, overlap};
 use crate::backend::{reduced_density, schmidt, simd};
 use crate::circuit::Instruction;
 use crate::error::Result;
@@ -987,6 +987,25 @@ impl Backend for FactoredBackend {
         self.num_qubits
     }
 
+    /// Union connected components of the two sub-state partitions, dotted one
+    /// component at a time so independent blocks never pay for a `2^n` export.
+    fn overlap_sq(&self, other: &dyn Backend) -> Result<f64> {
+        if let Some(rhs) = other
+            .as_any()
+            .and_then(|any| any.downcast_ref::<FactoredBackend>())
+            && rhs.num_qubits == self.num_qubits
+        {
+            return self.overlap_sq_factored(rhs);
+        }
+        overlap::export_overlap_sq(
+            self.name(),
+            self.num_qubits(),
+            || self.export_statevector(),
+            other,
+            &self.limits,
+        )
+    }
+
     fn supports_native_sampling(&self) -> bool {
         true
     }
@@ -1078,3 +1097,122 @@ impl Backend for FactoredBackend {
 /// The strings reaching one sub-state, as `(string index, (x mask, z mask, Y
 /// count))` in string order.
 type MaskGroup = Vec<(usize, (usize, usize, u32))>;
+
+impl FactoredBackend {
+    fn overlap_sq_factored(&self, rhs: &FactoredBackend) -> Result<f64> {
+        let n = self.num_qubits;
+        if n == 0 {
+            return Ok(1.0);
+        }
+        let mut seen_q = vec![false; n];
+        let mut seen_a = vec![false; self.substates.len()];
+        let mut seen_b = vec![false; rhs.substates.len()];
+        let mut queue = Vec::new();
+        let mut global_to_comp = vec![0usize; n];
+        let mut product = 1.0f64;
+
+        for start in 0..n {
+            if seen_q[start] {
+                continue;
+            }
+            seen_q[start] = true;
+            queue.clear();
+            queue.push(start);
+            let mut comp: Vec<usize> = Vec::new();
+            let mut a_ids: SmallVec<[usize; 8]> = SmallVec::new();
+            let mut b_ids: SmallVec<[usize; 8]> = SmallVec::new();
+
+            while let Some(q) = queue.pop() {
+                comp.push(q);
+                let sa = self.qubit_to_substate[q];
+                if !seen_a[sa] {
+                    seen_a[sa] = true;
+                    a_ids.push(sa);
+                    for &nq in &self.substates[sa].as_ref().unwrap().qubits {
+                        if !seen_q[nq] {
+                            seen_q[nq] = true;
+                            queue.push(nq);
+                        }
+                    }
+                }
+                let sb = rhs.qubit_to_substate[q];
+                if !seen_b[sb] {
+                    seen_b[sb] = true;
+                    b_ids.push(sb);
+                    for &nq in &rhs.substates[sb].as_ref().unwrap().qubits {
+                        if !seen_q[nq] {
+                            seen_q[nq] = true;
+                            queue.push(nq);
+                        }
+                    }
+                }
+            }
+
+            let factor = if a_ids.len() == 1
+                && b_ids.len() == 1
+                && self.substates[a_ids[0]].as_ref().unwrap().qubits
+                    == rhs.substates[b_ids[0]].as_ref().unwrap().qubits
+            {
+                let sa = self.substates[a_ids[0]].as_ref().unwrap();
+                let sb = rhs.substates[b_ids[0]].as_ref().unwrap();
+                overlap::dense_overlap_sq(&sa.state, &sb.state)
+            } else {
+                comp.sort_unstable();
+                let m = comp.len();
+                let dim =
+                    dense_statevector_len(self.name(), "state overlap component", m, &self.limits)?;
+                for (pos, &q) in comp.iter().enumerate() {
+                    global_to_comp[q] = pos;
+                }
+                let a_blocks: Vec<(&[Complex64], SmallVec<[usize; 8]>)> = a_ids
+                    .iter()
+                    .map(|&id| {
+                        let sub = self.substates[id].as_ref().unwrap();
+                        let pos = sub.qubits.iter().map(|&q| global_to_comp[q]).collect();
+                        (sub.state.as_slice(), pos)
+                    })
+                    .collect();
+                let b_blocks: Vec<(&[Complex64], SmallVec<[usize; 8]>)> = b_ids
+                    .iter()
+                    .map(|&id| {
+                        let sub = rhs.substates[id].as_ref().unwrap();
+                        let pos = sub.qubits.iter().map(|&q| global_to_comp[q]).collect();
+                        (sub.state.as_slice(), pos)
+                    })
+                    .collect();
+
+                let mut inner = Complex64::new(0.0, 0.0);
+                let mut left_norm = 0.0;
+                let mut right_norm = 0.0;
+                for idx in 0..dim {
+                    let mut amp_a = Complex64::new(1.0, 0.0);
+                    for (state, pos) in &a_blocks {
+                        let mut local = 0usize;
+                        for (bit, &p) in pos.iter().enumerate() {
+                            local |= ((idx >> p) & 1) << bit;
+                        }
+                        amp_a *= state[local];
+                    }
+                    let mut amp_b = Complex64::new(1.0, 0.0);
+                    for (state, pos) in &b_blocks {
+                        let mut local = 0usize;
+                        for (bit, &p) in pos.iter().enumerate() {
+                            local |= ((idx >> p) & 1) << bit;
+                        }
+                        amp_b *= state[local];
+                    }
+                    inner += amp_a.conj() * amp_b;
+                    left_norm += amp_a.norm_sqr();
+                    right_norm += amp_b.norm_sqr();
+                }
+                overlap::normalized(inner.norm_sqr(), left_norm, right_norm)
+            };
+
+            if factor == 0.0 {
+                return Ok(0.0);
+            }
+            product *= factor;
+        }
+        Ok(product)
+    }
+}

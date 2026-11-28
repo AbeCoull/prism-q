@@ -428,7 +428,7 @@ impl StabilizerBackend {
     /// whatever the destabilizers are doing, so unlike
     /// [`StabilizerBackend::rows_with_destabilizers`] this borrows the host
     /// rows instead of materializing a copy of the other half.
-    fn stabilizer_rows(&self) -> Result<kernels::rowops::TableauRows<'_>> {
+    pub(crate) fn stabilizer_rows(&self) -> Result<kernels::rowops::TableauRows<'_>> {
         #[cfg(feature = "gpu")]
         if self.gpu_tableau.is_some() {
             let (xz, phase) = self.copy_device_tableau_with_pending()?;
@@ -1123,19 +1123,25 @@ impl Backend for StabilizerBackend {
     }
 
     /// `2^(n - r)` for the rank `r` of the two stabilizer groups merged, and
-    /// `0` on a sign conflict, at any width. A device-resident tableau and
-    /// any other representation take the dense route.
+    /// `0` on a sign conflict, at any width (host or device tableau). Any other
+    /// representation takes the dense route.
     fn overlap_sq(&self, other: &dyn Backend) -> Result<f64> {
         if let Some(tableau) = other
             .as_any()
             .and_then(|any| any.downcast_ref::<StabilizerBackend>())
             && tableau.n == self.n
-            && self.host_rows_live()
-            && tableau.host_rows_live()
         {
-            return Ok(crate::sim::stabilizer_rank::stabilizer_overlap_sq(
-                self, tableau, self.n,
+            let (xz1, phase1) = self.stabilizer_rows()?;
+            let (xz2, phase2) = tableau.stabilizer_rows()?;
+            return Ok(crate::sim::stabilizer_rank::stabilizer_overlap_sq_rows(
+                &xz1, &phase1, &xz2, &phase2, self.n,
             ));
+        }
+        if let Some(factored) = other.as_any().and_then(|any| {
+            any.downcast_ref::<crate::backend::factored_stabilizer::FactoredStabilizerBackend>()
+        }) && factored.num_qubits() == self.n
+        {
+            return factored.overlap_sq(self);
         }
         overlap::export_overlap_sq(
             self.name(),

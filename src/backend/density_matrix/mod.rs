@@ -1624,7 +1624,11 @@ impl Backend for DensityMatrixBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
-        let d = self.dim();
+        let d = crate::backend::statevector_probability_len(
+            self.name(),
+            self.num_qubits,
+            &self.limits,
+        )?;
         #[cfg(feature = "gpu")]
         if let Some(gpu) = self.sv.gpu_state() {
             let mut diag = dk::diagonal(gpu.context(), gpu, self.num_qubits)?;

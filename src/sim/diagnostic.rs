@@ -32,18 +32,24 @@ impl Diagnostic {
 /// reads as declining here, which is what its trait default does.
 pub(super) fn plan_answers(plan: &BackendPlan, diagnostic: Diagnostic) -> bool {
     match diagnostic {
-        Diagnostic::ReducedDensityMatrix => matches!(
-            plan,
-            BackendPlan::Statevector { .. }
-                | BackendPlan::Sparse
-                | BackendPlan::Factored
-                | BackendPlan::Mps { .. }
-                | BackendPlan::TensorNetwork { .. }
-                | BackendPlan::ProductState
-                | BackendPlan::DensityMatrix { .. }
-                | BackendPlan::Stabilizer { .. }
-                | BackendPlan::FactoredStabilizer
-        ),
+        Diagnostic::ReducedDensityMatrix => {
+            #[cfg(feature = "distributed")]
+            if matches!(plan, BackendPlan::Distributed(_)) {
+                return true;
+            }
+            matches!(
+                plan,
+                BackendPlan::Statevector { .. }
+                    | BackendPlan::Sparse
+                    | BackendPlan::Factored
+                    | BackendPlan::Mps { .. }
+                    | BackendPlan::TensorNetwork { .. }
+                    | BackendPlan::ProductState
+                    | BackendPlan::DensityMatrix { .. }
+                    | BackendPlan::Stabilizer { .. }
+                    | BackendPlan::FactoredStabilizer
+            )
+        }
         Diagnostic::Entropy => matches!(
             plan,
             BackendPlan::Statevector { .. }

@@ -194,6 +194,23 @@ enum PathOp {
     Channel(ChannelAction, SmallVec<[usize; 2]>),
 }
 
+pub(crate) fn validate_pauli_path_noise(noise: &NoiseModel, backend: &str) -> Result<()> {
+    for events in &noise.after_gate {
+        for event in events {
+            if channel_action(&event.channel).is_none() {
+                return Err(PrismError::BackendUnsupported {
+                    backend: backend.to_string(),
+                    operation: format!(
+                        "channel `{:?}` has no Pauli-basis form; use BackendKind::DensityMatrix",
+                        event.channel
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Flatten `circuit` and `noise` into the ordered step list the backward walk
 /// consumes.
 ///
@@ -201,11 +218,16 @@ enum PathOp {
 /// into several, so the noise events cannot stay indexed by circuit position.
 /// Emitting a gate's own channels directly after it sidesteps the remapping.
 fn pauli_path_ops(circuit: &Circuit, noise: &NoiseModel, backend: &str) -> Result<Vec<PathOp>> {
-    if noise.readout.iter().any(|r| r.is_some()) {
+    if noise
+        .readout
+        .iter()
+        .take(circuit.num_classical_bits)
+        .any(|r| r.as_ref().is_some_and(|ro| !ro.is_inert()))
+    {
         return Err(PrismError::IncompatibleBackend {
             backend: backend.to_string(),
-            reason: "readout error has no Pauli-basis form on an expectation value; use \
-                     BackendKind::DensityMatrix"
+            reason: "readout error has no Pauli-basis form on an expectation value; drop it \
+                     from the model or use shots"
                 .to_string(),
         });
     }

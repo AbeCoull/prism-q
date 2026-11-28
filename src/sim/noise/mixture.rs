@@ -198,6 +198,7 @@ pub(in crate::sim) fn validate_mixture_inputs(
     if let Some(noise) = noise {
         noise.validate_for(circuit)?;
         noise.ensure_memoryless("density_matrix")?;
+        settle_measured_qubits(circuit, noise)?;
     }
 
     if let Some(state) = initial_state {

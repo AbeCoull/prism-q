@@ -25,8 +25,8 @@ mod pauli_path;
 mod spd;
 mod spp;
 
-pub(crate) use pauli_path::run_pauli_path_weighted_observable;
 pub use pauli_path::{PauliPathResult, run_pauli_path_observable};
+pub(crate) use pauli_path::{run_pauli_path_weighted_observable, validate_pauli_path_noise};
 pub(super) use spd::propagate_register_rotations;
 pub(crate) use spd::{
     PreparedSpd, run_spd_exact_within, run_spd_observable_with, run_spd_weighted_observable_with,
@@ -171,6 +171,46 @@ fn validate_and_lower<'c>(
         .map_err(reject)?;
     }
     Ok(Cow::Owned(circuit.with_instructions(out)))
+}
+
+/// Validate that `circuit` lowers to the Pauli gate set without allocating a lowered copy.
+pub(crate) fn validate_pauli_circuit(
+    circuit: &Circuit,
+    backend: &'static str,
+    allow_rx_ry_pauli_rot: bool,
+) -> Result<()> {
+    let native: fn(&Gate) -> bool = if allow_rx_ry_pauli_rot {
+        is_spd_native
+    } else {
+        is_pauli_native
+    };
+    let reject = |operation: String| PrismError::BackendUnsupported {
+        backend: backend.to_string(),
+        operation,
+    };
+    for inst in &circuit.instructions {
+        match inst {
+            Instruction::Gate { gate, targets } => {
+                if !native(gate) {
+                    lower_to_pauli_forms(gate, targets, &mut |_, _| {}).map_err(reject)?;
+                }
+            }
+            Instruction::Barrier { .. } => {}
+            Instruction::Save { .. }
+            | Instruction::Measure { .. }
+            | Instruction::Reset { .. }
+            | Instruction::Conditional { .. }
+            | Instruction::Region(_) => {
+                return Err(PrismError::IncompatibleBackend {
+                    backend: backend.to_string(),
+                    reason: "Pauli propagation requires a unitary circuit without measurements, \
+                         resets, or conditionals"
+                        .to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Gates the deterministic engines take without lowering: the shared native set

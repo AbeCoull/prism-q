@@ -449,6 +449,32 @@ impl BackendKind {
     }
 }
 
+/// Validate parameter fields carried directly by `kind`.
+pub(super) fn validate_kind_parameters(kind: &BackendKind) -> Result<()> {
+    match kind {
+        BackendKind::TensorNetworkBounded { tolerance }
+            if !(tolerance.is_finite() && *tolerance > 0.0) =>
+        {
+            return Err(PrismError::InvalidParameter {
+                message: format!(
+                    "tensor-network tolerance must be a finite fraction above zero, got {tolerance}; \
+                     TensorNetwork is the exact contraction"
+                ),
+            });
+        }
+        BackendKind::Mps { max_bond_dim: 0 } => {
+            return Err(PrismError::InvalidParameter {
+                message: "MPS max_bond_dim must be at least 1, got 0".into(),
+            });
+        }
+        BackendKind::DeterministicPauli { truncation } => {
+            truncation.validate()?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Reject a circuit the explicitly selected `kind` cannot run; an `Auto` kind passes.
 pub(super) fn validate_explicit_backend(
     kind: &BackendKind,
@@ -458,6 +484,7 @@ pub(super) fn validate_explicit_backend(
     if kind.is_auto() {
         return Ok(());
     }
+    validate_kind_parameters(kind)?;
     if kind.is_stabilizer_family() && !circuit.is_clifford_only() {
         return Err(PrismError::IncompatibleBackend {
             backend: "stabilizer".into(),
@@ -471,15 +498,15 @@ pub(super) fn validate_explicit_backend(
                 reason: "circuit contains entangling gates".into(),
             });
         }
-        BackendKind::TensorNetworkBounded { tolerance }
-            if !(tolerance.is_finite() && *tolerance > 0.0) =>
-        {
-            return Err(PrismError::InvalidParameter {
-                message: format!(
-                    "tensor-network tolerance must be a finite fraction above zero, got {tolerance}; \
-                     TensorNetwork is the exact contraction"
-                ),
-            });
+        BackendKind::Sparse => {
+            if crate::circuit::any_gate(&circuit.instructions, &mut |gate| {
+                matches!(gate, Gate::Unitary(_))
+            }) {
+                return Err(PrismError::BackendUnsupported {
+                    backend: "sparse".into(),
+                    operation: "dense multi-qubit gate `Unitary`".into(),
+                });
+            }
         }
         BackendKind::StabilizerRank if !circuit.has_t_gates() => {
             return Err(PrismError::IncompatibleBackend {

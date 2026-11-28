@@ -319,6 +319,15 @@ const MAX_TERMS: usize = 1 << 20; // 1M terms safety limit
 
 /// Reject the instruction kinds the probability path cannot take, then lower
 /// the gates to Clifford plus `T`/`Tdg`.
+pub(super) fn validate_probability_circuit(circuit: &Circuit) -> Result<()> {
+    lower_probability_circuit(circuit)?;
+    require_dense_width(circuit.num_qubits)
+}
+
+pub(super) fn validate_shots_circuit(circuit: &Circuit) -> Result<()> {
+    lower_clifford_t_circuit(circuit).map(|_| ())
+}
+
 fn lower_probability_circuit(circuit: &Circuit) -> Result<Cow<'_, Circuit>> {
     for inst in &circuit.instructions {
         match inst {

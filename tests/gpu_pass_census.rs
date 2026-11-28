@@ -365,3 +365,46 @@ fn noisy_trajectory_shot_reads_outcomes_back_at_guards_and_the_end() {
         assert_eq!((census.drains, census.uploads), (drains, drains));
     }
 }
+
+#[test]
+fn gated_tile_floor_tiles_ansatz_and_keeps_qaoa_batched_at_14q_16q() {
+    use prism_q::circuit::fusion::fuse_circuit_for_profile;
+
+    let Some(ctx) = gpu_device::context() else {
+        return;
+    };
+    let seed = 0xDEAD_BEEF;
+    let measure = |circuit: &Circuit| {
+        let mut backend = StatevectorBackend::new(42).with_gpu(ctx.clone());
+        let profile = backend.fusion_profile(circuit.num_qubits);
+        let fused = fuse_circuit_for_profile(circuit, true, circuit.num_qubits, profile);
+        backend
+            .init(circuit.num_qubits, circuit.num_classical_bits)
+            .unwrap();
+        let before = ctx.pass_census();
+        backend.apply_instructions(&fused.instructions).unwrap();
+        ctx.pass_census() - before
+    };
+
+    for n in [14usize, 16] {
+        let qaoa = measure(&prism_q::circuits::qaoa_circuit(n, 3, seed));
+        assert_eq!(qaoa.tiles, 0, "qaoa_l3/{n} must stay on batched kernels");
+        assert!(qaoa.launches <= 12, "qaoa_l3/{n}: {qaoa:?}");
+
+        let hea = measure(&prism_q::circuits::hardware_efficient_ansatz(n, 5, seed));
+        assert!(hea.tiles > 0, "hea_l5/{n} must tile: {hea:?}");
+        assert_eq!(hea.dense_2q, 0, "hea_l5/{n} must avoid dense_2q launches");
+        assert!(hea.launches <= 4, "hea_l5/{n}: {hea:?}");
+
+        let rand = measure(&prism_q::circuits::random_circuit(n, 10, seed));
+        assert!(rand.tiles > 0, "random_d10/{n} must tile: {rand:?}");
+        assert_eq!(
+            rand.dense_2q, 0,
+            "random_d10/{n} must avoid dense_2q launches"
+        );
+        assert!(rand.launches <= 3, "random_d10/{n}: {rand:?}");
+    }
+
+    let qaoa_18 = measure(&prism_q::circuits::qaoa_circuit(18, 3, seed));
+    assert!(qaoa_18.tiles > 0, "qaoa_l3/18 must tile: {qaoa_18:?}");
+}

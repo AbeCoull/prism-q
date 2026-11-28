@@ -1105,11 +1105,9 @@ impl Backend for StatevectorBackend {
             }
         }
         #[cfg(feature = "gpu")]
-        if self
-            .gpu_state
-            .as_ref()
-            .is_some_and(|gpu| crate::gpu::tiles::enabled(gpu.num_qubits()))
-        {
+        if self.gpu_state.as_ref().is_some_and(|gpu| {
+            crate::gpu::tiles::enabled_for_stream(gpu.num_qubits(), instructions)
+        }) {
             return self.apply_tiled_gpu(instructions);
         }
         #[cfg(feature = "parallel")]

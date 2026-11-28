@@ -1696,7 +1696,9 @@ pub(super) fn fuse_at_width<'a>(
     t: &mut Tracer,
 ) -> Cow<'a, Circuit> {
     let pass0r = front_passes(circuit, n, profile, t);
-    if profile == FusionProfile::Device {
+    if profile == FusionProfile::Device
+        && (n >= DEVICE_DIAGONAL_BATCH_CEILING || has_non_diagonal_2q(&pass0r))
+    {
         return device_passes(pass0r, n, t);
     }
     let pass0b = gated(pass0r, n, MIN_QUBITS_FOR_DIAG_BATCH, |c| {
@@ -1743,6 +1745,27 @@ fn single_qubit_passes<'a>(stream: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<'a, 
     let pass1r = reorder_1q_gates(pass1, t);
     let pass1c = apply_pass(pass1r, t, cancel_self_inverse_pairs);
     apply_pass(pass1c, t, fuse_single_qubit_gates)
+}
+
+/// Width below which [`FusionProfile::Device`] keeps host batching for circuits
+/// without non-diagonal two-qubit gates (matches `gpu::tiles::MIN_QUBITS`).
+const DEVICE_DIAGONAL_BATCH_CEILING: usize = 18;
+
+fn has_non_diagonal_2q(circuit: &Circuit) -> bool {
+    circuit.instructions.iter().any(|inst| match inst {
+        Instruction::Gate { gate, targets } if targets.len() >= 2 => {
+            !matches!(
+                gate,
+                Gate::Cz
+                    | Gate::Rzz(_)
+                    | Gate::BatchRzz(_)
+                    | Gate::BatchPhase(_)
+                    | Gate::DiagonalBatch(_)
+                    | Gate::QftBlock { .. }
+            ) && !matches!(gate, Gate::Cu(m) if crate::gates::is_diagonal_2x2(m))
+        }
+        _ => false,
+    })
 }
 
 /// The [`FusionProfile::Device`] passes after `fuse_rzz`. A 1q gate joins a 2q gate only

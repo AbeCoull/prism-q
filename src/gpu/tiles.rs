@@ -6,20 +6,51 @@ use std::ops::Range;
 
 use num_complex::Complex64;
 
+use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::gates::{Gate, is_antidiagonal_2x2, is_diagonal_2x2};
 use crate::gpu::GpuState;
 use crate::gpu::kernels::dense::{self as k, Route2q, route_2q};
 use crate::gpu::kernels::{check_pair, check_qubit};
 
-/// Narrowest state the device lowering runs on. On a GTX 1080 Ti a three-layer QAOA ran
-/// 12% slower tiled than batched at 17 qubits and 7% faster at 18, where the ansatz and
-/// random circuits already ran 2x faster.
+/// Narrowest state the unconditional device lowering runs on. Below this width, pure
+/// diagonal two-qubit workloads such as three-layer QAOA stay faster on host batched
+/// kernels than tiled.
 pub(crate) const MIN_QUBITS: usize = 18;
 
-/// Whether an `n`-qubit device state takes the tiled lowering.
+/// Narrowest state that enters the gated tiled lowering when the stream holds enough
+/// launches to amortize tile planning and shared-memory passes.
+const GATED_MIN_QUBITS: usize = 14;
+const GATED_MIN_LAUNCHES: usize = 24;
+
+/// Whether an `n`-qubit device state requests [`FusionProfile::Device`].
+///
+/// Below [`MIN_QUBITS`], fusion keeps host batching for circuits without non-diagonal
+/// two-qubit gates so QAOA and similar diagonal workloads stay on batched kernels.
 pub(crate) fn enabled(n: usize) -> bool {
-    n >= MIN_QUBITS
+    n >= GATED_MIN_QUBITS
+}
+
+fn worth_tiling_stream(instructions: &[Instruction]) -> bool {
+    let mut launches = 0usize;
+    for inst in instructions {
+        if let Instruction::Gate { gate, .. } = inst {
+            launches += if let Gate::Multi2q(data) = gate {
+                data.gates().len()
+            } else {
+                1
+            };
+            if launches >= GATED_MIN_LAUNCHES {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether an `n`-qubit device state takes the tiled lowering for `instructions`.
+pub(crate) fn enabled_for_stream(n: usize, instructions: &[Instruction]) -> bool {
+    n >= MIN_QUBITS || (n >= GATED_MIN_QUBITS && worth_tiling_stream(instructions))
 }
 
 /// One gate of a lowered window, on global qubits.

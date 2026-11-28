@@ -104,3 +104,15 @@ fn fits_tableau_clamps_overflow_before_device() {
     let ctx = GpuContext::stub_for_tests();
     assert!(!ctx.fits_tableau(usize::MAX / 2).unwrap());
 }
+
+#[test]
+fn alloc_driver_err_maps_cuda_oom_to_resource_limit() {
+    let oom = cudarc::driver::DriverError(cudarc::driver::sys::CUresult::CUDA_ERROR_OUT_OF_MEMORY);
+    let err = alloc_driver_err(None, "alloc_zeros", 1 << 30, oom);
+    assert!(matches!(
+        err,
+        PrismError::ResourceLimit(limit)
+            if limit.resource == crate::error::ResourceKind::DeviceBytes
+                && limit.required == (1u128 << 30)
+    ));
+}

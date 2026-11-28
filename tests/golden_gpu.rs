@@ -3937,14 +3937,13 @@ fn auto_gpu_noisy_trajectories_match_cpu_auto() {
     }
 }
 
-// A device-resident statevector reads no two-qubit reduced density matrix, so a
-// correlated two-qubit Kraus channel keeps an `AutoGpu` trajectory on the host
-// above the crossover instead of failing on the first event. On the host the
-// run is the `Auto` run, shot for shot.
+// A device-resident statevector computes the two-qubit reduced density matrix on the
+// device, so a correlated two-qubit Kraus channel stays on the device under `AutoGpu`
+// above the crossover and matches the CPU trajectory run shot for shot.
 #[test]
-fn auto_gpu_two_qubit_kraus_trajectories_run_on_the_host() {
+fn auto_gpu_two_qubit_kraus_trajectories_run_on_device() {
     use prism_q::simulate;
-    use prism_q::{GateFilter, NoiseBuilder, NoiseChannel};
+    use prism_q::{GateFilter, NoiseBuilder, NoiseChannel, Placement};
 
     let Some(f) = Fixture::try_new() else { return };
 
@@ -3981,7 +3980,8 @@ fn auto_gpu_two_qubit_kraus_trajectories_run_on_the_host() {
         .noise(&noise)
         .seed(42)
         .shots(64)
-        .expect("AutoGpu must run a two-qubit Kraus channel on the host");
+        .expect("AutoGpu runs a two-qubit Kraus channel on the device");
+    assert_eq!(gpu.metadata.placement, Placement::Device);
     assert_eq!(cpu.shots, gpu.shots);
 }
 
@@ -5052,4 +5052,135 @@ fn deferred_trajectory_shots_match_immediate_readbacks_bit_for_bit() {
             }
         }
     }
+}
+
+fn dft_unitary_gate(k: usize) -> Gate {
+    let dim = 1usize << k;
+    let scale = 1.0 / (dim as f64).sqrt();
+    let mut mat = Vec::with_capacity(dim * dim);
+    for r in 0..dim {
+        for c in 0..dim {
+            let angle = 2.0 * std::f64::consts::PI * ((r * c) as f64) / (dim as f64);
+            mat.push(Complex64::from_polar(scale, angle));
+        }
+    }
+    Gate::unitary(mat, k).expect("DFT matrix is unitary")
+}
+
+#[test]
+fn statevector_gpu_dense_3q_and_4q_unitary_matches_cpu() {
+    use prism_q::Circuit;
+
+    let Some(f) = Fixture::try_new() else { return };
+    for n in [6usize, 18usize] {
+        let mut circuit = Circuit::new(n, 0);
+        for q in 0..n {
+            circuit.add_gate(Gate::Rx(0.2 + 0.13 * q as f64), &[q]);
+        }
+        circuit.add_gate(dft_unitary_gate(3), &[n - 1, 1, 3]);
+        circuit.add_gate(dft_unitary_gate(4), &[2, n - 1, 0, 4]);
+
+        let mut cpu = StatevectorBackend::new(42);
+        cpu.init(n, 0).unwrap();
+        cpu.apply_instructions(&circuit.instructions).unwrap();
+
+        let mut gpu = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+        gpu.init(n, 0).unwrap();
+        gpu.apply_instructions(&circuit.instructions).unwrap();
+
+        let host = cpu.export_statevector().unwrap();
+        let dev = gpu.export_statevector().unwrap();
+        assert_eq!(host.len(), dev.len());
+        for (i, (h, d)) in host.iter().zip(&dev).enumerate() {
+            let diff = (h - d).norm();
+            assert!(
+                diff < EPS,
+                "dense 3q/4q unitary at n={n} amp {i}: host={h:?}, dev={d:?}, diff={diff}"
+            );
+        }
+    }
+}
+
+#[test]
+fn statevector_gpu_reduced_density_matrix_2q_matches_cpu() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 10;
+    let circuit = prism_q::circuits::random_circuit(n, 4, 42);
+
+    let mut cpu = StatevectorBackend::new(42);
+    cpu.init(n, 0).unwrap();
+    cpu.apply_instructions(&circuit.instructions).unwrap();
+
+    let mut gpu = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    gpu.init(n, 0).unwrap();
+    gpu.apply_instructions(&circuit.instructions).unwrap();
+
+    for (q0, q1) in [(0, 1), (1, 0), (0, n - 1), (n - 1, 3), (4, 7)] {
+        let host = cpu.reduced_density_matrix_2q(q0, q1).unwrap();
+        let dev = gpu.reduced_density_matrix_2q(q0, q1).unwrap();
+        for r in 0..4 {
+            for c in 0..4 {
+                let diff = (host[r][c] - dev[r][c]).norm();
+                assert!(
+                    diff < EPS,
+                    "rdm_2q({q0}, {q1})[{r}][{c}]: host={:?}, dev={:?}, diff={diff}",
+                    host[r][c],
+                    dev[r][c]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn stabilizer_gpu_native_overlap_and_init_from_tableau_at_500_qubits() {
+    use prism_q::Circuit;
+    use prism_q::backend::stabilizer::StabilizerBackend;
+
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 500;
+    let mut circuit_a = Circuit::new(n, 0);
+    let mut circuit_b = Circuit::new(n, 0);
+    for q in 0..n {
+        if q % 2 == 0 {
+            circuit_a.add_gate(Gate::H, &[q]);
+            circuit_b.add_gate(Gate::H, &[q]);
+        }
+        if q + 1 < n {
+            circuit_a.add_gate(Gate::Cx, &[q, q + 1]);
+            circuit_b.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    circuit_b.add_gate(Gate::S, &[0]);
+
+    let mut cpu_a = StabilizerBackend::new(42);
+    cpu_a.init(n, 0).unwrap();
+    cpu_a.apply_instructions(&circuit_a.instructions).unwrap();
+    let mut cpu_b = StabilizerBackend::new(42);
+    cpu_b.init(n, 0).unwrap();
+    cpu_b.apply_instructions(&circuit_b.instructions).unwrap();
+    let expected_ab = cpu_a.overlap_sq(&cpu_b).unwrap();
+
+    let mut gpu_a = StabilizerBackend::new(42).with_gpu(f.ctx.clone());
+    gpu_a.init(n, 0).unwrap();
+    gpu_a.apply_instructions(&circuit_a.instructions).unwrap();
+    let mut gpu_b = StabilizerBackend::new(42).with_gpu(f.ctx.clone());
+    gpu_b.init(n, 0).unwrap();
+    gpu_b.apply_instructions(&circuit_b.instructions).unwrap();
+
+    assert_eq!(gpu_a.overlap_sq(&gpu_a).unwrap(), 1.0);
+    assert_eq!(gpu_a.overlap_sq(&gpu_b).unwrap(), expected_ab);
+    assert_eq!(gpu_a.overlap_sq(&cpu_b).unwrap(), expected_ab);
+
+    let (words, phases) = gpu_a.export_tableau().unwrap();
+    let mut resumed = StabilizerBackend::new(42).with_gpu(f.ctx.clone());
+    resumed.init_from_tableau(n, words, phases, 0).unwrap();
+    assert_eq!(resumed.overlap_sq(&gpu_a).unwrap(), 1.0);
+    resumed
+        .apply(&Instruction::Gate {
+            gate: Gate::S,
+            targets: smallvec![0],
+        })
+        .unwrap();
+    assert_eq!(resumed.overlap_sq(&gpu_b).unwrap(), 1.0);
 }

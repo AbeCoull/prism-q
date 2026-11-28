@@ -779,12 +779,23 @@ fn expand_t_unbounded(branches: &mut Vec<WeightedBranch>, qubit: usize, is_dagge
 /// factor stays inside its own group, whose elements all commute, so it stays
 /// a signed Pauli and the two signs compare directly.
 pub fn stabilizer_overlap_sq(s1: &StabilizerBackend, s2: &StabilizerBackend, n: usize) -> f64 {
+    let (xz1, phase1) = s1.raw_tableau();
+    let (xz2, phase2) = s2.raw_tableau();
+    stabilizer_overlap_sq_rows(xz1, phase1, xz2, phase2, n)
+}
+
+/// [`stabilizer_overlap_sq`] directly over two bit-packed stabilizer row sets
+/// (rows `n..2n` in each `(2n + 1) x 2*ceil(n/64)` tableau buffer).
+pub(crate) fn stabilizer_overlap_sq_rows(
+    xz1: &[u64],
+    phase1: &[bool],
+    xz2: &[u64],
+    phase2: &[bool],
+    n: usize,
+) -> f64 {
     let nw = n.div_ceil(64);
     let stride = 2 * nw;
     let total_rows = 2 * n;
-
-    let (xz1, phase1) = s1.raw_tableau();
-    let (xz2, phase2) = s2.raw_tableau();
 
     let mut left = vec![0u64; total_rows * stride];
     let mut right = vec![0u64; total_rows * stride];

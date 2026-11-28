@@ -139,9 +139,9 @@ pub enum Gate {
     /// [`Gate::matrix_4x4`] uses.
     ///
     /// Built only by [`Gate::unitary`], which lowers one and two qubit matrices
-    /// and the structured wider ones into the existing variants. The CPU
-    /// statevector applies it in one gather-scatter pass; the factored, density
-    /// matrix, MPS, and tensor network backends apply it through their dense
+    /// and the structured wider ones into the existing variants. The CPU and GPU
+    /// statevector and density matrix backends apply it through dense kernels;
+    /// factored, MPS, and tensor network backends apply it through their dense
     /// paths, and every other backend declines it by name.
     Unitary(Box<UnitaryData>),
 }

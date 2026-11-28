@@ -27,13 +27,13 @@ pub(crate) use gates::{
     Route2q, launch_apply_cu, launch_apply_cu_phase, launch_apply_cx, launch_apply_cz,
     launch_apply_diagonal_1q, launch_apply_fused_2q, launch_apply_gate_1q, launch_apply_matrix_2q,
     launch_apply_mcu, launch_apply_mcu_phase, launch_apply_rzz, launch_apply_swap,
-    launch_set_initial_state, route_2q,
+    launch_apply_unitary_nq, launch_set_initial_state, route_2q,
 };
 #[cfg(test)]
 pub(crate) use measure::probabilities_through_scratch;
 pub(crate) use measure::{
     begin_measure_log, launch_compute_probabilities, measure_collapse, measure_logged,
-    measure_prob_one, read_measure_log, reduced_density_matrix_1q,
+    measure_prob_one, read_measure_log, reduced_density_matrix_1q, reduced_density_matrix_2q,
 };
 pub(crate) use noise::{noise_damping, noise_kraus, noise_thermal};
 pub(crate) use sample::{sample_sorted, walk_moves_fewer_bytes};
@@ -73,6 +73,19 @@ struct QubitListArg {
 
 // SAFETY: a plain `repr(C)` array of i32 with the layout the kernel declares.
 unsafe impl cudarc::driver::DeviceRepr for QubitListArg {}
+
+/// Dense k-qubit unitary index metadata; mirrors `struct UnitaryMeta`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UnitaryMetaArg {
+    offsets: [u64; 16],
+    sorted: [i32; 4],
+    k: i32,
+    _pad: i32,
+}
+
+// SAFETY: plain `repr(C)` arrays of u64 and i32 matching `struct UnitaryMeta`.
+unsafe impl cudarc::driver::DeviceRepr for UnitaryMetaArg {}
 
 /// Diagonal `MultiFused` sub-gates, `d[4g..4g + 4]` = (d0, d1) re/im pairs and `t[g]`
 /// the target; mirrors `struct DiagList`.

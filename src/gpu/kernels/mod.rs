@@ -133,6 +133,8 @@ pub(crate) struct LauncherScratch {
     /// Four-element output for the reduced-density-matrix finalize reduction.
     /// Separate from `measure_result`: readback length must match the buffer.
     pub(crate) rdm_result: Option<GpuBuffer<f64>>,
+    /// Sixteen-element output for the two-qubit reduced-density-matrix finalize reduction.
+    pub(crate) rdm2q_result: Option<GpuBuffer<f64>>,
     /// The kernel flag and 2x2 matrix a trajectory noise site decides on the device;
     /// see [`super::dense::noise_damping`].
     pub(crate) noise_decision: Option<GpuBuffer<f64>>,
@@ -354,6 +356,7 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "apply_cu_phase",
     "apply_mcu",
     "apply_mcu_phase",
+    "apply_unitary_nq",
     "apply_fused_2q",
     "apply_monomial_2q",
     "qft_dif_pass",
@@ -364,6 +367,8 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "measure_decide",
     "rdm_qubit",
     "rdm_qubit_finalize",
+    "rdm_2q",
+    "rdm_2q_finalize",
     "noise_site_damping",
     "noise_site_thermal",
     "noise_site_kraus",

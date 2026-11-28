@@ -882,3 +882,47 @@ fn dm_gpu_import_rejects_a_bad_mixture_before_uploading() {
         }
     }
 }
+
+#[test]
+fn dm_gpu_dense_3q_and_4q_unitary_matches_cpu() {
+    let Some(fx) = Fixture::try_new() else {
+        return;
+    };
+    let dft = |k: usize| {
+        let dim = 1usize << k;
+        let scale = 1.0 / (dim as f64).sqrt();
+        let mut mat = Vec::with_capacity(dim * dim);
+        for r in 0..dim {
+            for col in 0..dim {
+                let angle = 2.0 * std::f64::consts::PI * ((r * col) as f64) / (dim as f64);
+                mat.push(Complex64::from_polar(scale, angle));
+            }
+        }
+        Gate::unitary(mat, k).unwrap()
+    };
+    let n = 5;
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.25 + 0.1 * q as f64), &[q]);
+    }
+    circuit.add_gate(dft(3), &[4, 1, 2]);
+    circuit.add_gate(dft(4), &[3, 0, 4, 1]);
+
+    let host = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .seed(SEED)
+        .run()
+        .unwrap();
+    let device = sim::simulate(&circuit)
+        .backend(fx.kind())
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert_eq!(device.metadata.placement, Placement::Device);
+    assert_probs_close(
+        &device.probabilities.unwrap().to_vec(),
+        &host.probabilities.unwrap().to_vec(),
+        EPS,
+        "dense 3q/4q unitary on density matrix GPU",
+    );
+}

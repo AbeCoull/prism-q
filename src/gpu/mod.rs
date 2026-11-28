@@ -519,6 +519,28 @@ fn driver_err(op: &str, err: impl std::fmt::Display) -> crate::error::PrismError
     }
 }
 
+pub(crate) fn alloc_driver_err(
+    device: Option<&GpuDevice>,
+    op: &str,
+    required_bytes: usize,
+    err: cudarc::driver::DriverError,
+) -> crate::error::PrismError {
+    if err.0 == cudarc::driver::sys::CUresult::CUDA_ERROR_OUT_OF_MEMORY {
+        let limit = device.and_then(|d| d.vram_available().ok()).unwrap_or(0) as u128;
+        return crate::error::PrismError::ResourceLimit(Box::new(crate::error::ResourceLimit {
+            backend: "gpu".to_string(),
+            operation: op.to_string(),
+            resource: crate::error::ResourceKind::DeviceBytes,
+            required: required_bytes as u128,
+            limit,
+            env_var: None,
+            knob: None,
+            limit_source: crate::limits::LimitSource::Detected,
+        }));
+    }
+    driver_err(op, err)
+}
+
 /// Device stabilizer tableau.
 ///
 /// The `xz` and `phase` buffers mirror the CPU tableau layout in

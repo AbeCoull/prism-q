@@ -24,7 +24,7 @@ use cudarc::driver::{CudaSlice, CudaStream, CudaView, PushKernelArg};
 
 use crate::error::Result;
 
-use super::super::{GpuContext, GpuTableau};
+use super::super::{GpuContext, GpuTableau, alloc_driver_err};
 use super::{
     div_ceil_grid, driver_err, launch_counted, linear_cfg, require_i32, require_u32, stream_and_fn,
 };
@@ -265,11 +265,14 @@ fn stage_u32<'a>(
 ) -> Result<CudaView<'a, u32>> {
     let src: &[u32] = if host.is_empty() { &ZERO_U32 } else { host };
     if slot.as_ref().is_none_or(|buf| buf.len() < src.len()) {
-        *slot = Some(
-            stream
-                .alloc_zeros::<u32>(src.len())
-                .map_err(|e| driver_err(&format!("alloc {name}"), e))?,
-        );
+        *slot = Some(stream.alloc_zeros::<u32>(src.len()).map_err(|e| {
+            alloc_driver_err(
+                Some(ctx.device()),
+                &format!("alloc {name}"),
+                src.len().saturating_mul(std::mem::size_of::<u32>()),
+                e,
+            )
+        })?);
     }
     let dev = slot.as_mut().expect("slot allocated above");
     stream

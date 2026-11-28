@@ -92,6 +92,7 @@ pub(crate) fn expectation_gradient_within(
     limits: &ResolvedLimits,
     fused_forward: Option<&Circuit>,
 ) -> Result<ExpectationGradient> {
+    limits.validate()?;
     if super::has_nonunitary_or_classical_ops(circuit) {
         return Err(PrismError::IncompatibleBackend {
             backend: "Statevector".into(),
@@ -817,6 +818,7 @@ pub(crate) fn shift_gradient(
         );
     }
     let limits = &ResolvedLimits::resolve(request);
+    limits.validate()?;
     if initial_state.is_some() || noise.is_some() {
         super::require_unitary_circuit(kind, circuit, "expectation values require")?;
     }

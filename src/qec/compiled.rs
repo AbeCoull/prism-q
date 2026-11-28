@@ -66,6 +66,7 @@ impl QecProgram {
     /// non-Clifford gate, or a feed-forward body with other gates is rejected; those run
     /// through `run_qec_program` or [`run_qec_program_reference`](super::run_qec_program_reference).
     pub fn compile_sampler(&self) -> Result<QecCompiledSampler> {
+        crate::limits::ResolvedLimits::process_default().validate()?;
         super::validate_measured_qubit_reuse(self)?;
         if self.num_expectation_values() > 0 {
             return Err(PrismError::IncompatibleBackend {

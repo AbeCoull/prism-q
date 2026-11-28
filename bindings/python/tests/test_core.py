@@ -527,10 +527,38 @@ def test_set_default_limits_applies_without_a_restart():
 def test_limits_reports_the_fields_it_sets():
     from prism_q import Limits
 
-    limits = Limits(memory_budget_bytes=1 << 30, auto_mps_bond_dim=64)
+    limits = Limits(memory_budget_bytes=1 << 30, auto_mps_bond_dim=64, min_fidelity_estimate=0.5)
     assert limits.memory_budget_bytes == 1 << 30
     assert limits.max_statevector_qubits is None
-    assert repr(limits) == "Limits(memory_budget_bytes=1073741824, auto_mps_bond_dim=64)"
+    assert limits.min_fidelity_estimate == 0.5
+    assert Limits().min_fidelity_estimate is None
+    assert (
+        repr(limits)
+        == "Limits(memory_budget_bytes=1073741824, auto_mps_bond_dim=64, min_fidelity_estimate=0.5)"
+    )
+
+
+def test_limits_min_fidelity_estimate_validation_and_mps_abort():
+    from prism_q import BackendKind, Limits
+
+    assert Limits(min_fidelity_estimate=0.0).min_fidelity_estimate == 0.0
+    assert Limits(min_fidelity_estimate=1.0).min_fidelity_estimate == 1.0
+
+    for bad in (-0.1, 1.1, float("nan"), float("inf")):
+        with pytest.raises(prism_q.PrismError) as excinfo:
+            Limits(min_fidelity_estimate=bad)
+        assert excinfo.value.kind == "invalid_parameter"
+
+    circuit = circuits.independent_random_blocks(1, 10, 24, 42)
+    with pytest.raises(prism_q.PrismError) as excinfo:
+        (
+            simulate(circuit)
+            .backend(BackendKind.mps(2))
+            .limits(Limits(min_fidelity_estimate=0.5))
+            .seed(42)
+            .run()
+        )
+    assert excinfo.value.kind == "incompatible_backend"
 
 
 def test_circuit_depth_counts_layers():

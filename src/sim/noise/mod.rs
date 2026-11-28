@@ -59,6 +59,7 @@ pub(crate) fn run_validated_shots_noisy(
     num_shots: usize,
     seed: u64,
 ) -> Result<ShotsResult> {
+    ResolvedLimits::process_default().validate()?;
     noise.ensure_only_pauli_channels()?;
     if !circuit.is_clifford_only() {
         let limits = ResolvedLimits::process_default();
@@ -100,6 +101,7 @@ pub(crate) fn run_deferred_shots_noisy(
     num_shots: usize,
     seed: u64,
 ) -> Result<ShotsResult> {
+    ResolvedLimits::process_default().validate()?;
     if deferred.guarded.is_empty() {
         return run_validated_shots_noisy(&deferred.circuit, &deferred.noise, num_shots, seed);
     }
@@ -114,6 +116,7 @@ pub(crate) fn run_shots_noisy_with_gpu(
     seed: u64,
     context: std::sync::Arc<crate::gpu::GpuContext>,
 ) -> Result<ShotsResult> {
+    ResolvedLimits::process_default().validate()?;
     noise.ensure_only_pauli_channels()?;
     if !circuit.is_clifford_only() {
         let limits = ResolvedLimits::process_default();

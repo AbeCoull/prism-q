@@ -184,4 +184,82 @@ fn the_process_default_applies_without_a_restart() {
         run().is_ok(),
         "clearing the default restores the detected caps"
     );
+
+    let mut param_circuit = Circuit::new(1, 0);
+    param_circuit.add_gate(Gate::Rx(0.0), &[0]);
+    let params = prism_q::Parameters::from_links(vec![prism_q::ParamLink::new(0, 0)], 1);
+    let hamiltonian =
+        prism_q::PauliObservable::from_terms([(1.0, vec![prism_q::PauliTerm::z(0)])]).unwrap();
+    let mut prepared_before =
+        prism_q::PreparedCircuit::new(param_circuit.clone(), params.clone()).unwrap();
+    let bound = params.bind(&param_circuit, &[0.3]).unwrap();
+    let qec = feedforward_exp_val(4);
+    let dm_circuit = circuits::ghz_circuit(2);
+    let mut stab_circuit = Circuit::new(2, 2);
+    stab_circuit.add_gate(Gate::H, &[0]);
+    stab_circuit.add_gate(Gate::T, &[0]);
+    stab_circuit.add_gate(Gate::Cx, &[0, 1]);
+    stab_circuit.add_measure(0, 0);
+    stab_circuit.add_measure(1, 1);
+    let mut noisy_circuit = Circuit::new(2, 2);
+    noisy_circuit.add_gate(Gate::H, &[0]);
+    noisy_circuit.add_gate(Gate::Cx, &[0, 1]);
+    noisy_circuit.add_measure(0, 0);
+    noisy_circuit.add_measure(1, 1);
+    let noise = prism_q::NoiseBuilder::new().build(&noisy_circuit).unwrap();
+
+    for bad in [-1e-12, 1.0 + 1e-12, f64::NAN, f64::NEG_INFINITY] {
+        let mut bad_limits = Limits::new();
+        bad_limits.min_fidelity_estimate = Some(bad);
+        set_default_limits(bad_limits);
+
+        let grad_err =
+            prism_q::sim::gradient::run_expectation_gradient(&bound, &hamiltonian, &params, 42)
+                .unwrap_err();
+        assert!(
+            matches!(grad_err, PrismError::InvalidParameter { .. }),
+            "run_expectation_gradient for {bad}: {grad_err:?}"
+        );
+
+        let prep_err = prepared_before
+            .expectation_gradient(&[0.3], &hamiltonian, 42)
+            .unwrap_err();
+        assert!(
+            matches!(prep_err, PrismError::InvalidParameter { .. }),
+            "PreparedCircuit::expectation_gradient for {bad}: {prep_err:?}"
+        );
+
+        let qec_err = prism_q::run_qec_program(&qec).unwrap_err();
+        assert!(
+            matches!(qec_err, PrismError::InvalidParameter { .. }),
+            "run_qec_program for {bad}: {qec_err:?}"
+        );
+
+        let dm_err = prism_q::density_matrix_expectation_values(
+            &dm_circuit,
+            &[vec![prism_q::PauliTerm::z(0)]],
+            None,
+            42,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(dm_err, PrismError::InvalidParameter { .. }),
+            "density_matrix_expectation_values for {bad}: {dm_err:?}"
+        );
+
+        let noisy_err = prism_q::run_shots_noisy(&noisy_circuit, &noise, 4, 42).unwrap_err();
+        assert!(
+            matches!(noisy_err, PrismError::InvalidParameter { .. }),
+            "run_shots_noisy for {bad}: {noisy_err:?}"
+        );
+
+        let sr_err = prism_q::sim::stabilizer_rank::run_stabilizer_rank_shots(&stab_circuit, 4, 42)
+            .unwrap_err();
+        assert!(
+            matches!(sr_err, PrismError::InvalidParameter { .. }),
+            "run_stabilizer_rank_shots for {bad}: {sr_err:?}"
+        );
+    }
+
+    set_default_limits(Limits::new());
 }

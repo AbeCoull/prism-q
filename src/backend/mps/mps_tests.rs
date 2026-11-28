@@ -4050,3 +4050,213 @@ fn schmidt_density_faer_evd_handles_rank_deficient_and_large_rho() {
         assert!((g - w).abs() < 1e-11, "s[{i}]: {g} vs {w}");
     }
 }
+
+#[test]
+fn min_fidelity_estimate_aborts_brickwork_before_last_gate() {
+    let circuit = crate::circuits::brickwork_circuit(10, 24, 42);
+    let len = circuit.instructions.len();
+    assert!(len > 10);
+
+    let mut step_unfloored = MpsBackend::new(42, 2);
+    step_unfloored.init(circuit.num_qubits, 0).unwrap();
+    let mut first_breach = None;
+    for (idx, inst) in circuit.instructions.iter().enumerate() {
+        step_unfloored.apply(inst).unwrap();
+        let est = (1.0 - step_unfloored.truncation_discarded()).max(0.0);
+        if est < 0.5 && first_breach.is_none() {
+            first_breach = Some((idx, step_unfloored.truncation_discarded()));
+        }
+    }
+    let (breach_idx, breach_discarded) =
+        first_breach.expect("bond-2 brickwork should drop below 0.5");
+    assert!(
+        breach_idx < len - 1,
+        "expected breach before last gate: {breach_idx} vs {len}"
+    );
+    let step_full_discarded = step_unfloored.truncation_discarded();
+    assert!(breach_discarded < step_full_discarded);
+
+    let limits = crate::limits::ResolvedLimits::resolve(Some(
+        &crate::Limits::new().min_fidelity_estimate(0.5),
+    ));
+    let mut step_floored = MpsBackend::with_limits(42, 2, &limits);
+    step_floored.init(circuit.num_qubits, 0).unwrap();
+    let mut failed_at = None;
+    for (idx, inst) in circuit.instructions.iter().enumerate() {
+        if let Err(err) = step_floored.apply(inst) {
+            assert!(
+                matches!(
+                    &err,
+                    crate::PrismError::IncompatibleBackend { backend, reason }
+                        if backend == "Mps" && reason.contains("min_fidelity_estimate")
+                ),
+                "{err:?}"
+            );
+            failed_at = Some(idx);
+            break;
+        }
+    }
+    assert_eq!(failed_at, Some(breach_idx));
+    assert_eq!(step_floored.truncation_discarded(), breach_discarded);
+
+    let mut batch_unfloored = MpsBackend::new(42, 2);
+    batch_unfloored.init(circuit.num_qubits, 0).unwrap();
+    batch_unfloored
+        .apply_instructions(&circuit.instructions)
+        .unwrap();
+    let batch_full_discarded = batch_unfloored.truncation_discarded();
+
+    let mut batch_floored = MpsBackend::with_limits(42, 2, &limits);
+    batch_floored.init(circuit.num_qubits, 0).unwrap();
+    let err = batch_floored
+        .apply_instructions(&circuit.instructions)
+        .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::PrismError::IncompatibleBackend { backend, reason }
+                if backend == "Mps" && reason.contains("min_fidelity_estimate")
+        ),
+        "{err:?}"
+    );
+    assert!(
+        batch_floored.truncation_discarded() < batch_full_discarded,
+        "batch run should abort mid-circuit: {} vs {}",
+        batch_floored.truncation_discarded(),
+        batch_full_discarded
+    );
+}
+
+#[test]
+fn min_fidelity_estimate_survives_cut_block_trial_rollback() {
+    let n = 6;
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+
+    let mut gate = vec![ZERO; 64];
+    for s in 0..8usize {
+        let mut angle = 0.0;
+        if s & 6 == 6 {
+            angle += 2e-17;
+        }
+        if s & 3 == 3 {
+            angle += 2e-13;
+        }
+        gate[s * 8 + s] = Complex64::from_polar(1.0, angle);
+    }
+
+    let limits = crate::limits::ResolvedLimits::resolve(Some(
+        &crate::Limits::new().min_fidelity_estimate(0.999999),
+    ));
+    let mut retried = MpsBackend::with_limits(42, 64, &limits);
+    retried.init(n, 0).unwrap();
+    retried.apply_instructions(&circuit.instructions).unwrap();
+    assert_eq!(retried.center, None);
+    retried.apply_adjacent_n_qubit(&gate, 8, 0).unwrap();
+    assert!(retried.center.is_some());
+
+    let mut reference = mps_after(&circuit, 64);
+    reference.establish_center(0);
+    reference.apply_adjacent_n_qubit(&gate, 8, 0).unwrap();
+    assert_eq!(
+        retried.truncation_discarded(),
+        reference.truncation_discarded()
+    );
+}
+
+#[test]
+fn min_fidelity_estimate_aborts_apply_n_qubit_gate_before_trailing_gates() {
+    use crate::gates::McuData;
+
+    let mut circuit = Circuit::new(4, 0);
+    for q in 0..4 {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_gate(Gate::Cx, &[2, 3]);
+    circuit.add_gate(
+        Gate::Mcu(Box::new(McuData {
+            num_controls: 2,
+            mat: Gate::H.matrix_2x2(),
+        })),
+        &[0, 2, 3],
+    );
+    for _ in 0..4 {
+        for q in 0..4 {
+            circuit.add_gate(Gate::T, &[q]);
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        circuit.add_gate(Gate::Cx, &[2, 3]);
+        circuit.add_gate(Gate::Cx, &[1, 2]);
+    }
+
+    let mut unfloored = MpsBackend::new(42, 2);
+    unfloored.init(4, 0).unwrap();
+    unfloored.apply_instructions(&circuit.instructions).unwrap();
+    let full_discarded = unfloored.truncation_discarded();
+    assert!((1.0 - full_discarded).max(0.0) < 0.9999);
+
+    let limits = crate::limits::ResolvedLimits::resolve(Some(
+        &crate::Limits::new().min_fidelity_estimate(0.9999),
+    ));
+    let mut floored = MpsBackend::with_limits(42, 2, &limits);
+    floored.init(4, 0).unwrap();
+    let err = floored
+        .apply_instructions(&circuit.instructions)
+        .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::PrismError::IncompatibleBackend { backend, .. } if backend == "Mps"
+        ),
+        "{err:?}"
+    );
+    assert!(
+        floored.truncation_discarded() < full_discarded,
+        "expected abort before trailing gates: {} vs {}",
+        floored.truncation_discarded(),
+        full_discarded
+    );
+}
+
+#[test]
+fn min_fidelity_estimate_one_aborts_tiny_truncation_past_exact_bound() {
+    let limits = crate::limits::ResolvedLimits::resolve(Some(
+        &crate::Limits::new().min_fidelity_estimate(1.0),
+    ));
+
+    for theta in [2e-10, 2e-7] {
+        let mut circuit = Circuit::new(2, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::H, &[1]);
+        circuit.add_gate(Gate::Rzz(theta), &[0, 1]);
+
+        let mut unfloored = MpsBackend::new(42, 1);
+        unfloored.init(2, 0).unwrap();
+        unfloored.apply_instructions(&circuit.instructions).unwrap();
+        assert!(unfloored.truncation_discarded() > EXACT_DISCARD_BOUND);
+        assert!(matches!(
+            unfloored.exactness(),
+            crate::sim::Exactness::Approximate { .. }
+        ));
+
+        let mut floored = MpsBackend::with_limits(42, 1, &limits);
+        floored.init(2, 0).unwrap();
+        let err = floored
+            .apply_instructions(&circuit.instructions)
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                crate::PrismError::IncompatibleBackend { backend, reason }
+                    if backend == "Mps"
+                        && reason.contains("discarded ")
+                        && reason.contains("min_fidelity_estimate floor 1")
+            ),
+            "theta={theta}: {err:?}"
+        );
+    }
+}

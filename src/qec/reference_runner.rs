@@ -28,6 +28,7 @@ use rand_chacha::ChaCha8Rng;
 /// earlier. [`QecOptions::chunk_size`](super::QecOptions::chunk_size) is validated but
 /// does not batch execution.
 pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult> {
+    crate::limits::ResolvedLimits::process_default().validate()?;
     super::validate_measured_qubit_reuse(program)?;
     qec_runner_chunk_size(program.options())?;
     super::validate_qec_exp_val_placement(program)?;

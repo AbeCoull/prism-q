@@ -334,6 +334,7 @@ pub(crate) fn expectation_zero_state(
     pauli_terms: &[PauliTerm],
     limits: &ResolvedLimits,
 ) -> Result<f64> {
+    limits.validate()?;
     contract_scalar(circuit, pauli_terms, ContractionLimits::new(limits, None))
 }
 

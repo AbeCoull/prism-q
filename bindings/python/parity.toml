@@ -685,6 +685,7 @@ exclude = [
 "Limits::max_tn_peak_qubits" = "Limits.max_tn_peak_qubits"
 "Limits::max_tn_slices" = "Limits.max_tn_slices"
 "Limits::memory_budget_bytes" = "Limits.memory_budget_bytes"
+"Limits::min_fidelity_estimate" = "Limits.min_fidelity_estimate"
 "Limits::new" = "Limits"
 
 "Simulate::plan" = "Simulation.plan"

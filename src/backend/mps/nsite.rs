@@ -286,6 +286,7 @@ impl MpsBackend {
             let gauged = self.cut_block(gate, dim, start_site, n);
             debug_assert!(gauged, "a block cut in gauge judged its spectrum");
         }
+        self.check_min_fidelity()?;
         Ok(())
     }
 

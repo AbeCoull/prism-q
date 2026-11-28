@@ -324,6 +324,7 @@ pub fn run_expectation_values(
     seed: u64,
 ) -> Result<Vec<f64>> {
     let limits = &ResolvedLimits::process_default();
+    limits.validate()?;
     run_expectation_values_with(BackendKind::Auto, circuit, observables, seed, limits)
 }
 
@@ -446,6 +447,7 @@ pub fn run_observable_expectation(
     seed: u64,
 ) -> Result<ObservableExpectation> {
     let limits = &ResolvedLimits::process_default();
+    limits.validate()?;
     run_observable_expectation_reported(BackendKind::Auto, circuit, observable, seed, limits)
 }
 

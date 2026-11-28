@@ -211,3 +211,80 @@ fn a_detected_error_names_the_setter_and_the_variable() {
     assert!(text.contains("Limits::max_statevector_qubits"), "{text}");
     assert!(text.contains("PRISM_MAX_SV_QUBITS"), "{text}");
 }
+
+#[test]
+fn min_fidelity_estimate_defaults_to_none() {
+    assert_eq!(Limits::default().min_fidelity_estimate, None);
+    assert_eq!(Limits::NONE.min_fidelity_estimate, None);
+    assert_eq!(Limits::new().min_fidelity_estimate, None);
+    let caps = resolve(Some(16 * GIB), Limits::new(), Limits::new(), None);
+    assert_eq!(caps.min_fidelity_estimate, None);
+}
+
+#[test]
+fn min_fidelity_estimate_layer_precedence_and_budget_survival() {
+    let default = Limits::new().min_fidelity_estimate(0.8);
+    let caps = resolve(Some(16 * GIB), Limits::new(), default, None);
+    assert_eq!(caps.min_fidelity_estimate, Some(0.8));
+
+    let request = Limits::new().min_fidelity_estimate(0.95);
+    let caps = resolve(Some(16 * GIB), Limits::new(), default, Some(request));
+    assert_eq!(caps.min_fidelity_estimate, Some(0.95));
+
+    let budget_only = Limits::new().memory_budget_bytes(4 * GIB);
+    let caps = resolve(Some(16 * GIB), Limits::new(), default, Some(budget_only));
+    assert_eq!(caps.min_fidelity_estimate, Some(0.8));
+
+    let both = budget_only.min_fidelity_estimate(0.75);
+    let caps = resolve(Some(16 * GIB), Limits::new(), default, Some(both));
+    assert_eq!(caps.min_fidelity_estimate, Some(0.75));
+
+    let zero = Limits::new().min_fidelity_estimate(0.0);
+    let one = Limits::new().min_fidelity_estimate(1.0);
+    assert_eq!(
+        resolve(Some(16 * GIB), Limits::new(), Limits::new(), Some(zero)).min_fidelity_estimate,
+        Some(0.0)
+    );
+    assert_eq!(
+        resolve(Some(16 * GIB), Limits::new(), Limits::new(), Some(one)).min_fidelity_estimate,
+        Some(1.0)
+    );
+}
+
+#[test]
+#[should_panic(expected = "min_fidelity_estimate")]
+fn min_fidelity_estimate_panics_on_nan() {
+    let _ = Limits::new().min_fidelity_estimate(f64::NAN);
+}
+
+#[test]
+#[should_panic(expected = "min_fidelity_estimate")]
+fn min_fidelity_estimate_panics_below_zero() {
+    let _ = Limits::new().min_fidelity_estimate(-0.1);
+}
+
+#[test]
+#[should_panic(expected = "min_fidelity_estimate")]
+fn min_fidelity_estimate_panics_above_one() {
+    let _ = Limits::new().min_fidelity_estimate(1.1);
+}
+
+#[test]
+#[should_panic(expected = "min_fidelity_estimate")]
+fn min_fidelity_estimate_panics_on_infinity() {
+    let _ = Limits::new().min_fidelity_estimate(f64::INFINITY);
+}
+
+#[test]
+fn resolved_limits_validate_rejects_direct_invalid_field() {
+    for bad in [-0.1, 1.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut limits = Limits::new();
+        limits.min_fidelity_estimate = Some(bad);
+        let resolved = ResolvedLimits::resolve(Some(&limits));
+        let err = resolved.validate().unwrap_err();
+        assert!(
+            matches!(err, PrismError::InvalidParameter { .. }),
+            "expected InvalidParameter for {bad}, got {err:?}"
+        );
+    }
+}

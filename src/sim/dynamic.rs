@@ -114,6 +114,7 @@ impl SimulateProgram<'_, Seeded> {
     pub fn shots(self, num_shots: usize) -> Result<ShotsResult> {
         let seed = self.seed.seed;
         let limits = &ResolvedLimits::process_default();
+        limits.validate()?;
         if let Some(circuit) = self.program.static_circuit() {
             return match self.noise {
                 Some(rules) => run_shots_with_noise(
@@ -148,13 +149,10 @@ impl SimulateProgram<'_, Seeded> {
         if self.noise.is_none()
             && let Some(circuit) = self.program.static_circuit()
         {
-            let (counts, metadata) = run_counts_with(
-                self.kind,
-                circuit,
-                num_shots,
-                self.seed.seed,
-                &ResolvedLimits::process_default(),
-            )?;
+            let limits = ResolvedLimits::process_default();
+            limits.validate()?;
+            let (counts, metadata) =
+                run_counts_with(self.kind, circuit, num_shots, self.seed.seed, &limits)?;
             return Ok(CountsResult {
                 counts,
                 num_classical_bits,

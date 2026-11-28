@@ -239,6 +239,9 @@ pub(crate) fn prepared_route(
     request: Option<&Limits>,
 ) -> Option<PreparedRoute> {
     let limits = &ResolvedLimits::resolve(request);
+    if limits.validate().is_err() {
+        return None;
+    }
     if validate_explicit_backend(kind, template, limits).is_err() {
         return None;
     }
@@ -351,6 +354,7 @@ pub(super) fn prepared_expectations(
 /// wants every circuit's result should call this per circuit.
 pub fn run_batch(circuits: &[Circuit], kind: BackendKind, seed: u64) -> Result<Vec<RunOutcome>> {
     let limits = &ResolvedLimits::process_default();
+    limits.validate()?;
     #[cfg(feature = "parallel")]
     if circuits.len() > 1
         && circuits

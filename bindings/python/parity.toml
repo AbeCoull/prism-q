@@ -146,6 +146,7 @@ exclude = [
 "Simulate::expectation_gradient_shift" = "Simulation.expectation_gradient_shift"
 "Simulate::expectation_values" = "Simulation.expectation"
 "Simulate::expectation_values_reported" = "Simulation.expectation"
+"Simulate::expectation_values_sampled" = "Simulation.expectation_sampled"
 "Simulate::gpu" = { rust_only = "Python selects BackendKind.statevector_gpu(context)" }
 "Simulate::gpu_auto" = { rust_only = "Python selects BackendKind.auto_gpu(context)" }
 "Simulate::initial_density_matrix" = "Simulation.initial_density_matrix"

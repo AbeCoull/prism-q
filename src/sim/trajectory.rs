@@ -1698,6 +1698,124 @@ pub(crate) fn run_trajectories(
     serial()
 }
 
+/// Estimate Pauli expectation values by averaging `backend.pauli_expectations` across
+/// `trajectories` pure-state noise trajectories, accumulating means and standard errors
+/// for each observable via Welford's update in trajectory order.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_trajectory_expectations(
+    backend_factory: impl Fn(u64) -> Box<dyn Backend> + Sync,
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    initial_state: Option<&[Complex64]>,
+    observables: &[Vec<crate::sim::unified_pauli::PauliTerm>],
+    trajectories: usize,
+    seed: u64,
+    force_serial: bool,
+    route: crate::sim::ResolvedBackend,
+) -> Result<crate::sim::ExpectationResult> {
+    let (prepared, memory) = PreparedNoise::with_memory(noise);
+    let eval_on =
+        |backend: &mut dyn Backend, i: usize| -> Result<(Vec<f64>, crate::sim::RunMetadata)> {
+            let shot_seed = crate::sim::mix_seed(seed, i);
+            let mut rng = noise_rng(shot_seed);
+            match initial_state {
+                Some(amps) => {
+                    backend.init_from_amplitudes(amps.to_vec(), circuit.num_classical_bits)?;
+                }
+                None => {
+                    backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
+                }
+            }
+            match memory {
+                None => evolve_noisy(backend, circuit, &prepared, 0, &[], &mut rng)?,
+                Some(spec) => {
+                    let mut shot_mem = ShotMemory::new(circuit.num_qubits, spec, &mut rng);
+                    evolve_with_memory(backend, circuit, &prepared, &mut shot_mem, &[], &mut rng)?;
+                }
+            }
+            let values = if observables.is_empty() {
+                Vec::new()
+            } else {
+                backend.pauli_expectations(observables)?
+            };
+            let meta = crate::sim::backend_metadata(backend);
+            Ok((values, meta))
+        };
+    let run_serial_trajectories = || -> Result<Vec<(Vec<f64>, crate::sim::RunMetadata)>> {
+        if !circuit.has_resets() {
+            let mut held = backend_factory(crate::sim::mix_seed(seed, 0));
+            return (0..trajectories)
+                .map(|i| eval_on(held.as_mut(), i))
+                .collect();
+        }
+        (0..trajectories)
+            .map(|i| {
+                let mut backend = backend_factory(crate::sim::mix_seed(seed, i));
+                eval_on(backend.as_mut(), i)
+            })
+            .collect()
+    };
+
+    #[cfg(not(feature = "parallel"))]
+    let _ = force_serial;
+
+    #[cfg(feature = "parallel")]
+    let runs: Vec<(Vec<f64>, crate::sim::RunMetadata)> =
+        if !force_serial && trajectories >= 4 && trajectories_split(route, circuit.num_qubits) {
+            (0..trajectories)
+                .into_par_iter()
+                .map(|i| {
+                    crate::backend::with_serial_kernels(|| {
+                        let mut backend = backend_factory(crate::sim::mix_seed(seed, i));
+                        eval_on(backend.as_mut(), i)
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            crate::backend::hybrid::on_narrow_pool(
+                !force_serial
+                    && crate::backend::hybrid::route_wants_narrow_pool(route, circuit.num_qubits),
+                run_serial_trajectories,
+            )?
+        };
+    #[cfg(not(feature = "parallel"))]
+    let runs: Vec<(Vec<f64>, crate::sim::RunMetadata)> = run_serial_trajectories()?;
+
+    let mut stats = vec![crate::sim::unified_pauli::Welford::default(); observables.len()];
+    let mut placement = crate::sim::Placement::Host;
+    let mut bond: Option<crate::sim::BondReport> = None;
+    for (vals, meta) in runs {
+        if meta.placement == crate::sim::Placement::Device {
+            placement = crate::sim::Placement::Device;
+        }
+        if let Some(b) = meta.bond {
+            bond = Some(match bond {
+                Some(prev) => crate::sim::BondReport {
+                    peak: prev.peak.max(b.peak),
+                    cap: prev.cap.min(b.cap),
+                },
+                None => b,
+            });
+        }
+        for (stat, val) in stats.iter_mut().zip(vals) {
+            stat.push(val);
+        }
+    }
+
+    let values: Vec<f64> = stats.iter().map(|s| s.mean()).collect();
+    let std_errors: Vec<f64> = stats.iter().map(|s| s.std_error()).collect();
+    let mut metadata = crate::sim::RunMetadata::approximate(route)
+        .with_shots(trajectories)
+        .with_reason(crate::sim::RouteRule::PerShot);
+    metadata.placement = placement;
+    metadata.bond = bond;
+    Ok(crate::sim::ExpectationResult {
+        values,
+        std_errors: Some(std_errors),
+        metadata,
+    })
+}
+
 /// Serial trajectories on one held `backend`, which `reseed` hands each shot's seed
 /// before the shot's `init` returns it to |0...0>. Records match
 /// [`run_trajectories`] with `force_serial` on a factory building the same backend

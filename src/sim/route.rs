@@ -974,6 +974,18 @@ pub(super) fn decide_noisy_program(
     trajectory_plan(kind, summary, channels, limits)
 }
 
+pub(super) fn decide_noisy_initial_state(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    noise_model: &NoiseModel,
+    start: StartState<'_>,
+    limits: &ResolvedLimits,
+) -> Result<BackendPlan> {
+    check_noisy_per_shot(kind, circuit, noise_model, limits)?;
+    let plan = initial_state_plan(kind, circuit.num_qubits, start, limits)?;
+    validate_trajectory_plan(plan, kind, circuit, noise_model, limits)
+}
+
 /// Reject a kind that cannot run `noise_model`'s channels on `circuit` one pure
 /// state per shot.
 fn check_noisy_per_shot(
@@ -1036,6 +1048,18 @@ fn trajectory_plan(
     } else {
         resolve_backend(kind, circuit, false, limits)
     };
+    validate_trajectory_plan(plan, kind, circuit, noise_model, limits)
+}
+
+fn validate_trajectory_plan(
+    plan: BackendPlan,
+    kind: &BackendKind,
+    circuit: &Circuit,
+    noise_model: &NoiseModel,
+    limits: &ResolvedLimits,
+) -> Result<BackendPlan> {
+    #[cfg(not(feature = "distributed"))]
+    let _ = kind;
     // Noise events are indexed per instruction, so trajectories apply the
     // stream raw and no lowering pass can run. The statevector applies a QFT
     // block and a Pauli rotation natively (its device path lowers the rotation

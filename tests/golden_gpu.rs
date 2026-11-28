@@ -5053,3 +5053,53 @@ fn deferred_trajectory_shots_match_immediate_readbacks_bit_for_bit() {
         }
     }
 }
+
+#[test]
+fn statevector_gpu_sampled_noisy_expectations_match_cpu_and_density_matrix() {
+    use prism_q::{
+        BackendKind, Circuit, GateFilter, NoiseBuilder, NoiseChannel, PauliTerm, Placement,
+        simulate,
+    };
+
+    let Some(f) = Fixture::try_new() else { return };
+    // Use n >= min_qubits so StatevectorGpu runs on the device.
+    let n = prism_q::gpu::min_qubits().max(6);
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.4), &[q]);
+    }
+    for q in (0..n - 1).step_by(2) {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    let noise = NoiseBuilder::new()
+        .after_gates(
+            GateFilter::all().arity(1),
+            NoiseChannel::AmplitudeDamping { gamma: 0.1 },
+        )
+        .build(&circuit)
+        .unwrap();
+    let obs = [
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::z(0), PauliTerm::z(1)],
+    ];
+
+    let cpu = simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .noise(&noise)
+        .seed(42)
+        .expectation_values_sampled(&obs, 32)
+        .unwrap();
+    let gpu = simulate(&circuit)
+        .backend(BackendKind::StatevectorGpu {
+            context: f.ctx.clone(),
+        })
+        .noise(&noise)
+        .seed(42)
+        .expectation_values_sampled(&obs, 32)
+        .unwrap();
+    assert_eq!(gpu.metadata.placement, Placement::Device);
+    assert_eq!(gpu.metadata.shots, Some(32));
+    for (i, (&c, &g)) in cpu.values.iter().zip(&gpu.values).enumerate() {
+        assert!((c - g).abs() < 1e-9, "obs {i}: cpu {c} vs gpu {g}");
+    }
+}

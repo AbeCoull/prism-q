@@ -1259,3 +1259,307 @@ fn reset_rejection_names_the_density_matrix() {
         other => panic!("expected IncompatibleBackend, got {other:?}"),
     }
 }
+
+#[test]
+fn sampled_noisy_expectations_match_density_matrix() {
+    use prism_q::{GateFilter, NoiseBuilder, NoiseChannel};
+
+    let n = 8;
+    let mut circuit = Circuit::new(n, 0);
+    for _layer in 0..2 {
+        for q in 0..n {
+            circuit.add_gate(Gate::Rx(0.45), &[q]);
+        }
+        for q in (0..n - 1).step_by(2) {
+            circuit.add_gate(Gate::Rzz(0.35), &[q, q + 1]);
+        }
+        for q in (1..n - 1).step_by(2) {
+            circuit.add_gate(Gate::Rzz(0.35), &[q, q + 1]);
+        }
+    }
+    let noise = NoiseBuilder::new()
+        .after_gates(
+            GateFilter::all().arity(1),
+            NoiseChannel::AmplitudeDamping { gamma: 0.08 },
+        )
+        .after_gates(
+            GateFilter::all().arity(2),
+            NoiseChannel::Depolarizing { p: 0.04 },
+        )
+        .build(&circuit)
+        .unwrap();
+
+    let observables = vec![
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::x(3)],
+        vec![PauliTerm::z(0), PauliTerm::z(1)],
+        vec![PauliTerm::y(2), PauliTerm::z(5)],
+    ];
+
+    let exact = simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(42)
+        .expectation_values(&observables)
+        .unwrap();
+
+    for kind in [
+        BackendKind::Statevector,
+        BackendKind::Mps { max_bond_dim: 64 },
+        BackendKind::Factored,
+        BackendKind::Sparse,
+        BackendKind::TensorNetwork,
+    ] {
+        let sampled = simulate(&circuit)
+            .backend(kind.clone())
+            .noise(&noise)
+            .seed(42)
+            .expectation_values_sampled(&observables, 400)
+            .unwrap();
+        assert_eq!(sampled.values.len(), observables.len());
+        let errors = sampled
+            .std_errors
+            .as_ref()
+            .expect("sampled expectations report standard errors");
+        assert_eq!(errors.len(), observables.len());
+        assert_eq!(sampled.metadata.shots, Some(400));
+        assert!(!sampled.metadata.is_exact());
+        for (i, ((&got, &err), &want)) in sampled.values.iter().zip(errors).zip(&exact).enumerate()
+        {
+            let bound = (4.5 * err).max(0.05);
+            assert!(
+                (got - want).abs() <= bound,
+                "{kind:?} obs {i}: got {got} +/- {err} vs exact {want} (bound {bound})"
+            );
+        }
+    }
+}
+
+#[test]
+fn sampled_noisy_expectations_validation_errors() {
+    use prism_q::{NoiseModel, PrismError};
+
+    let mut circuit = Circuit::new(2, 1);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    let obs = [vec![PauliTerm::z(0)]];
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.05);
+
+    assert!(matches!(
+        simulate(&circuit)
+            .noise(&noise)
+            .seed(42)
+            .expectation_values_sampled(&obs, 0),
+        Err(PrismError::InvalidParameter { .. })
+    ));
+    assert!(matches!(
+        simulate(&circuit)
+            .noise(&noise)
+            .require_exact()
+            .seed(42)
+            .expectation_values_sampled(&obs, 8),
+        Err(PrismError::IncompatibleBackend { .. })
+    ));
+    assert!(matches!(
+        simulate(&circuit)
+            .backend(BackendKind::DensityMatrix)
+            .noise(&noise)
+            .seed(42)
+            .expectation_values_sampled(&obs, 8),
+        Err(PrismError::IncompatibleBackend { .. })
+    ));
+
+    let mut measured = circuit.clone();
+    measured.add_measure(0, 0);
+    let mut readout_noise = NoiseModel::uniform_depolarizing(&measured, 0.05);
+    readout_noise.with_readout_error(0.05, 0.05);
+    assert!(matches!(
+        simulate(&measured)
+            .noise(&readout_noise)
+            .seed(42)
+            .expectation_values_sampled(&obs, 8),
+        Err(PrismError::IncompatibleBackend { .. })
+    ));
+
+    // Leakage channels are rejected on Pauli observables.
+    let leak_noise = prism_q::NoiseBuilder::new()
+        .after_gates(
+            prism_q::GateFilter::all(),
+            prism_q::NoiseChannel::Leakage { p: 0.05 },
+        )
+        .build(&circuit)
+        .unwrap();
+    assert!(matches!(
+        simulate(&circuit)
+            .noise(&leak_noise)
+            .seed(42)
+            .expectation_values_sampled(&obs, 8),
+        Err(PrismError::IncompatibleBackend { .. })
+    ));
+
+    // Invalid and duplicate qubits in observables.
+    assert!(matches!(
+        simulate(&circuit)
+            .noise(&noise)
+            .seed(42)
+            .expectation_values_sampled(&[vec![PauliTerm::z(9)]], 4),
+        Err(PrismError::InvalidQubit { .. })
+    ));
+    assert!(matches!(
+        simulate(&circuit)
+            .noise(&noise)
+            .seed(42)
+            .expectation_values_sampled(&[vec![PauliTerm::z(0), PauliTerm::x(0)]], 4),
+        Err(PrismError::InvalidParameter { .. })
+    ));
+
+    // Initial density matrix is rejected.
+    let mut dm = vec![num_complex::Complex64::new(0.0, 0.0); 16];
+    dm[0] = num_complex::Complex64::new(1.0, 0.0);
+    assert!(matches!(
+        simulate(&circuit)
+            .initial_density_matrix(&dm)
+            .noise(&noise)
+            .seed(42)
+            .expectation_values_sampled(&obs, 4),
+        Err(PrismError::IncompatibleBackend { .. })
+    ));
+}
+
+#[test]
+fn sampled_expectations_edge_cases_and_routes() {
+    use num_complex::Complex64;
+    use prism_q::NoiseModel;
+
+    // Single trajectory, empty observables, identity observable, noiseless run.
+    let mut bell = Circuit::new(2, 0);
+    bell.add_gate(Gate::H, &[0]);
+    bell.add_gate(Gate::Cx, &[0, 1]);
+
+    let empty = simulate(&bell)
+        .seed(42)
+        .expectation_values_sampled(&[], 1)
+        .unwrap();
+    assert!(empty.values.is_empty());
+    assert_eq!(empty.std_errors.as_deref(), Some(&[][..]));
+
+    let single = simulate(&bell)
+        .seed(42)
+        .expectation_values_sampled(&[vec![], vec![PauliTerm::z(0), PauliTerm::z(1)]], 1)
+        .unwrap();
+    assert!((single.values[0] - 1.0).abs() < 1e-12);
+    assert!((single.values[1] - 1.0).abs() < 1e-12);
+    assert_eq!(single.std_errors.as_deref(), Some(&[0.0, 0.0][..]));
+
+    // Clifford + Pauli noise on Stabilizer and FactoredStabilizer, plus ProductState.
+    let noise = NoiseModel::uniform_depolarizing(&bell, 0.05);
+    let obs = vec![vec![PauliTerm::z(0), PauliTerm::z(1)]];
+    let exact = simulate(&bell)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(42)
+        .expectation_values(&obs)
+        .unwrap();
+    for kind in [BackendKind::Stabilizer, BackendKind::FactoredStabilizer] {
+        let got = simulate(&bell)
+            .backend(kind)
+            .noise(&noise)
+            .seed(42)
+            .expectation_values_sampled(&obs, 400)
+            .unwrap();
+        let err = got.std_errors.as_ref().unwrap()[0];
+        assert!((got.values[0] - exact[0]).abs() <= (4.5 * err).max(0.05));
+    }
+
+    let mut prod = Circuit::new(2, 0);
+    prod.add_gate(Gate::Ry(0.7), &[0]);
+    prod.add_gate(Gate::Rx(0.4), &[1]);
+    let prod_noise = NoiseModel::uniform_depolarizing(&prod, 0.05);
+    let prod_got = simulate(&prod)
+        .backend(BackendKind::ProductState)
+        .noise(&prod_noise)
+        .seed(42)
+        .expectation_values_sampled(&obs, 200)
+        .unwrap();
+    let prod_exact = simulate(&prod)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&prod_noise)
+        .seed(42)
+        .expectation_values(&obs)
+        .unwrap();
+    let prod_err = prod_got.std_errors.as_ref().unwrap()[0];
+    assert!((prod_got.values[0] - prod_exact[0]).abs() <= (4.5 * prod_err).max(0.05));
+
+    // Reset circuit compared against exact DensityMatrix.
+    let mut reset_c = Circuit::new(2, 0);
+    reset_c.add_gate(Gate::H, &[0]);
+    reset_c.add_gate(Gate::Cx, &[0, 1]);
+    reset_c.add_reset(0);
+    reset_c.add_gate(Gate::Ry(0.6), &[0]);
+    let reset_noise = NoiseModel::uniform_depolarizing(&reset_c, 0.04);
+    let reset_obs = vec![vec![PauliTerm::z(0)], vec![PauliTerm::z(1)]];
+    let reset_exact = simulate(&reset_c)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&reset_noise)
+        .seed(42)
+        .expectation_values(&reset_obs)
+        .unwrap();
+    let reset_got = simulate(&reset_c)
+        .backend(BackendKind::Statevector)
+        .noise(&reset_noise)
+        .seed(42)
+        .expectation_values_sampled(&reset_obs, 400)
+        .unwrap();
+    for (i, ((&g, &e), &w)) in reset_got
+        .values
+        .iter()
+        .zip(reset_got.std_errors.as_ref().unwrap())
+        .zip(&reset_exact)
+        .enumerate()
+    {
+        assert!(
+            (g - w).abs() <= (4.5 * e).max(0.06),
+            "reset obs {i}: got {g} +/- {e} vs {w}"
+        );
+    }
+
+    // Initial state on Auto (Clifford circuit) routes to Statevector instead of Stabilizer.
+    let s = std::f64::consts::FRAC_1_SQRT_2;
+    let amps = vec![
+        Complex64::new(s, 0.0),
+        Complex64::new(0.0, 0.0),
+        Complex64::new(0.0, 0.0),
+        Complex64::new(s, 0.0),
+    ];
+    let init_auto = simulate(&bell)
+        .initial_state(&amps)
+        .noise(&noise)
+        .seed(42)
+        .expectation_values_sampled(&obs, 32)
+        .unwrap();
+    let init_sv = simulate(&bell)
+        .backend(BackendKind::Statevector)
+        .initial_state(&amps)
+        .noise(&noise)
+        .seed(42)
+        .expectation_values_sampled(&obs, 32)
+        .unwrap();
+    assert_eq!(init_auto.values, init_sv.values);
+    assert_eq!(init_auto.std_errors, init_sv.std_errors);
+
+    // Determinism across repeated calls with the same seed.
+    let run_a = simulate(&bell)
+        .backend(BackendKind::Statevector)
+        .noise(&noise)
+        .seed(99)
+        .expectation_values_sampled(&obs, 64)
+        .unwrap();
+    let run_b = simulate(&bell)
+        .backend(BackendKind::Statevector)
+        .noise(&noise)
+        .seed(99)
+        .expectation_values_sampled(&obs, 64)
+        .unwrap();
+    assert_eq!(run_a.values, run_b.values);
+    assert_eq!(run_a.std_errors, run_b.std_errors);
+}

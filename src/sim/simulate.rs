@@ -486,6 +486,137 @@ impl<'c> Simulate<'c, Seeded> {
         Ok(result)
     }
 
+    /// Estimate `Tr(rho P)` for each joint Pauli observable by averaging
+    /// `Backend::pauli_expectations` across `trajectories` pure-state noise
+    /// trajectories.
+    ///
+    /// Serves noisy expectation values on pure-state backends (`Statevector`,
+    /// `StatevectorGpu`, `StatevectorDistributed`, `Mps`, `Factored`, `Sparse`,
+    /// `TensorNetwork`, `ProductState`, and Clifford tableaux under Pauli noise)
+    /// past the `DensityMatrix` qubit ceiling, including circuits with resets.
+    /// Returns sample means and standard errors for each observable. Rejects
+    /// `require_exact()`, readout error, leakage channels, measurements,
+    /// conditionals, saves, `initial_density_matrix`, and density-matrix
+    /// backends (which evaluate the exact mixture via
+    /// [`Simulate::expectation_values_reported`]). Pre-execution [`Simulate::plan`]
+    /// inspection does not yet model this terminal.
+    pub fn expectation_values_sampled(
+        self,
+        observables: &[Vec<PauliTerm>],
+        trajectories: usize,
+    ) -> Result<ExpectationResult> {
+        self.reject_saves("expectation_values_sampled")?;
+        if trajectories == 0 {
+            return Err(PrismError::InvalidParameter {
+                message: "trajectories must be at least 1".into(),
+            });
+        }
+        if self.require_exact {
+            return Err(PrismError::IncompatibleBackend {
+                backend: format!("{:?}", self.kind),
+                reason: "sampled trajectory expectation values are approximate; drop \
+                         require_exact() or evaluate the exact mixture on DensityMatrix"
+                    .into(),
+            });
+        }
+        for obs in observables {
+            validate_observable(obs, self.circuit.num_qubits)?;
+        }
+        if self.kind.is_density_matrix() {
+            return Err(PrismError::IncompatibleBackend {
+                backend: format!("{:?}", self.kind),
+                reason: "density matrix evaluates the exact mixture directly; use \
+                         expectation_values_reported() instead of expectation_values_sampled()"
+                    .into(),
+            });
+        }
+        if self.circuit.instructions.iter().any(|inst| {
+            matches!(
+                inst,
+                Instruction::Measure { .. }
+                    | Instruction::Conditional { .. }
+                    | Instruction::Region(_)
+            )
+        }) {
+            return Err(PrismError::IncompatibleBackend {
+                backend: format!("{:?}", self.kind),
+                reason: "sampled expectation values require a circuit without measurements or \
+                         conditionals"
+                    .into(),
+            });
+        }
+        let initial_amps = match self.initial_state {
+            None => None,
+            Some(start @ StartState::Amplitudes(amps)) => {
+                check_initial_state_len(start, self.circuit.num_qubits)?;
+                crate::backend::validate_initial_amplitudes(amps)?;
+                Some(amps)
+            }
+            Some(StartState::DensityMatrix(_)) => {
+                return Err(PrismError::IncompatibleBackend {
+                    backend: format!("{:?}", self.kind),
+                    reason: "sampled expectation values evolve pure-state trajectories and \
+                             cannot start from a density matrix"
+                        .into(),
+                });
+            }
+        };
+        let seed = self.seed_value();
+        let limits = &self.resolved_limits()?;
+        let empty_noise;
+        let noise_model = match self.noise_model {
+            Some(model) => {
+                model.validate_for(self.circuit)?;
+                reject_readout_at(self.circuit, model, "sampled expectation values")?;
+                if model.has_leakage() {
+                    return Err(PrismError::IncompatibleBackend {
+                        backend: format!("{:?}", self.kind),
+                        reason: "sampled expectation values do not support leakage channels; \
+                                 a Pauli observable is only defined on the computational subspace"
+                            .into(),
+                    });
+                }
+                model
+            }
+            None => {
+                empty_noise = NoiseModel::noiseless_for(self.circuit);
+                &empty_noise
+            }
+        };
+        let plan = match initial_amps {
+            Some(amps) => decide_noisy_initial_state(
+                &self.kind,
+                self.circuit,
+                noise_model,
+                StartState::Amplitudes(amps),
+                limits,
+            )?,
+            None => decide_noisy_program(&self.kind, self.circuit, noise_model, limits)?,
+        };
+        #[cfg(feature = "distributed")]
+        let is_distributed = matches!(plan, BackendPlan::Distributed(_));
+        #[cfg(not(feature = "distributed"))]
+        let is_distributed = false;
+        let force_serial = plan.is_gpu() || is_distributed;
+        trajectory::run_trajectory_expectations(
+            |s| plan.build(s, limits),
+            self.circuit,
+            noise_model,
+            initial_amps,
+            observables,
+            trajectories,
+            seed,
+            force_serial,
+            plan.resolved(),
+        )
+        .map(|mut result| {
+            if plan.is_gpu() && result.metadata.placement == Placement::Host {
+                result.metadata.reason = RouteRule::DeviceInitializationFallback;
+            }
+            result
+        })
+    }
+
     /// Compute `⟨H⟩` and its grouped-measurement variance for a weighted
     /// Pauli observable on the circuit's output state.
     ///

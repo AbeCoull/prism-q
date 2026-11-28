@@ -759,6 +759,54 @@ pub(super) fn inspect<S>(
                         p.would_fail = Some(error);
                     }
                 }
+                Query::Entropy(q) if p.would_fail.is_none() => {
+                    #[cfg(feature = "distributed")]
+                    let handled_distributed = if let BackendPlan::Distributed(ctx) = &backend {
+                        let side = q.len().min(n.saturating_sub(q.len()));
+                        if let Err(error) = crate::backend::schmidt::check_schmidt_side(
+                            "distributed_statevector",
+                            "Schmidt values",
+                            side,
+                            limits,
+                        ) {
+                            p.would_fail = Some(error);
+                        } else {
+                            let rank_bits = ctx.size().trailing_zeros() as usize;
+                            let local_qubits = n.saturating_sub(rank_bits);
+                            if side > local_qubits
+                                && let Err(error) = crate::backend::dense_statevector_len(
+                                    "distributed_statevector",
+                                    "statevector export",
+                                    n,
+                                    limits,
+                                )
+                            {
+                                p.would_fail = Some(error);
+                            }
+                        }
+                        true
+                    } else {
+                        false
+                    };
+                    #[cfg(not(feature = "distributed"))]
+                    let handled_distributed = false;
+                    if !handled_distributed
+                        && matches!(
+                            p.backend,
+                            ResolvedBackend::Sparse | ResolvedBackend::TensorNetwork
+                        )
+                    {
+                        let side = q.len().min(n.saturating_sub(q.len()));
+                        if let Err(error) = crate::backend::schmidt::check_schmidt_side(
+                            "plan",
+                            "Schmidt values",
+                            side,
+                            limits,
+                        ) {
+                            p.would_fail = Some(error);
+                        }
+                    }
+                }
                 _ => {}
             }
             Ok(p)

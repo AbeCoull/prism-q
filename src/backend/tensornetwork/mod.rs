@@ -1025,6 +1025,22 @@ impl Backend for TensorNetworkBackend {
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
         self.contract_to_statevector()
     }
+
+    fn schmidt_values(&mut self, subsystem: &[usize]) -> Result<Vec<f64>> {
+        crate::backend::schmidt::validate_subsystem(subsystem, self.num_qubits)?;
+        let side = crate::backend::schmidt::smaller_side(subsystem, self.num_qubits);
+        crate::backend::schmidt::check_schmidt_side(
+            self.name(),
+            "Schmidt values",
+            side.len(),
+            &self.limits,
+        )?;
+        let rho = self.reduced_density_matrix(&side)?;
+        Ok(crate::backend::schmidt::schmidt_values_from_density(
+            &rho,
+            1usize << side.len(),
+        ))
+    }
 }
 
 #[cfg(test)]

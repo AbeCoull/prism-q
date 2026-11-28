@@ -54,6 +54,19 @@ pub(crate) fn validate_subsystem(subsystem: &[usize], num_qubits: usize) -> Resu
     Ok(())
 }
 
+/// Smaller side of the bipartition `subsystem` defines: `subsystem` itself when
+/// `2 * subsystem.len() <= num_qubits`, otherwise its sorted complement.
+pub(crate) fn smaller_side(subsystem: &[usize], num_qubits: usize) -> Vec<usize> {
+    if 2 * subsystem.len() <= num_qubits {
+        return subsystem.to_vec();
+    }
+    let mut inside = vec![false; num_qubits];
+    for &q in subsystem {
+        inside[q] = true;
+    }
+    (0..num_qubits).filter(|&q| !inside[q]).collect()
+}
+
 /// Sort descending, drop values under [`SCHMIDT_VALUE_FLOOR`] of the largest,
 /// and scale so the squares sum to 1.
 pub(crate) fn finish_schmidt_values(mut values: Vec<f64>) -> Vec<f64> {

@@ -221,3 +221,28 @@ fn factored_import_rejects_wrong_lengths() {
     let err = factored.init_from_tableau(4, words, phases, 0).unwrap_err();
     assert!(invalid_message(err).contains("words"));
 }
+
+#[test]
+fn factored_import_splits_disconnected_clusters() {
+    use prism_q::gates::Gate;
+    let n = 8;
+    let mut circuit = Circuit::new(n, 0);
+    for q in (0..n).step_by(2) {
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    let mut mono = StabilizerBackend::new(SEED);
+    mono.init(n, 0).unwrap();
+    for inst in &circuit.instructions {
+        mono.apply(inst).unwrap();
+    }
+    let (words, phases) = mono.export_tableau().unwrap();
+
+    let mut factored = FactoredStabilizerBackend::new(SEED);
+    factored.init_from_tableau(n, words, phases, 0).unwrap();
+    // Four independent Bell pairs produce a lazy factored probability view.
+    let probs = factored
+        .block_probabilities()
+        .expect("disconnected Bell pairs split into independent clusters on import");
+    assert_eq!(probs.to_vec(), mono.probabilities().unwrap());
+}

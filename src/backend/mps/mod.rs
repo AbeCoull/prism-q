@@ -414,10 +414,16 @@ impl MpsBackend {
     /// changing the represented logical state.
     #[cfg(test)]
     pub(crate) fn canonicalize_logical_order(&mut self) -> Result<()> {
+        let target: Vec<usize> = (0..self.num_qubits).collect();
+        self.align_to_layout(&target)
+    }
+
+    /// Reorder sites by virtual SWAPs until `self.site_to_logical` matches
+    /// `target_site_to_logical`.
+    fn align_to_layout(&mut self, target_site_to_logical: &[usize]) -> Result<()> {
         let swap_mat = Gate::Swap.matrix_4x4();
-        for target_site in 0..self.num_qubits {
-            while self.site_to_logical[target_site] != target_site {
-                let logical = target_site;
+        for (target_site, &logical) in target_site_to_logical.iter().enumerate() {
+            while self.site_to_logical[target_site] != logical {
                 let site = self.logical_to_site[logical];
                 debug_assert!(site > target_site);
                 self.apply_virtual_swap(site - 1, &swap_mat)?;
@@ -1814,20 +1820,44 @@ impl Backend for MpsBackend {
         self.schmidt_values_by_reduced_density(&sites)
     }
 
-    /// [`MpsBackend::inner_product`] when both chains carry the same site
-    /// layout, `O(n chi^3)` and no width cap. The contraction pairs sites by
-    /// chain position, so a chain whose virtual swaps left a different order
-    /// takes the dense route instead.
+    /// [`MpsBackend::inner_product`] in `O(n chi^3)` with no width cap. When
+    /// virtual SWAPs left the two chains in different site orders, a clone of
+    /// the narrower chain is aligned to the other's layout first.
     fn overlap_sq(&self, other: &dyn Backend) -> Result<f64> {
         if let Some(chain) = other
             .as_any()
             .and_then(|any| any.downcast_ref::<MpsBackend>())
             && chain.num_qubits == self.num_qubits
-            && chain.logical_to_site == self.logical_to_site
         {
-            let inner = self.inner_product(chain)?;
+            if chain.logical_to_site == self.logical_to_site {
+                let inner = self.inner_product(chain)?;
+                let left = self.inner_product(self)?.re;
+                let right = chain.inner_product(chain)?.re;
+                return Ok(overlap::normalized(inner.norm_sqr(), left, right));
+            }
+            if self.current_max_bond_dim() <= chain.current_max_bond_dim() {
+                let mut aligned = self.clone();
+                aligned.max_bond_dim = usize::MAX;
+                aligned.svd_epsilon = aligned
+                    .svd_epsilon
+                    .clamp(SVD_RESOLUTION, DEFAULT_SVD_EPSILON);
+                aligned.min_fidelity_estimate = None;
+                aligned.align_to_layout(&chain.site_to_logical)?;
+                let inner = aligned.inner_product(chain)?;
+                let left = aligned.inner_product(&aligned)?.re;
+                let right = chain.inner_product(chain)?.re;
+                return Ok(overlap::normalized(inner.norm_sqr(), left, right));
+            }
+            let mut aligned = chain.clone();
+            aligned.max_bond_dim = usize::MAX;
+            aligned.svd_epsilon = aligned
+                .svd_epsilon
+                .clamp(SVD_RESOLUTION, DEFAULT_SVD_EPSILON);
+            aligned.min_fidelity_estimate = None;
+            aligned.align_to_layout(&self.site_to_logical)?;
+            let inner = self.inner_product(&aligned)?;
             let left = self.inner_product(self)?.re;
-            let right = chain.inner_product(chain)?.re;
+            let right = aligned.inner_product(&aligned)?.re;
             return Ok(overlap::normalized(inner.norm_sqr(), left, right));
         }
         overlap::export_overlap_sq(

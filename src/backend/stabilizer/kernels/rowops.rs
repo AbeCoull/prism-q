@@ -547,6 +547,19 @@ pub(crate) fn check_imported_rows(n: usize, xz: &[u64], phase: &[bool]) -> Resul
             ),
         });
     }
+    if nw > 0 && !n.is_multiple_of(64) {
+        let unused_mask = !((1u64 << (n % 64)) - 1);
+        for row in 0..rows {
+            let base = row * stride;
+            if (xz[base + nw - 1] | xz[base + stride - 1]) & unused_mask != 0 {
+                return Err(PrismError::InvalidParameter {
+                    message: format!(
+                        "tableau import: row {row} sets bits beyond the {n}-qubit width"
+                    ),
+                });
+            }
+        }
+    }
     for i in 0..n {
         let destab = &xz[i * stride..(i + 1) * stride];
         let stab = &xz[(n + i) * stride..(n + i + 1) * stride];

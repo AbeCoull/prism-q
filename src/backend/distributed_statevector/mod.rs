@@ -1747,6 +1747,22 @@ impl Backend for DistributedStatevectorBackend {
         Ok(rho)
     }
 
+    fn schmidt_values(&mut self, subsystem: &[usize]) -> Result<Vec<f64>> {
+        crate::backend::schmidt::validate_subsystem(subsystem, self.num_qubits)?;
+        let side = crate::backend::schmidt::smaller_side(subsystem, self.num_qubits);
+        crate::backend::schmidt::check_schmidt_side(
+            BACKEND_NAME,
+            "Schmidt values",
+            side.len(),
+            &self.inner.limits,
+        )?;
+        let rho = self.reduced_density_matrix(&side)?;
+        Ok(crate::backend::schmidt::schmidt_values_from_density(
+            &rho,
+            1usize << side.len(),
+        ))
+    }
+
     /// The pair's block reads through [`Backend::reduced_density_matrix`], and
     /// `Gate::Fused2q` runs at any rank split.
     fn supports_two_qubit_kraus(&self) -> bool {

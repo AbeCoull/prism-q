@@ -986,6 +986,17 @@ impl Backend for SparseBackend {
         }
         Ok(sv)
     }
+
+    fn schmidt_values(&mut self, subsystem: &[usize]) -> Result<Vec<f64>> {
+        schmidt::validate_subsystem(subsystem, self.num_qubits)?;
+        let side = schmidt::smaller_side(subsystem, self.num_qubits);
+        schmidt::check_schmidt_side(self.name(), "Schmidt values", side.len(), &self.limits)?;
+        let rho = self.reduced_density_matrix(&side)?;
+        Ok(schmidt::schmidt_values_from_density(
+            &rho,
+            1usize << side.len(),
+        ))
+    }
 }
 
 #[cfg(test)]

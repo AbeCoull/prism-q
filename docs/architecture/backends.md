@@ -361,14 +361,14 @@ circuit keeps the factored backend and a Clifford circuit its tableau.
 | Backend | Reduced density matrix | Entanglement entropy | State overlap |
 | --- | --- | --- | --- |
 | Statevector (host or device) | Partial trace over the complement | One thin SVD of the reshaped amplitudes, with the Schmidt spectrum | Dense dot product |
-| Sparse | Grouped over the traced index | Declines | Lookup join over the nonzeros against another sparse map, at any width |
-| Factored | Kronecker of the per-block traces | One thin SVD per block the cut splits, summed; the Schmidt spectrum is their sorted Kronecker product | Dense export |
+| Sparse | Grouped over the traced index | Eigenvalues of the smaller side's reduced density matrix | Lookup join over the nonzeros against another sparse map, at any width |
+| Factored | Kronecker of the per-block traces | One thin SVD per block the cut splits, summed; the Schmidt spectrum is their sorted Kronecker product | Union connected components across the two block partitions |
 | Product state | Kronecker of the per-qubit factors | `0`, with the single Schmidt value `1` | Product of the per-qubit inner products against another product state, at any width |
 | Density matrix | Partial trace of the mixture | Declines: a mixture has no Schmidt decomposition | Declines: the fidelity of two mixtures is not an inner product |
-| MPS | One environment sweep over the span of the named sites, tracing the rest | One SVD at the cut, or the eigenvalues of the reduced density matrix when the subsystem is not contiguous in chain order | Chain contraction against another chain in the same site order, at any width |
-| Tensor network | One doubled contraction with the named qubits' ket and bra legs open | Declines | Dense export |
-| Stabilizer, factored-stabilizer | Projector onto the generators supported inside the subsystem | Rank of the generators restricted to the cut, less the subsystem size, in units of `ln 2`, with a flat spectrum | Rank of the two tableaux merged, at any width, on the host stabilizer; a device tableau and the factored form take the dense export |
-| Distributed statevector | Rank-local partial trace after relabeling the kept qubits local, summed across ranks; a subsystem wider than the slice reads the gathered state | Declines | Dense export |
+| MPS | One environment sweep over the span of the named sites, tracing the rest | One SVD at the cut, or the eigenvalues of the reduced density matrix when the subsystem is not contiguous in chain order | Chain contraction at any width, aligning differing site orders with virtual SWAPs on a clone of the narrower chain |
+| Tensor network | One doubled contraction with the named qubits' ket and bra legs open | Eigenvalues of the smaller side's reduced density matrix | Dense export |
+| Stabilizer, factored-stabilizer | Projector onto the generators supported inside the subsystem | Rank of the generators restricted to the cut, less the subsystem size, in units of `ln 2`, with a flat spectrum | Rank of the two tableaux merged, at any width, across host, device, and factored tableaux |
+| Distributed statevector | Rank-local partial trace after relabeling the kept qubits local, summed across ranks; a subsystem wider than the slice reads the gathered state | Eigenvalues of the smaller side's reduced density matrix | Dense export |
 
 Entropy is von Neumann in nats (a Bell pair reads `ln 2`). Schmidt values come back
 descending, squares summing to one. A stabilizer cut of rank `r` has `2^r` equal weights.

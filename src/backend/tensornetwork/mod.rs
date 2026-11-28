@@ -129,7 +129,10 @@ use expectation::{
     GateTensorOp, append_gate_tensor, for_each_gate_tensor, observable_axes, pauli_tensor,
 };
 use plan::{TensorMeta, greedy_contract, plan_pairs};
-use slice::{CachedPlan, ContractionLimits, contract_cached, last_discarded};
+use slice::{
+    CachedPlan, ContractionLimits, contract_cached, contract_cached_with_frontier,
+    doubled_metadata_fingerprint, last_discarded, try_contract_frontier,
+};
 use tensor::{Tensor, contract, transpose};
 
 pub(crate) use expectation::{
@@ -286,7 +289,7 @@ impl TensorNetworkBackend {
         use rand::RngExt;
 
         let uniform = self.rng.random::<f64>();
-        let outcome = self.collapse_qubit_with(qubit, reset, uniform, None);
+        let outcome = self.collapse_qubit_with(qubit, reset, uniform, None, None);
         self.run_discarded += self.query_discarded.replace(0.0);
         outcome
     }
@@ -301,13 +304,17 @@ impl TensorNetworkBackend {
         reset: bool,
         uniform: f64,
         plan: Option<&mut Option<CachedPlan>>,
+        dirty: Option<&mut [bool]>,
     ) -> Result<bool> {
-        let rho = self.marginal_1q(qubit, plan)?;
+        let rho = self.marginal_1q_with_dirty(qubit, plan, dirty.as_deref())?;
         let trace = (rho[0][0].re + rho[1][1].re).max(NORM_CLAMP_MIN);
         let prob_one = (rho[1][1].re / trace).clamp(0.0, 1.0);
         let outcome = uniform < prob_one;
         let inv_norm = crate::backend::measurement_inv_norm(outcome, prob_one);
-        self.append_collapse(qubit, outcome, reset, inv_norm);
+        let owner = self.append_collapse(qubit, outcome, reset, inv_norm);
+        if let Some(dirty) = dirty {
+            dirty[owner] = true;
+        }
         Ok(outcome)
     }
 
@@ -322,10 +329,11 @@ impl TensorNetworkBackend {
     ) -> Result<()> {
         use rand::RngExt;
 
+        let mut dirty = plans.as_ref().map(|_| vec![false; self.tensors.len()]);
         for qubit in 0..self.num_qubits {
             let uniform = rng.random::<f64>();
             let plan = plans.as_deref_mut().map(|plans| &mut plans[qubit]);
-            if self.collapse_qubit_with(qubit, false, uniform, plan)? {
+            if self.collapse_qubit_with(qubit, false, uniform, plan, dirty.as_deref_mut())? {
                 samples.set(shot, qubit);
             }
         }
@@ -397,7 +405,13 @@ impl TensorNetworkBackend {
     /// constant across measurements, so a measure or reset loop costs one
     /// doubled contraction per event rather than growing the network it
     /// contracts.
-    fn append_collapse(&mut self, qubit: usize, outcome: bool, reset: bool, inv_norm: f64) {
+    fn append_collapse(
+        &mut self,
+        qubit: usize,
+        outcome: bool,
+        reset: bool,
+        inv_norm: f64,
+    ) -> usize {
         let in_leg = self.output_legs[qubit];
         let out_leg = self.fresh_leg();
         let zero = Complex64::new(0.0, 0.0);
@@ -421,6 +435,7 @@ impl TensorNetworkBackend {
         self.tensors[owner] = contract(&self.tensors[owner], &projector);
         self.output_legs[qubit] = out_leg;
         self.is_unitary[qubit] = false;
+        owner
     }
 
     fn append_matrix(&mut self, qubits: &[usize], data: Vec<Complex64>) {
@@ -449,14 +464,10 @@ impl TensorNetworkBackend {
         (0..self.next_leg).map(|leg| leg + self.next_leg).collect()
     }
 
-    /// Double the backward light cone of open and non-unitary qubits against
-    /// its conjugate.
-    ///
-    /// Unitary components with closed output legs cancel to identity and are
-    /// skipped before doubling. Any closed leg held by a single kept tensor
-    /// (either a non-unitary output leg or an internal leg whose downstream
-    /// unitary gate was pruned) is closed directly against its bra twin.
-    fn double_cone(&self, is_open: impl Fn(usize) -> bool) -> Vec<Tensor> {
+    fn double_cone_topology(
+        &self,
+        is_open: impl Fn(usize) -> bool,
+    ) -> (Vec<bool>, usize, Vec<LegId>) {
         let mut needed = vec![false; self.next_leg];
         let mut open_legs = vec![false; self.next_leg];
         for (q, &leg) in self.output_legs.iter().enumerate() {
@@ -480,7 +491,7 @@ impl TensorNetworkBackend {
             }
         }
         if kept_count == 0 {
-            return Vec::new();
+            return (keep, 0, Vec::new());
         }
 
         let mut holders = vec![0u8; self.next_leg];
@@ -498,7 +509,21 @@ impl TensorNetworkBackend {
                 bra_legs[leg] = leg;
             }
         }
+        (keep, kept_count, bra_legs)
+    }
 
+    /// Double the backward light cone of open and non-unitary qubits against
+    /// its conjugate.
+    ///
+    /// Unitary components with closed output legs cancel to identity and are
+    /// skipped before doubling. Any closed leg held by a single kept tensor
+    /// (either a non-unitary output leg or an internal leg whose downstream
+    /// unitary gate was pruned) is closed directly against its bra twin.
+    fn double_cone(&self, is_open: impl Fn(usize) -> bool) -> Vec<Tensor> {
+        let (keep, kept_count, bra_legs) = self.double_cone_topology(is_open);
+        if kept_count == 0 {
+            return Vec::new();
+        }
         let mut network = Vec::with_capacity(kept_count * 2);
         for (tensor, &kept) in self.tensors.iter().zip(&keep) {
             if kept {
@@ -533,24 +558,82 @@ impl TensorNetworkBackend {
         qubit: usize,
         plan: Option<&mut Option<CachedPlan>>,
     ) -> Result<[[Complex64; 2]; 2]> {
-        let mut network = self.double_for_partial_trace(&[qubit]);
+        self.marginal_1q_with_dirty(qubit, plan, None)
+    }
+
+    fn marginal_1q_with_dirty(
+        &self,
+        qubit: usize,
+        plan: Option<&mut Option<CachedPlan>>,
+        dirty_mask: Option<&[bool]>,
+    ) -> Result<[[Complex64; 2]; 2]> {
         let ket_leg = self.output_legs[qubit];
         let bra_leg = ket_leg + self.next_leg;
         let operation = "reduced density matrix";
-        let rho = match plan {
-            Some(slot) => contract_cached(
-                &mut network,
-                slot,
-                self.contraction_limits(),
-                self.name(),
-                operation,
-            )?,
-            None => greedy_contract(
-                &mut network,
-                self.contraction_limits(),
-                self.name(),
-                operation,
-            )?,
+        let rho = match (plan, dirty_mask) {
+            (Some(slot), Some(dirty_mask)) => {
+                let (keep, kept_count, bra_legs) = self.double_cone_topology(|q| q == qubit);
+                let fingerprint =
+                    doubled_metadata_fingerprint(&self.tensors, &keep, kept_count, &bra_legs);
+                if let Some(hit) =
+                    try_contract_frontier(&self.tensors, fingerprint, dirty_mask, slot)
+                {
+                    hit
+                } else {
+                    let mut network = Vec::with_capacity(kept_count * 2);
+                    let mut leaf_dirty = Vec::with_capacity(kept_count * 2);
+                    let mut dirty_leaves = Vec::new();
+                    for (src_idx, (tensor, &kept)) in self.tensors.iter().zip(&keep).enumerate() {
+                        if !kept {
+                            continue;
+                        }
+                        let is_dirty = dirty_mask[src_idx];
+                        let ket_slot = network.len();
+                        let b_legs: SmallVec<[LegId; 6]> =
+                            tensor.legs.iter().map(|&leg| bra_legs[leg]).collect();
+                        if is_dirty {
+                            dirty_leaves.push((src_idx, ket_slot, b_legs.clone()));
+                        }
+                        network.push(tensor.clone());
+                        network.push(Tensor {
+                            data: tensor.data.iter().map(Complex64::conj).collect(),
+                            shape: tensor.shape.clone(),
+                            legs: b_legs,
+                        });
+                        leaf_dirty.push(is_dirty);
+                        leaf_dirty.push(is_dirty);
+                    }
+                    contract_cached_with_frontier(
+                        &mut network,
+                        &leaf_dirty,
+                        dirty_leaves,
+                        dirty_mask,
+                        slot,
+                        self.contraction_limits(),
+                        self.name(),
+                        operation,
+                    )?
+                }
+            }
+            (Some(slot), None) => {
+                let mut network = self.double_for_partial_trace(&[qubit]);
+                contract_cached(
+                    &mut network,
+                    slot,
+                    self.contraction_limits(),
+                    self.name(),
+                    operation,
+                )?
+            }
+            (None, _) => {
+                let mut network = self.double_for_partial_trace(&[qubit]);
+                greedy_contract(
+                    &mut network,
+                    self.contraction_limits(),
+                    self.name(),
+                    operation,
+                )?
+            }
         };
         self.book_truncation();
 
